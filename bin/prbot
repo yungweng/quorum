@@ -5,7 +5,7 @@
 # macOS Bash 3.2 compatible: no mapfile, no associative arrays, no ${var,,}.
 set -uo pipefail
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 
 PLIST_LABEL="io.github.prbot"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
@@ -43,8 +43,10 @@ CONFIG_FILE="${PRBOT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/prbot/config}"
 ORGS=""                  # optional allowlist, space separated: "acme-inc myorg"
 REPOS=""                 # optional allowlist, space separated: "acme-inc/api"
 EXCLUDE_REPOS=""         # space separated owner/repo entries to never review
+INCLUDE_TEAMS=1          # also pick up requests aimed at teams you belong to
+TEAMS=""                 # empty means: discover your teams automatically
 DEBOUNCE_MINUTES=10      # leave a PR alone until it has been quiet this long
-MAX_REVIEWS_PER_DAY=3    # per PR, guards against push-heavy branches
+MAX_REVIEWS_PER_DAY=12   # per PR runaway guard, not a normal brake
 MAX_PER_TICK=1           # reviews started per poll; each spawns several Codex runs
 SKIP_DRAFTS=1
 SKIP_FORKS=1             # fork PRs run untrusted code locally, off by default
@@ -222,20 +224,42 @@ cmd_poll() {
   fi
   trap lock_release EXIT INT TERM
 
-  local search_args prs count
-  search_args="--review-requested=@me --state=open --limit=100"
+  local base_args raw more prs count fields
+  base_args="--state=open --limit=100"
+  fields="number,repository,updatedAt,title"
   # Scope filters are optional. Without them every review request anywhere is
   # picked up, which is the point of the default configuration.
   local o r
-  for o in $ORGS;  do search_args="$search_args --owner=$o"; done
-  for r in $REPOS; do search_args="$search_args --repo=$r"; done
+  for o in $ORGS;  do base_args="$base_args --owner=$o"; done
+  for r in $REPOS; do base_args="$base_args --repo=$r"; done
 
   # shellcheck disable=SC2086
-  prs=$("$GH_BIN" search prs $search_args \
-        --json number,repository,updatedAt,title 2>>"$LOG_FILE")
-  if [ -z "$prs" ]; then
+  raw=$("$GH_BIN" search prs --review-requested=@me $base_args \
+        --json "$fields" 2>>"$LOG_FILE")
+  if [ -z "$raw" ]; then
     log "search returned nothing (network or auth problem?)"; exit 1
   fi
+
+  # review-requested: does not match requests aimed at a team you belong to,
+  # despite what the GitHub docs suggest. Those need team-review-requested:.
+  if [ "$INCLUDE_TEAMS" = "1" ]; then
+    local teams t
+    teams="$TEAMS"
+    if [ -z "$teams" ]; then
+      teams=$("$GH_BIN" api user/teams --paginate \
+              --jq '.[] | "\(.organization.login)/\(.slug)"' 2>>"$LOG_FILE" | tr '\n' ' ')
+    fi
+    for t in $teams; do
+      # shellcheck disable=SC2086
+      more=$("$GH_BIN" search prs "team-review-requested:$t" $base_args \
+             --json "$fields" 2>>"$LOG_FILE")
+      [ -n "$more" ] && raw="$raw$more"
+    done
+  fi
+
+  # Slurp the concatenated result arrays into one deduplicated list.
+  prs=$(printf '%s' "$raw" | "$JQ_BIN" -s \
+        'add | unique_by(.repository.nameWithOwner + "#" + (.number|tostring))')
 
   count=$(printf '%s' "$prs" | "$JQ_BIN" 'length')
   if [ "$count" = "0" ]; then log "no open review requests"; exit 0; fi
@@ -347,6 +371,11 @@ cmd_status() {
     printf 'run:    idle\n'
   fi
   printf 'scope:  %s\n' "${ORGS:-${REPOS:-all repos you are asked to review}}"
+  if [ "$INCLUDE_TEAMS" = "1" ]; then
+    printf 'teams:  %s\n' "${TEAMS:-auto-discovered}"
+  else
+    printf 'teams:  ignored, direct requests only\n'
+  fi
   printf 'limits: debounce %smin, max %s reviews/PR/day, %s per tick\n' \
     "$DEBOUNCE_MINUTES" "$MAX_REVIEWS_PER_DAY" "$MAX_PER_TICK"
   printf 'config: %s\n\n' "$CONFIG_FILE"
@@ -409,9 +438,14 @@ ORGS=""                  # e.g. "acme-inc myorg"
 REPOS=""                 # e.g. "acme-inc/api acme-inc/web"
 EXCLUDE_REPOS=""         # e.g. "acme-inc/legacy"
 
+# Requests aimed at a team you belong to. GitHub's review-requested: qualifier
+# does not match those, so they are searched separately.
+INCLUDE_TEAMS=1
+TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
+
 # Pacing. Each review spawns several Codex runs, so these matter for cost.
 DEBOUNCE_MINUTES=10
-MAX_REVIEWS_PER_DAY=3
+MAX_REVIEWS_PER_DAY=12
 MAX_PER_TICK=1
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 

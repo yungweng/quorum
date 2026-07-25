@@ -74,6 +74,10 @@ Each poll cycle:
 
 1. `gh search prs --review-requested=@me --state=open` across every org and
    repo you have access to, narrowed by `ORGS` / `REPOS` if you set them.
+   GitHub's `review-requested:` qualifier only matches requests aimed at you
+   personally, so prbot additionally searches `team-review-requested:` for
+   every team you belong to and merges the results. Being an *assignee* on a
+   PR is not a trigger, only a pending review request is.
 2. Skips PRs updated within the last `DEBOUNCE_MINUTES`, so a review does not
    start in the middle of a push series.
 3. Fetches the head SHA, draft flag, fork flag, and author for each candidate.
@@ -112,9 +116,13 @@ ORGS=""                  # e.g. "acme-inc myorg"
 REPOS=""                 # e.g. "acme-inc/api acme-inc/web"
 EXCLUDE_REPOS=""         # e.g. "acme-inc/legacy"
 
+# Requests aimed at a team you belong to are searched separately.
+INCLUDE_TEAMS=1
+TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
+
 # Pacing. Each review spawns several Codex runs, so these matter for cost.
 DEBOUNCE_MINUTES=10
-MAX_REVIEWS_PER_DAY=3
+MAX_REVIEWS_PER_DAY=12
 MAX_PER_TICK=1
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 
@@ -141,10 +149,13 @@ cautious way to start until you trust the output.
 Read this before turning it on.
 
 - **Cost.** One review is several Codex reviewer passes plus an aggregator, and
-  it fires again on every new head SHA. `DEBOUNCE_MINUTES` and
-  `MAX_REVIEWS_PER_DAY` are the two knobs that keep a push-heavy branch from
-  burning your budget. Lower `-n` through `REVIEW_ARGS` if you want cheaper
-  runs, for example `REVIEW_ARGS="-n 3"`.
+  it fires again on every new head SHA. `DEBOUNCE_MINUTES` is the real brake:
+  a PR has to be quiet before anything starts, so a burst of pushes collapses
+  into one review. `MAX_REVIEWS_PER_DAY` is only a runaway guard, set high on
+  purpose. Note that it deliberately drops the *newest* state once the cap is
+  hit, which is why it should not be tuned down to a small number. Lower `-n`
+  through `REVIEW_ARGS` if you want cheaper runs, for example
+  `REVIEW_ARGS="-n 3"`.
 - **Automatic posting.** By default the comment goes to the PR without you
   reading it first. Your name is on it. Use `REVIEW_ARGS="--dry-run"` while you
   build trust.
