@@ -5,7 +5,7 @@
 # macOS Bash 3.2 compatible: no mapfile, no associative arrays, no ${var,,}.
 set -uo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 PLIST_LABEL="io.github.prbot"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
@@ -45,8 +45,7 @@ REPOS=""                 # optional allowlist, space separated: "acme-inc/api"
 EXCLUDE_REPOS=""         # space separated owner/repo entries to never review
 INCLUDE_TEAMS=1          # also pick up requests aimed at teams you belong to
 TEAMS=""                 # empty means: discover your teams automatically
-DEBOUNCE_MINUTES=10      # leave a PR alone until it has been quiet this long
-MAX_REVIEWS_PER_DAY=12   # per PR runaway guard, not a normal brake
+MAX_RETRIES=3            # attempts per review request before giving up on it
 MAX_PER_TICK=1           # reviews started per poll; each spawns several Codex runs
 SKIP_DRAFTS=1
 SKIP_FORKS=1             # fork PRs run untrusted code locally, off by default
@@ -139,14 +138,6 @@ lock_acquire() {
 
 lock_release() { rm -rf "$LOCK_DIR"; }
 
-iso_to_epoch() {
-  if [ "$(uname)" = "Darwin" ]; then
-    date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null
-  else
-    date -u -d "$1" +%s 2>/dev/null
-  fi
-}
-
 # word-in-list test, Bash 3.2 friendly. Callers pass the list unquoted on
 # purpose so the shell splits it into words.
 in_list() {
@@ -154,6 +145,42 @@ in_list() {
   shift
   for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
   return 1
+}
+
+# Timestamp of the most recent review request aimed at you, either directly or
+# at one of your teams. This is the trigger: a request that prbot has not acted
+# on yet means review now. Re-requesting a review produces a fresh event here,
+# which is what lets the same PR be reviewed again on purpose.
+# $1 owner/repo, $2 number, $3 space separated org/slug teams
+latest_request_at() {
+  local nwo="$1" num="$2" all_teams="$3" owner slugs t
+  owner="${nwo%%/*}"
+  # Teams are scoped to an org, so only this repo's org can be the requester.
+  slugs=" "
+  for t in $all_teams; do
+    case "$t" in "$owner"/*) slugs="$slugs${t#*/} " ;; esac
+  done
+  local body
+  body=$("$GH_BIN" api "repos/$nwo/issues/$num/timeline" --paginate 2>>"$LOG_FILE") || return 1
+
+  # gh api --jq cannot take jq variables, so pipe through jq proper. --paginate
+  # emits one array per page, which a bare .[] walks without slurping.
+  # Reviewer and team are bound to variables first: inside contains() the input
+  # is $slugs rather than the event, and indexing a string throws there.
+  # shellcheck disable=SC2016
+  printf '%s' "$body" | "$JQ_BIN" -r --arg me "$MY_LOGIN" --arg slugs "$slugs" '
+        .[]?
+        | select(type == "object")
+        | select(.event == "review_requested")
+        | . as $e
+        | (if ($e.requested_reviewer | type) == "object"
+             then $e.requested_reviewer.login else "" end) as $who
+        | (if ($e.requested_team | type) == "object"
+             then $e.requested_team.slug else "" end) as $team
+        | select($who == $me
+                 or ($team != "" and ($slugs | contains(" " + $team + " "))))
+        | $e.created_at' 2>/dev/null \
+    | sort | tail -1
 }
 
 ensure_clone() {
@@ -170,8 +197,8 @@ ensure_clone() {
 
 # --- the actual review ------------------------------------------------------
 review_pr() {
-  local nwo="$1" num="$2" sha="$3" title="$4"
-  local key="$nwo#$num" dir rc runlog owner name rundir findings stamp
+  local nwo="$1" num="$2" sha="$3" title="$4" req_at="${5:-}"
+  local key="$nwo#$num" dir rc runlog owner name rundir findings stamp fails
   owner="${nwo%%/*}"; name="${nwo#*/}"
 
   dir=$(ensure_clone "$nwo") || { log "$key: clone/fetch failed"; return 1; }
@@ -199,15 +226,18 @@ review_pr() {
     q=$("$JQ_BIN" -r '.questions // 0' "$findings")
     url=$("$JQ_BIN" -r '.comment_url // "not posted"' "$findings")
     log "$key: done. blockers=$b critical=$c suggestions=$s questions=$q -> $url"
+    # Recording req_at is what marks this request as handled.
     state_set "$key" sha "$sha" status "ok" at "$(date '+%Y-%m-%dT%H:%M:%S')" \
-      comment_url "$url" blockers "$b" critical "$c" runlog "$runlog"
+      comment_url "$url" blockers "$b" critical "$c" runlog "$runlog" \
+      req_at "$req_at" fails "0"
     notify "PR review done: $name #$num" "$b blockers, $c critical, $s suggestions"
   else
     log "$key: FAILED (exit $rc), log: $runlog"
-    # The sha is recorded on failure too, otherwise a permanently broken PR
-    # would start several Codex runs every single poll. Retry with: prbot run
+    # req_at stays unrecorded on purpose, so the next tick retries until
+    # MAX_RETRIES is reached.
+    fails=$(state_get "$key" fails)
     state_set "$key" sha "$sha" status "failed" at "$(date '+%Y-%m-%dT%H:%M:%S')" \
-      runlog "$runlog"
+      runlog "$runlog" fails "$(( ${fails:-0} + 1 ))"
     notify "PR review failed: $name #$num" "exit $rc, see prbot logs"
   fi
   return $rc
@@ -224,9 +254,21 @@ cmd_poll() {
   fi
   trap lock_release EXIT INT TERM
 
-  local base_args raw more prs count fields
+  local base_args raw more prs count fields teams t
   base_args="--state=open --limit=100"
-  fields="number,repository,updatedAt,title"
+  fields="number,repository,title"
+
+  MY_LOGIN=$("$GH_BIN" api user --jq .login 2>>"$LOG_FILE")
+  [ -n "$MY_LOGIN" ] || { log "could not determine your GitHub login"; exit 1; }
+
+  teams=""
+  if [ "$INCLUDE_TEAMS" = "1" ]; then
+    teams="$TEAMS"
+    if [ -z "$teams" ]; then
+      teams=$("$GH_BIN" api user/teams --paginate \
+              --jq '.[] | "\(.organization.login)/\(.slug)"' 2>>"$LOG_FILE" | tr '\n' ' ')
+    fi
+  fi
   # Scope filters are optional. Without them every review request anywhere is
   # picked up, which is the point of the default configuration.
   local o r
@@ -242,20 +284,12 @@ cmd_poll() {
 
   # review-requested: does not match requests aimed at a team you belong to,
   # despite what the GitHub docs suggest. Those need team-review-requested:.
-  if [ "$INCLUDE_TEAMS" = "1" ]; then
-    local teams t
-    teams="$TEAMS"
-    if [ -z "$teams" ]; then
-      teams=$("$GH_BIN" api user/teams --paginate \
-              --jq '.[] | "\(.organization.login)/\(.slug)"' 2>>"$LOG_FILE" | tr '\n' ' ')
-    fi
-    for t in $teams; do
-      # shellcheck disable=SC2086
-      more=$("$GH_BIN" search prs "team-review-requested:$t" $base_args \
-             --json "$fields" 2>>"$LOG_FILE")
-      [ -n "$more" ] && raw="$raw$more"
-    done
-  fi
+  for t in $teams; do
+    # shellcheck disable=SC2086
+    more=$("$GH_BIN" search prs "team-review-requested:$t" $base_args \
+           --json "$fields" 2>>"$LOG_FILE")
+    [ -n "$more" ] && raw="$raw$more"
+  done
 
   # Slurp the concatenated result arrays into one deduplicated list.
   prs=$(printf '%s' "$raw" | "$JQ_BIN" -s \
@@ -265,12 +299,11 @@ cmd_poll() {
   if [ "$count" = "0" ]; then log "no open review requests"; exit 0; fi
   log "$count open review request(s)"
 
-  local now today started
-  now=$(date +%s); today=$(date '+%Y-%m-%d'); started=0
+  local started=0
 
   # Tab separated so Bash 3.2 gets by without mapfile. The loop runs in this
   # shell (process substitution, not a pipe) so `started` survives iterations.
-  while IFS=$'\t' read -r nwo num updated title; do
+  while IFS=$'\t' read -r nwo num title; do
     [ -n "$nwo" ] || continue
     [ "$started" -ge "$MAX_PER_TICK" ] && break
     key="$nwo#$num"
@@ -280,14 +313,13 @@ cmd_poll() {
       log "$key: excluded by config"; continue
     fi
 
-    # 1. Debounce, so we do not review in the middle of a push series.
-    upd_epoch=$(iso_to_epoch "$updated")
-    if [ -n "$upd_epoch" ]; then
-      age=$(( (now - upd_epoch) / 60 ))
-      if [ "$age" -lt "$DEBOUNCE_MINUTES" ]; then
-        log "$key: updated ${age}m ago, waiting for debounce ($DEBOUNCE_MINUTES min)"
-        continue
-      fi
+    # 1. The trigger: has this review request already been acted on?
+    req_at=$(latest_request_at "$nwo" "$num" "$teams")
+    if [ -z "$req_at" ]; then
+      log "$key: no review request event found for you, skipped"; continue
+    fi
+    if [ "$(state_get "$key" req_at)" = "$req_at" ]; then
+      continue
     fi
 
     # 2. Details. The search API returns neither head sha nor fork status.
@@ -314,22 +346,21 @@ cmd_poll() {
       log "$key: bot author, skipped"; continue
     fi
 
-    # 3. Already reviewed this exact head sha?
-    seen=$(state_get "$key" sha)
-    [ "$seen" = "$sha" ] && continue
-
-    # 4. Per-PR daily cap.
-    day=$(state_get "$key" day); cnt=$(state_get "$key" count)
-    if [ "$day" != "$today" ]; then day="$today"; cnt=0; fi
-    if [ "${cnt:-0}" -ge "$MAX_REVIEWS_PER_DAY" ]; then
-      log "$key: daily cap of $MAX_REVIEWS_PER_DAY reached, skipped"; continue
+    # 3. Retry guard. A failed run does not record the request, so the next
+    #    tick picks it up again. This bounds how often that can repeat, which
+    #    matters most when the author pushes mid-review and pr-codex-review
+    #    refuses to post against a drifted head.
+    fails=$(state_get "$key" fails)
+    if [ "${fails:-0}" -ge "$MAX_RETRIES" ]; then
+      log "$key: giving up after ${fails} failed attempts, retry with: prbot run $key"
+      state_set "$key" req_at "$req_at" status "gave up"
+      continue
     fi
-    state_set "$key" day "$day" count "$(( ${cnt:-0} + 1 ))"
 
-    review_pr "$nwo" "$num" "$sha" "$title"
+    review_pr "$nwo" "$num" "$sha" "$title" "$req_at"
     started=$(( started + 1 ))
   done < <(printf '%s' "$prs" | "$JQ_BIN" -r \
-      '.[] | [.repository.nameWithOwner, (.number|tostring), .updatedAt, .title] | @tsv')
+      '.[] | [.repository.nameWithOwner, (.number|tostring), .title] | @tsv')
 
   exit 0
 }
@@ -376,8 +407,8 @@ cmd_status() {
   else
     printf 'teams:  ignored, direct requests only\n'
   fi
-  printf 'limits: debounce %smin, max %s reviews/PR/day, %s per tick\n' \
-    "$DEBOUNCE_MINUTES" "$MAX_REVIEWS_PER_DAY" "$MAX_PER_TICK"
+  printf 'limits: %s attempts per request, %s review per tick\n' \
+    "$MAX_RETRIES" "$MAX_PER_TICK"
   printf 'config: %s\n\n' "$CONFIG_FILE"
   printf 'recent reviews:\n'
   "$JQ_BIN" -r '.prs | to_entries | map(select(.value.at)) | sort_by(.value.at) | reverse
@@ -443,9 +474,9 @@ EXCLUDE_REPOS=""         # e.g. "acme-inc/legacy"
 INCLUDE_TEAMS=1
 TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
 
-# Pacing. Each review spawns several Codex runs, so these matter for cost.
-DEBOUNCE_MINUTES=10
-MAX_REVIEWS_PER_DAY=12
+# A review starts as soon as a new request for you appears, so there is no
+# pacing to configure. These only bound failure and concurrency.
+MAX_RETRIES=3
 MAX_PER_TICK=1
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 

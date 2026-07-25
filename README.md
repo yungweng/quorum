@@ -78,16 +78,21 @@ Each poll cycle:
    personally, so prbot additionally searches `team-review-requested:` for
    every team you belong to and merges the results. Being an *assignee* on a
    PR is not a trigger, only a pending review request is.
-2. Skips PRs updated within the last `DEBOUNCE_MINUTES`, so a review does not
-   start in the middle of a push series.
+2. Reads each PR's timeline and takes the timestamp of the most recent
+   `review_requested` event aimed at you or one of your teams. That timestamp
+   is the trigger. If prbot already handled it, the PR is skipped; otherwise
+   the review starts right away.
 3. Fetches the head SHA, draft flag, fork flag, and author for each candidate.
 4. Skips drafts, fork PRs, and bot authors by default.
-5. Skips anything whose head SHA was already reviewed. A new push means a new
-   SHA, which means a new review.
-6. Enforces `MAX_REVIEWS_PER_DAY` per PR.
-7. Clones or fetches the repo under `~/.cache/prbot/repos/` and runs
+5. Clones or fetches the repo under `~/.cache/prbot/repos/` and runs
    `pr-codex-review` there.
-8. Reads `findings.json`, records the result, sends a notification.
+6. Reads `findings.json`, records the result, sends a notification.
+
+One request means one review. Pushing more commits afterwards does **not**
+trigger another one, because nothing new was requested. To get a fresh review
+of a newer state, remove the review request and add it again, or use the
+re-request button once a review has been submitted. That writes a new
+`review_requested` event, which prbot treats as a new trigger.
 
 Only `MAX_PER_TICK` reviews start per cycle (default 1), and a lock directory
 makes sure two reviews never run at the same time. A review that is still
@@ -120,9 +125,9 @@ EXCLUDE_REPOS=""         # e.g. "acme-inc/legacy"
 INCLUDE_TEAMS=1
 TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
 
-# Pacing. Each review spawns several Codex runs, so these matter for cost.
-DEBOUNCE_MINUTES=10
-MAX_REVIEWS_PER_DAY=12
+# A review starts as soon as a new request for you appears, so there is no
+# pacing to configure. These only bound failure and concurrency.
+MAX_RETRIES=3
 MAX_PER_TICK=1
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 
@@ -148,14 +153,10 @@ cautious way to start until you trust the output.
 
 Read this before turning it on.
 
-- **Cost.** One review is several Codex reviewer passes plus an aggregator, and
-  it fires again on every new head SHA. `DEBOUNCE_MINUTES` is the real brake:
-  a PR has to be quiet before anything starts, so a burst of pushes collapses
-  into one review. `MAX_REVIEWS_PER_DAY` is only a runaway guard, set high on
-  purpose. Note that it deliberately drops the *newest* state once the cap is
-  hit, which is why it should not be tuned down to a small number. Lower `-n`
-  through `REVIEW_ARGS` if you want cheaper runs, for example
-  `REVIEW_ARGS="-n 3"`.
+- **Cost.** One review is several Codex reviewer passes plus an aggregator.
+  Because the trigger is the request rather than the code, a PR costs one
+  review no matter how many times it is pushed to. Lower `-n` through
+  `REVIEW_ARGS` if you want cheaper runs, for example `REVIEW_ARGS="-n 3"`.
 - **Automatic posting.** By default the comment goes to the PR without you
   reading it first. Your name is on it. Use `REVIEW_ARGS="--dry-run"` while you
   build trust.
@@ -191,14 +192,15 @@ keychain, which a user agent can only reach while your session is unlocked. If
 that is a problem, put `GH_TOKEN` into a file with mode 600 and source it from
 the config.
 
-**A PR is stuck after a failed review.** Failures record the head SHA too, so a
-broken PR does not restart several Codex runs every five minutes. Retry
-manually with `prbot run owner/repo#123`.
+**A PR is stuck after failed reviews.** A failed run leaves the request
+unrecorded so the next poll retries it, up to `MAX_RETRIES` attempts. After
+that prbot marks the request as given up and moves on. Retry manually with
+`prbot run owner/repo#123`.
 
-**A PR gets reviewed a second time without a new push.** The head SHA is only
-recorded once a run finishes. If a run is killed halfway, by a reboot or by
-you, the next poll starts it again. `MAX_REVIEWS_PER_DAY` caps how often that
-can happen.
+**The review was posted against outdated code.** The review starts as soon as
+the request appears. If the author keeps pushing, `pr-codex-review` refuses to
+post against a drifted head and the run fails, which the retry then handles on
+the next poll.
 
 ## License
 
