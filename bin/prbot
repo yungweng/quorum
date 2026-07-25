@@ -5,7 +5,7 @@
 # macOS Bash 3.2 compatible: no mapfile, no associative arrays, no ${var,,}.
 set -uo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 PLIST_LABEL="io.github.prbot"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
@@ -102,12 +102,15 @@ state_init() {
 }
 
 state_get() {
+  # $k and $f are jq variables, not shell ones, so single quotes are correct.
+  # shellcheck disable=SC2016
   "$JQ_BIN" -r --arg k "$1" --arg f "$2" '.prs[$k][$f] // empty' "$STATE_FILE" 2>/dev/null
 }
 
 state_set() {
   local key="$1"; shift
   local tmp="$STATE_FILE.tmp.$$"
+  # shellcheck disable=SC2016
   local filter='.prs[$k] = ((.prs[$k] // {}))'
   local args=(--arg k "$key")
   while [ $# -gt 1 ]; do
