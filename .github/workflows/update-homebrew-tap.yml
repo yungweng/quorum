@@ -1,0 +1,41 @@
+name: Update Homebrew tap
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  bump-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute release tarball checksum
+        id: checksum
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          curl -sSfL "$URL" -o release.tar.gz
+          echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Check out tap
+        uses: actions/checkout@v4
+        with:
+          repository: yungweng/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Update formula
+        run: |
+          FORMULA=tap/Formula/prbot.rb
+          sed -i \
+            -e 's|^  url ".*"$|  url "${{ steps.checksum.outputs.url }}"|' \
+            -e 's|^  sha256 ".*"$|  sha256 "${{ steps.checksum.outputs.sha256 }}"|' \
+            "$FORMULA"
+          if git -C tap diff --quiet; then
+            echo "Formula already up to date, nothing to push."
+            exit 0
+          fi
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C tap commit -am "prbot ${{ github.event.release.tag_name }}"
+          git -C tap push

@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n bin/prbot
+      - name: Shellcheck
+        run: shellcheck bin/prbot
+      - name: Help renders
+        run: bash bin/prbot --help
+      - name: Version flag
+        run: bash bin/prbot --version

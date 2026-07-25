@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# prbot - watches GitHub for review requests assigned to you and runs
+# pr-codex-review on each one automatically.
+#
+# macOS Bash 3.2 compatible: no mapfile, no associative arrays, no ${var,,}.
+set -uo pipefail
+
+VERSION="0.1.0"
+
+PLIST_LABEL="io.github.prbot"
+PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+
+# --- tool discovery ---------------------------------------------------------
+# launchd starts jobs with a minimal environment and never reads the user's
+# shell profile. So we widen PATH with the usual install locations first, then
+# resolve every tool to an absolute path. `prbot install` bakes the resulting
+# PATH into the plist, which is what makes the agent work outside a terminal.
+bootstrap_path() {
+  local extra prefix
+  extra="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin"
+  extra="$extra:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.cargo/bin"
+  extra="$extra:/opt/homebrew/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  # npm installs codex and friends into its global prefix, which is often
+  # somewhere non-standard like ~/.npm-global.
+  if command -v npm >/dev/null 2>&1; then
+    prefix=$(npm prefix -g 2>/dev/null)
+    [ -n "$prefix" ] && extra="$prefix/bin:$extra"
+  fi
+  export PATH="$PATH:$extra"
+}
+bootstrap_path
+
+GH_BIN=$(command -v gh || true)
+JQ_BIN=$(command -v jq || true)
+GIT_BIN=$(command -v git || true)
+REVIEW_BIN=$(command -v pr-codex-review || true)
+
+# --- configuration ----------------------------------------------------------
+CONFIG_FILE="${PRBOT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/prbot/config}"
+
+# Empty ORGS means: every review request assigned to you, in any org or repo,
+# including personal repositories.
+ORGS=""                  # optional allowlist, space separated: "acme-inc myorg"
+REPOS=""                 # optional allowlist, space separated: "acme-inc/api"
+EXCLUDE_REPOS=""         # space separated owner/repo entries to never review
+DEBOUNCE_MINUTES=10      # leave a PR alone until it has been quiet this long
+MAX_REVIEWS_PER_DAY=3    # per PR, guards against push-heavy branches
+MAX_PER_TICK=1           # reviews started per poll; each spawns several Codex runs
+SKIP_DRAFTS=1
+SKIP_FORKS=1             # fork PRs run untrusted code locally, off by default
+SKIP_BOTS=1
+REVIEW_ARGS=""           # extra flags for pr-codex-review, e.g. "--dry-run -n 4"
+NOTIFY=1                 # macOS notification on start/finish
+POLL_INTERVAL=300        # seconds, used by `prbot install`
+
+# shellcheck source=/dev/null
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+STATE_DIR="${PRBOT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/prbot}"
+STATE_FILE="$STATE_DIR/state.json"
+LOG_FILE="$STATE_DIR/prbot.log"
+LOCK_DIR="$STATE_DIR/lock"
+RUN_LOG_DIR="$STATE_DIR/runs"
+CLONE_DIR="${PRBOT_CLONE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/prbot/repos}"
+REVIEW_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/pr-codex-review"
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# --- helpers ----------------------------------------------------------------
+log() {
+  mkdir -p "$STATE_DIR"
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG_FILE"
+  [ -t 1 ] && printf '%s\n' "$*"
+  return 0
+}
+
+die() { log "ERROR: $*"; exit 1; }
+
+notify() {
+  [ "$NOTIFY" = "1" ] || return 0
+  [ "$(uname)" = "Darwin" ] || return 0
+  local title msg
+  title=$(printf '%s' "$1" | tr '"' "'")
+  msg=$(printf '%s' "$2" | tr '"' "'")
+  osascript -e "display notification \"$msg\" with title \"$title\"" >/dev/null 2>&1
+  return 0
+}
+
+require_tools() {
+  local missing=""
+  [ -x "$GH_BIN" ]     || missing="$missing gh"
+  [ -x "$JQ_BIN" ]     || missing="$missing jq"
+  [ -x "$GIT_BIN" ]    || missing="$missing git"
+  [ -x "$REVIEW_BIN" ] || missing="$missing pr-codex-review"
+  [ -z "$missing" ] || die "missing tools:$missing (PATH=$PATH)"
+  "$GH_BIN" auth status >/dev/null 2>&1 || die "gh is not authenticated, run: gh auth login"
+}
+
+state_init() {
+  mkdir -p "$STATE_DIR" "$CLONE_DIR" "$RUN_LOG_DIR"
+  [ -f "$STATE_FILE" ] || printf '{"schema":1,"prs":{}}\n' >"$STATE_FILE"
+}
+
+state_get() {
+  "$JQ_BIN" -r --arg k "$1" --arg f "$2" '.prs[$k][$f] // empty' "$STATE_FILE" 2>/dev/null
+}
+
+state_set() {
+  local key="$1"; shift
+  local tmp="$STATE_FILE.tmp.$$"
+  local filter='.prs[$k] = ((.prs[$k] // {}))'
+  local args=(--arg k "$key")
+  while [ $# -gt 1 ]; do
+    args+=(--arg "f_$1" "$1" --arg "v_$1" "$2")
+    filter="$filter | .prs[\$k][\$f_$1] = \$v_$1"
+    shift 2
+  done
+  "$JQ_BIN" "${args[@]}" "$filter" "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+lock_acquire() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"; return 0
+  fi
+  local pid; pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  log "removed stale lock from pid ${pid:-?}"
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" 2>/dev/null || return 1
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+lock_release() { rm -rf "$LOCK_DIR"; }
+
+iso_to_epoch() {
+  if [ "$(uname)" = "Darwin" ]; then
+    date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null
+  else
+    date -u -d "$1" +%s 2>/dev/null
+  fi
+}
+
+# word-in-list test, Bash 3.2 friendly. Callers pass the list unquoted on
+# purpose so the shell splits it into words.
+in_list() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
+  return 1
+}
+
+ensure_clone() {
+  local nwo="$1" dir
+  dir="$CLONE_DIR/${nwo%%/*}/${nwo#*/}"
+  if [ -d "$dir/.git" ]; then
+    "$GIT_BIN" -C "$dir" fetch --prune --quiet origin >/dev/null 2>&1
+  else
+    mkdir -p "$(dirname "$dir")"
+    "$GH_BIN" repo clone "$nwo" "$dir" -- --quiet >/dev/null 2>&1 || return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+# --- the actual review ------------------------------------------------------
+review_pr() {
+  local nwo="$1" num="$2" sha="$3" title="$4"
+  local key="$nwo#$num" dir rc runlog owner name rundir findings stamp
+  owner="${nwo%%/*}"; name="${nwo#*/}"
+
+  dir=$(ensure_clone "$nwo") || { log "$key: clone/fetch failed"; return 1; }
+
+  stamp=$(date '+%Y%m%d-%H%M%S')
+  runlog="$RUN_LOG_DIR/${owner}-${name}-pr-${num}-${stamp}.log"
+  log "$key: starting review of $sha ($title)"
+  notify "PR review started" "$name #$num"
+
+  # REVIEW_ARGS is a user-supplied flag string and must word-split.
+  # shellcheck disable=SC2086
+  ( cd "$dir" && "$REVIEW_BIN" "https://github.com/$nwo/pull/$num" \
+      --no-notify $REVIEW_ARGS ) >"$runlog" 2>&1
+  rc=$?
+
+  # shellcheck disable=SC2012
+  rundir=$(ls -td "$REVIEW_CACHE/${owner}-${name}-pr-${num}-"* 2>/dev/null | head -1)
+  findings="$rundir/output/findings.json"
+
+  if [ $rc -eq 0 ] && [ -f "$findings" ]; then
+    local b c s q url
+    b=$("$JQ_BIN" -r '.blockers // 0' "$findings")
+    c=$("$JQ_BIN" -r '.critical // 0' "$findings")
+    s=$("$JQ_BIN" -r '.suggestions // 0' "$findings")
+    q=$("$JQ_BIN" -r '.questions // 0' "$findings")
+    url=$("$JQ_BIN" -r '.comment_url // "not posted"' "$findings")
+    log "$key: done. blockers=$b critical=$c suggestions=$s questions=$q -> $url"
+    state_set "$key" sha "$sha" status "ok" at "$(date '+%Y-%m-%dT%H:%M:%S')" \
+      comment_url "$url" blockers "$b" critical "$c" runlog "$runlog"
+    notify "PR review done: $name #$num" "$b blockers, $c critical, $s suggestions"
+  else
+    log "$key: FAILED (exit $rc), log: $runlog"
+    # The sha is recorded on failure too, otherwise a permanently broken PR
+    # would start several Codex runs every single poll. Retry with: prbot run
+    state_set "$key" sha "$sha" status "failed" at "$(date '+%Y-%m-%dT%H:%M:%S')" \
+      runlog "$runlog"
+    notify "PR review failed: $name #$num" "exit $rc, see prbot logs"
+  fi
+  return $rc
+}
+
+# --- poll -------------------------------------------------------------------
+cmd_poll() {
+  require_tools
+  state_init
+
+  if ! lock_acquire; then
+    log "skipped: a review is already running (pid $(cat "$LOCK_DIR/pid" 2>/dev/null))"
+    exit 0
+  fi
+  trap lock_release EXIT INT TERM
+
+  local search_args prs count
+  search_args="--review-requested=@me --state=open --limit=100"
+  # Scope filters are optional. Without them every review request anywhere is
+  # picked up, which is the point of the default configuration.
+  local o r
+  for o in $ORGS;  do search_args="$search_args --owner=$o"; done
+  for r in $REPOS; do search_args="$search_args --repo=$r"; done
+
+  # shellcheck disable=SC2086
+  prs=$("$GH_BIN" search prs $search_args \
+        --json number,repository,updatedAt,title 2>>"$LOG_FILE")
+  if [ -z "$prs" ]; then
+    log "search returned nothing (network or auth problem?)"; exit 1
+  fi
+
+  count=$(printf '%s' "$prs" | "$JQ_BIN" 'length')
+  if [ "$count" = "0" ]; then log "no open review requests"; exit 0; fi
+  log "$count open review request(s)"
+
+  local now today started
+  now=$(date +%s); today=$(date '+%Y-%m-%d'); started=0
+
+  # Tab separated so Bash 3.2 gets by without mapfile. The loop runs in this
+  # shell (process substitution, not a pipe) so `started` survives iterations.
+  while IFS=$'\t' read -r nwo num updated title; do
+    [ -n "$nwo" ] || continue
+    [ "$started" -ge "$MAX_PER_TICK" ] && break
+    key="$nwo#$num"
+
+    # shellcheck disable=SC2086
+    if [ -n "$EXCLUDE_REPOS" ] && in_list "$nwo" $EXCLUDE_REPOS; then
+      log "$key: excluded by config"; continue
+    fi
+
+    # 1. Debounce, so we do not review in the middle of a push series.
+    upd_epoch=$(iso_to_epoch "$updated")
+    if [ -n "$upd_epoch" ]; then
+      age=$(( (now - upd_epoch) / 60 ))
+      if [ "$age" -lt "$DEBOUNCE_MINUTES" ]; then
+        log "$key: updated ${age}m ago, waiting for debounce ($DEBOUNCE_MINUTES min)"
+        continue
+      fi
+    fi
+
+    # 2. Details. The search API returns neither head sha nor fork status.
+    meta=$("$GH_BIN" pr view "$num" --repo "$nwo" \
+           --json headRefOid,isDraft,isCrossRepository,author,state 2>>"$LOG_FILE")
+    [ -n "$meta" ] || { log "$key: pr view failed"; continue; }
+
+    sha=$(printf '%s'  "$meta" | "$JQ_BIN" -r '.headRefOid')
+    draft=$(printf '%s' "$meta" | "$JQ_BIN" -r '.isDraft')
+    fork=$(printf '%s'  "$meta" | "$JQ_BIN" -r '.isCrossRepository')
+    isbot=$(printf '%s' "$meta" | "$JQ_BIN" -r '.author.is_bot // false')
+    pstate=$(printf '%s' "$meta" | "$JQ_BIN" -r '.state')
+
+    [ "$pstate" = "OPEN" ] || { log "$key: state is $pstate"; continue; }
+    if [ "$SKIP_DRAFTS" = "1" ] && [ "$draft" = "true" ]; then
+      log "$key: draft, skipped"; continue
+    fi
+    # Reviewing runs the PR's code locally through direnv and codex exec.
+    # Fork PRs and bot authors stay out unless you opt in on purpose.
+    if [ "$SKIP_FORKS" = "1" ] && [ "$fork" = "true" ]; then
+      log "$key: fork PR, skipped (set SKIP_FORKS=0 to allow)"; continue
+    fi
+    if [ "$SKIP_BOTS" = "1" ] && [ "$isbot" = "true" ]; then
+      log "$key: bot author, skipped"; continue
+    fi
+
+    # 3. Already reviewed this exact head sha?
+    seen=$(state_get "$key" sha)
+    [ "$seen" = "$sha" ] && continue
+
+    # 4. Per-PR daily cap.
+    day=$(state_get "$key" day); cnt=$(state_get "$key" count)
+    if [ "$day" != "$today" ]; then day="$today"; cnt=0; fi
+    if [ "${cnt:-0}" -ge "$MAX_REVIEWS_PER_DAY" ]; then
+      log "$key: daily cap of $MAX_REVIEWS_PER_DAY reached, skipped"; continue
+    fi
+    state_set "$key" day "$day" count "$(( ${cnt:-0} + 1 ))"
+
+    review_pr "$nwo" "$num" "$sha" "$title"
+    started=$(( started + 1 ))
+  done < <(printf '%s' "$prs" | "$JQ_BIN" -r \
+      '.[] | [.repository.nameWithOwner, (.number|tostring), .updatedAt, .title] | @tsv')
+
+  exit 0
+}
+
+# --- manual trigger ---------------------------------------------------------
+cmd_run() {
+  require_tools; state_init
+  local arg="$1" nwo num meta sha title
+  case "$arg" in
+    https://github.com/*/pull/*)
+      nwo=$(printf '%s' "$arg" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')
+      num=$(printf '%s' "$arg" | sed -E 's#.*/pull/([0-9]+).*#\1#') ;;
+    */*\#*)  nwo="${arg%%#*}"; num="${arg##*#}" ;;
+    [0-9]*)  nwo=$("$GH_BIN" repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
+               || die "not inside a repo, use owner/repo#number"
+             num="$arg" ;;
+    *) die "usage: prbot run <pr-url> | <owner/repo#number> | <number>" ;;
+  esac
+  lock_acquire || die "a review is already running"
+  trap lock_release EXIT INT TERM
+  meta=$("$GH_BIN" pr view "$num" --repo "$nwo" --json headRefOid,title) || die "pr view failed"
+  sha=$(printf '%s' "$meta" | "$JQ_BIN" -r .headRefOid)
+  title=$(printf '%s' "$meta" | "$JQ_BIN" -r .title)
+  review_pr "$nwo" "$num" "$sha" "$title"
+}
+
+# --- status -----------------------------------------------------------------
+cmd_status() {
+  state_init
+  printf 'prbot %s\n' "$VERSION"
+  if launchctl list 2>/dev/null | grep -q "$PLIST_LABEL"; then
+    printf 'agent:  loaded (%s, every %ss)\n' "$PLIST_LABEL" "$POLL_INTERVAL"
+  else
+    printf 'agent:  not installed, run: prbot install\n'
+  fi
+  if [ -d "$LOCK_DIR" ]; then
+    printf 'run:    active, pid %s\n' "$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+  else
+    printf 'run:    idle\n'
+  fi
+  printf 'scope:  %s\n' "${ORGS:-${REPOS:-all repos you are asked to review}}"
+  printf 'limits: debounce %smin, max %s reviews/PR/day, %s per tick\n' \
+    "$DEBOUNCE_MINUTES" "$MAX_REVIEWS_PER_DAY" "$MAX_PER_TICK"
+  printf 'config: %s\n\n' "$CONFIG_FILE"
+  printf 'recent reviews:\n'
+  "$JQ_BIN" -r '.prs | to_entries | map(select(.value.at)) | sort_by(.value.at) | reverse
+    | .[:15][] | "  \(.key)  \(.value.at)  \(.value.status // "-")  " +
+      "B:\(.value.blockers // "-") C:\(.value.critical // "-")  \(.value.comment_url // "")"' \
+    "$STATE_FILE" 2>/dev/null
+  printf '\nlast log lines:\n'
+  tail -n 8 "$LOG_FILE" 2>/dev/null | sed 's/^/  /'
+}
+
+cmd_logs() { touch "$LOG_FILE"; tail -n "${1:-50}" -f "$LOG_FILE"; }
+
+# --- launchd ----------------------------------------------------------------
+cmd_install() {
+  require_tools; state_init
+  [ "$(uname)" = "Darwin" ] || die "install only supports macOS launchd; on Linux use a systemd timer or cron calling: prbot poll"
+  mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$CONFIG_FILE")"
+  [ -f "$CONFIG_FILE" ] || write_default_config
+
+  cat >"$PLIST_PATH" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$PLIST_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$SELF</string>
+    <string>poll</string>
+  </array>
+  <key>StartInterval</key><integer>$POLL_INTERVAL</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$STATE_DIR/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$STATE_DIR/launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$PATH</string>
+    <key>HOME</key><string>$HOME</string>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+</dict>
+</plist>
+PLIST
+  launchctl unload "$PLIST_PATH" >/dev/null 2>&1
+  launchctl load "$PLIST_PATH" || die "launchctl load failed"
+  log "agent installed: $PLIST_PATH (every ${POLL_INTERVAL}s)"
+  printf 'Installed. Config: %s\nCheck with: prbot status\n' "$CONFIG_FILE"
+}
+
+write_default_config() {
+  cat >"$CONFIG_FILE" <<'CFG'
+# prbot configuration. Shell syntax, sourced by the script.
+
+# Scope. Empty means every review request assigned to you, anywhere.
+ORGS=""                  # e.g. "acme-inc myorg"
+REPOS=""                 # e.g. "acme-inc/api acme-inc/web"
+EXCLUDE_REPOS=""         # e.g. "acme-inc/legacy"
+
+# Pacing. Each review spawns several Codex runs, so these matter for cost.
+DEBOUNCE_MINUTES=10
+MAX_REVIEWS_PER_DAY=3
+MAX_PER_TICK=1
+POLL_INTERVAL=300        # re-run `prbot install` after changing this
+
+# Safety. Fork PRs and bot PRs run foreign code locally through direnv/codex.
+SKIP_DRAFTS=1
+SKIP_FORKS=1
+SKIP_BOTS=1
+
+# Passed straight to pr-codex-review. Use "--dry-run" to review without posting.
+REVIEW_ARGS=""
+
+NOTIFY=1
+CFG
+  printf 'Wrote default config: %s\n' "$CONFIG_FILE"
+}
+
+cmd_uninstall() {
+  launchctl unload "$PLIST_PATH" >/dev/null 2>&1
+  rm -f "$PLIST_PATH"
+  log "agent removed"
+  printf 'Removed. State and config are kept.\n'
+}
+
+usage() {
+  cat <<EOF
+prbot $VERSION - run pr-codex-review automatically on PRs that request your review
+
+  prbot install         install the launchd agent (polls every ${POLL_INTERVAL}s)
+  prbot uninstall       remove the agent
+  prbot poll            run one poll cycle by hand
+  prbot run <pr>        review one PR now: url, owner/repo#number, or number
+  prbot status          agent state, recent reviews, log tail
+  prbot logs [n]        follow the log
+  prbot config          print the config path and create a default if missing
+
+Requires: gh (authenticated), jq, git, pr-codex-review.
+Config: $CONFIG_FILE
+EOF
+}
+
+case "${1:-}" in
+  poll)      shift; cmd_poll "$@" ;;
+  run)       shift; [ $# -ge 1 ] || die "missing PR argument"; cmd_run "$@" ;;
+  status)    cmd_status ;;
+  logs)      shift; cmd_logs "${1:-50}" ;;
+  install)   cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  config)    mkdir -p "$(dirname "$CONFIG_FILE")"
+             [ -f "$CONFIG_FILE" ] || write_default_config
+             printf '%s\n' "$CONFIG_FILE" ;;
+  --version) printf '%s\n' "$VERSION" ;;
+  -h|--help|"") usage ;;
+  *) usage; exit 1 ;;
+esac
