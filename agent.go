@@ -57,11 +57,14 @@ func (a *app) cmdInstall(args []string) int {
 		a.out.Printf("wrote a default config to %s\n", a.p.Config)
 	}
 
+	// Deliberately not resolved through symlinks. Homebrew installs the binary
+	// into a versioned Cellar directory and links it into bin, so resolving
+	// would pin the agent to a path that the next upgrade deletes, leaving a
+	// job that launchd still loads and that can no longer run.
 	self, err := os.Executable()
 	if err != nil {
 		return a.die("%v", err)
 	}
-	self, _ = filepath.EvalSymlinks(self)
 
 	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
 		return a.die("%v", err)
