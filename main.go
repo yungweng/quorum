@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the release. The Homebrew formula builds it in with -ldflags.
-var Version = "0.5.0"
+var Version = "0.5.1"
 
 // app carries what every command needs.
 type app struct {
