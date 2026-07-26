@@ -1,0 +1,116 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/yungweng/prbot/internal/paths"
+)
+
+// The launchd job. AbandonProcessGroup matters: reviews outlive the poll that
+// started them, and without it launchd kills the whole group when poll exits.
+const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>%s</string>
+    <string>poll</string>
+  </array>
+  <key>StartInterval</key><integer>%d</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>%s</string>
+  <key>StandardErrorPath</key><string>%s</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>%s</string>
+    <key>HOME</key><string>%s</string>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+</dict>
+</plist>
+`
+
+func (a *app) cmdInstall(args []string) int {
+	_ = args
+	if runtime.GOOS != "darwin" {
+		return a.die("install only supports macOS launchd; on Linux run `prbot poll` from a systemd timer or cron")
+	}
+	if _, err := a.findTools(); err != nil {
+		return a.die("%v", err)
+	}
+	if err := a.p.EnsureDirs(); err != nil {
+		return a.die("%v", err)
+	}
+	if _, err := os.Stat(a.p.Config); os.IsNotExist(err) {
+		if err := a.cfg.Save(a.p.Config); err != nil {
+			return a.die("could not write %s: %v", a.p.Config, err)
+		}
+		a.out.Printf("wrote a default config to %s\n", a.p.Config)
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return a.die("%v", err)
+	}
+	self, _ = filepath.EvalSymlinks(self)
+
+	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
+		return a.die("%v", err)
+	}
+	// The PATH resolved here is baked into the job, which is what makes the
+	// agent find gh, git and codex outside a login shell.
+	widenPath()
+	plist := fmt.Sprintf(plistTemplate,
+		paths.PlistLabel, self, a.cfg.PollInterval,
+		filepath.Join(a.p.StateDir, "launchd.out.log"),
+		filepath.Join(a.p.StateDir, "launchd.err.log"),
+		xmlEscape(os.Getenv("PATH")), os.Getenv("HOME"))
+	if err := os.WriteFile(a.p.Plist, []byte(plist), 0o644); err != nil {
+		return a.die("%v", err)
+	}
+
+	exec.Command("launchctl", "unload", a.p.Plist).Run()
+	if out, err := exec.Command("launchctl", "load", a.p.Plist).CombinedOutput(); err != nil {
+		return a.die("launchctl load failed: %s", strings.TrimSpace(string(out)))
+	}
+	a.log.Printf("agent installed, polling every %ds", a.cfg.PollInterval)
+
+	a.out.Printf("\n%s\n", a.out.Green("Agent installed."))
+	a.out.Printf("  polls every %d seconds and reviews what asks for you\n", a.cfg.PollInterval)
+	a.out.Printf("  config    %s\n", a.p.Config)
+	a.out.Printf("  next      %s to change scope and limits\n", a.out.Bold("prbot setup"))
+	a.out.Printf("            %s to see what it is doing\n\n", a.out.Bold("prbot"))
+	return 0
+}
+
+func (a *app) cmdUninstall(args []string) int {
+	_ = args
+	exec.Command("launchctl", "unload", a.p.Plist).Run()
+	if err := os.Remove(a.p.Plist); err != nil && !os.IsNotExist(err) {
+		return a.die("%v", err)
+	}
+	a.log.Printf("agent removed")
+	a.out.Printf("Agent removed. Config, state and cache are kept.\n")
+	return 0
+}
+
+// agentLoaded reports whether launchd knows the job.
+func (a *app) agentLoaded() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return exec.Command("launchctl", "list", paths.PlistLabel).Run() == nil
+}
+
+func xmlEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+}

@@ -19,7 +19,7 @@ notification when the review comment is posted.
 - macOS for the bundled launchd agent. On Linux everything works except
   `prbot install`; call `prbot poll` from a systemd timer or cron instead.
 - `gh`, authenticated (`gh auth login`)
-- `jq`, `git`
+- `git`
 - `pr-codex-review` on your `PATH`, which in turn needs `codex` and `direnv`
 
 ## Install
@@ -31,7 +31,7 @@ brew tap yungweng/tap
 brew install prbot
 ```
 
-That pulls in `gh`, `jq`, and `pr-codex-review` automatically. The Codex CLI
+That pulls in `gh` and `pr-codex-review` automatically. The Codex CLI
 has to be installed separately, because Homebrew ships it as a cask and
 formulas cannot depend on casks:
 
@@ -39,11 +39,11 @@ formulas cannot depend on casks:
 brew install --cask codex
 ```
 
-Or from a checkout:
+Or from a checkout, which needs Go 1.25 or newer:
 
 ```bash
 git clone https://github.com/yungweng/prbot.git
-ln -sf "$PWD/prbot/bin/prbot" ~/.local/bin/prbot
+cd prbot && go build -o ~/.local/bin/prbot .
 ```
 
 Then set it running:
@@ -56,11 +56,33 @@ prbot install
 `prbot install` writes a launchd agent that runs `prbot poll` every five
 minutes, creates a default config, and starts the agent immediately.
 
-Check that it is alive:
+Then `prbot setup` walks through scope, how much of the machine reviews may
+take, and notifications, and `prbot` on its own shows what is happening:
 
-```bash
-prbot status
+```text
+prbot 0.5.0                              agent loaded, every 5m, last poll 2m ago
+
+RUNNING  1 of 2
+  ● project-phoenix #2016      alle Kalender auf den Kit-Picker umstellen
+    6m, 4/6 reviewers done
+
+QUEUED  1
+  ○ project-phoenix #2014      Jahrgangsstufenwechsel mit reversiblen Abgängen
+    waiting for a free slot
+
+RECENT
+  ✓ project-phoenix #2002      12h ago    0 blockers, 1 critical, 0 suggestions  comment ↗
+  ✗ project-phoenix #1993      yesterday  failed after 2 attempt(s)
+
+SYSTEM
+  scope      every repo that asks you
+  budget     6 reviews at a time, 6 reviewers each, so up to 36 Codex processes
+  load       3.0
+  cache      1.9 GB of 5.0 GB
 ```
+
+The repository and number are links: in a terminal that supports them, clicking
+opens the pull request, and `comment ↗` opens the review that was posted.
 
 ## How it works
 
@@ -106,19 +128,46 @@ keep firing while reviews run, so a long review no longer blocks the queue.
 ## Commands
 
 ```text
+prbot                 what is running, queued and finished
+prbot watch           the same, redrawn as it changes
+prbot run <pr>        review one PR now: URL, owner/repo#number, or number
+prbot logs [n]        follow the log
+prbot doctor [--fix]  check the setup and report what to do about it
+prbot setup           configure scope, limits and notifications
 prbot install         install the launchd agent
 prbot uninstall       remove the agent, keep config and state
 prbot poll            run one cycle by hand
-prbot run <pr>        review one PR now: URL, owner/repo#number, or number
-prbot status          agent state, recent reviews, log tail
-prbot logs [n]        follow the log
-prbot config          print the config path, creating a default if missing
+prbot gc              trim the review cache to its budget
+prbot config          change any setting, or --path for the file location
 ```
 
 ## Configuration
 
-Config lives at `~/.config/prbot/config` (or `$XDG_CONFIG_HOME/prbot/config`)
-and is plain shell syntax.
+`prbot config` shows every setting with its current value and lets you change
+any of them; there is nothing that can only be reached by opening the file.
+`prbot setup` is the shorter guided version for a first run. Both write
+`~/.config/prbot/config` (or `$XDG_CONFIG_HOME/prbot/config`), plain
+`KEY=value` lines, the same file the shell version used.
+
+```text
+prbot config
+
+  scope            every repository that asks you
+  never review     none
+  team requests    picked up, teams discovered automatically
+  reviews at once  6
+  reviewers each   6, all in parallel, so up to 36 Codex processes at peak
+  poll interval    every 2m
+  attempts         3 before prbot gives up on a request
+  priority         nice 10, reviews give way to your own work
+  load limit       off, reviews start whenever they are requested
+  cache budget     5 GB, trimmed by prbot gc
+  ...
+
+  ↑↓ to move, enter to change, s to save, q to leave
+```
+
+`prbot config --path` prints just the file location, for scripts.
 
 ```bash
 # Scope. Empty means every review request assigned to you, anywhere.
@@ -130,10 +179,15 @@ EXCLUDE_REPOS=""         # e.g. "acme-inc/legacy"
 INCLUDE_TEAMS=1
 TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
 
-# A review starts as soon as a new request for you appears, so there is no
-# pacing to configure. These only bound failure and concurrency.
+# How much runs at once. Every review runs all REVIEWERS passes in parallel,
+# so at peak there are MAX_CONCURRENT x REVIEWERS Codex processes.
+MAX_CONCURRENT=6         # reviews running at once
+REVIEWERS=6              # reviewer passes per review
+NICE=10                  # scheduling priority for reviews, 0 disables
+LOAD_LIMIT=0             # hold reviews back above this 1-minute load, 0 disables
+CACHE_BUDGET_GB=5        # review cache is trimmed to this size, 0 disables
+
 MAX_RETRIES=3
-MAX_CONCURRENT=3         # reviews running at once; each spawns several Codex runs
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 
 # Safety
@@ -147,6 +201,31 @@ REVIEW_ARGS=""
 
 NOTIFY=1
 ```
+
+### Keeping the machine usable
+
+What actually costs a machine here is not the Codex reviewers. They spend their
+time waiting on the network: measured at around 1% CPU and 130 MB each. What
+hurt was the dependency install, once per reviewer, which is what the shared
+dependency cache in `pr-codex-review` removed.
+
+So the limits are about memory and about staying out of your way, not about
+rationing parallelism:
+
+- `MAX_CONCURRENT` is how many reviews run at once, and every one of them runs
+  all `REVIEWERS` passes in parallel. A review that trickles through its passes
+  is a review you end up waiting for, which defeats the point. `prbot` shows
+  the peak under `budget`, and `prbot doctor` warns when it would take more
+  than half of the machine's memory.
+- `NICE` lowers the priority of the whole review process tree, so reviews give
+  way to whatever you are doing yourself.
+- `LOAD_LIMIT` is off by default. Turned on, it holds new reviews back while
+  the machine is already busy; they wait in the queue and start on a later
+  poll, shown as `held back: system busy`.
+
+`prbot gc` keeps `~/.cache/pr-codex-review` inside `CACHE_BUDGET_GB`. It drops
+the worktrees of finished runs first, since they hold nearly all of the space
+and the review output stays readable without them.
 
 ### Reviewing without posting
 
@@ -176,8 +255,9 @@ Read this before turning it on.
 
 ```text
 ~/.config/prbot/config              configuration
-~/.local/state/prbot/state.json     reviewed head SHAs, results, daily counters
+~/.local/state/prbot/state.json     every PR prbot has seen, and what became of it
 ~/.local/state/prbot/prbot.log      what the agent did and why it skipped things
+~/.local/state/prbot/running/       one marker per review in flight
 ~/.local/state/prbot/runs/          stdout of each pr-codex-review invocation
 ~/.cache/prbot/repos/               managed clones
 ~/.cache/pr-codex-review/           the review outputs themselves
@@ -185,8 +265,16 @@ Read this before turning it on.
 
 ## Troubleshooting
 
-**Nothing happens.** `prbot status` shows whether the agent is loaded. Then
-read `~/.local/state/prbot/prbot.log`; every skip is logged with its reason.
+**Nothing happens.** `prbot doctor` checks the tools, the GitHub login, the
+agent and whether it has actually completed a poll recently, and prints the
+command to fix whatever it found. Every skip also carries its reason in
+`prbot` output and in `~/.local/state/prbot/prbot.log`.
+
+**A GitHub call failed.** Transient failures (TLS timeouts, a token refresh
+racing a request into an HTTP 401, search rejecting a query it accepted a
+minute earlier) are retried with a backoff and reported as retries. They are
+never recorded as a decision not to review, so a hiccup cannot make a pull
+request silently disappear from the queue.
 
 **Works in the terminal, not from launchd.** Almost always a `PATH` problem.
 launchd ignores your shell profile, so `prbot install` bakes the resolved

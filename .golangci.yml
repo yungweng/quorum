@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Writing to a terminal, closing a file that was only read, and releasing
+      # a lock the process is about to drop anyway: there is nothing useful to
+      # do with these errors, and pretending otherwise only adds noise. Every
+      # error that can actually cost a review is handled at the call site.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*os.File).Close
+        - (*os.File).Seek
+        - (*os.File).Write
+        - os.Remove
+        - os.RemoveAll
+        - os.Rename
+        - os.Setenv
+        - os.WriteFile
+        - syscall.Flock
+        - golang.org/x/term.Restore
+        - path/filepath.WalkDir
+        - (*os/exec.Cmd).Run
