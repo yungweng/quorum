@@ -94,9 +94,14 @@ of a newer state, remove the review request and add it again, or use the
 re-request button once a review has been submitted. That writes a new
 `review_requested` event, which prbot treats as a new trigger.
 
-Only `MAX_PER_TICK` reviews start per cycle (default 1), and a lock directory
-makes sure two reviews never run at the same time. A review that is still
-running when the next tick fires simply keeps the lock and the tick exits.
+Your own PRs are skipped by default (`SKIP_OWN=1`): you already watch those,
+and reviewing them just burns Codex runs. Trigger one on purpose with
+`prbot run`.
+
+Reviews run in parallel as detached background processes, up to
+`MAX_CONCURRENT` at a time (default 3). A per-PR marker under the state
+directory prevents the same PR from being reviewed twice at once, and polls
+keep firing while reviews run, so a long review no longer blocks the queue.
 
 ## Commands
 
@@ -128,13 +133,14 @@ TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
 # A review starts as soon as a new request for you appears, so there is no
 # pacing to configure. These only bound failure and concurrency.
 MAX_RETRIES=3
-MAX_PER_TICK=1
+MAX_CONCURRENT=3         # reviews running at once; each spawns several Codex runs
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 
 # Safety
 SKIP_DRAFTS=1
 SKIP_FORKS=1
 SKIP_BOTS=1
+SKIP_OWN=1               # skip PRs you authored; `prbot run` reviews them anyway
 
 # Passed straight to pr-codex-review
 REVIEW_ARGS=""

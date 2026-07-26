@@ -5,7 +5,7 @@
 # macOS Bash 3.2 compatible: no mapfile, no associative arrays, no ${var,,}.
 set -uo pipefail
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 PLIST_LABEL="io.github.prbot"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
@@ -46,10 +46,11 @@ EXCLUDE_REPOS=""         # space separated owner/repo entries to never review
 INCLUDE_TEAMS=1          # also pick up requests aimed at teams you belong to
 TEAMS=""                 # empty means: discover your teams automatically
 MAX_RETRIES=3            # attempts per review request before giving up on it
-MAX_PER_TICK=1           # reviews started per poll; each spawns several Codex runs
+MAX_CONCURRENT=3         # reviews running at once; each spawns several Codex runs
 SKIP_DRAFTS=1
 SKIP_FORKS=1             # fork PRs run untrusted code locally, off by default
 SKIP_BOTS=1
+SKIP_OWN=1               # your own PRs are skipped; review them via `prbot run`
 REVIEW_ARGS=""           # extra flags for pr-codex-review, e.g. "--dry-run -n 4"
 NOTIFY=1                 # macOS notification on start/finish
 POLL_INTERVAL=300        # seconds, used by `prbot install`
@@ -61,6 +62,8 @@ STATE_DIR="${PRBOT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/prbot}"
 STATE_FILE="$STATE_DIR/state.json"
 LOG_FILE="$STATE_DIR/prbot.log"
 LOCK_DIR="$STATE_DIR/lock"
+RUNNING_DIR="$STATE_DIR/running"
+STATE_LOCK="$STATE_DIR/state.lock"
 RUN_LOG_DIR="$STATE_DIR/runs"
 CLONE_DIR="${PRBOT_CLONE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/prbot/repos}"
 REVIEW_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/pr-codex-review"
@@ -98,7 +101,7 @@ require_tools() {
 }
 
 state_init() {
-  mkdir -p "$STATE_DIR" "$CLONE_DIR" "$RUN_LOG_DIR"
+  mkdir -p "$STATE_DIR" "$CLONE_DIR" "$RUN_LOG_DIR" "$RUNNING_DIR"
   [ -f "$STATE_FILE" ] || printf '{"schema":1,"prs":{}}\n' >"$STATE_FILE"
 }
 
@@ -107,6 +110,19 @@ state_get() {
   # shellcheck disable=SC2016
   "$JQ_BIN" -r --arg k "$1" --arg f "$2" '.prs[$k][$f] // empty' "$STATE_FILE" 2>/dev/null
 }
+
+# Reviews run concurrently and all write state.json, so writes go through a
+# short mkdir spin-lock. A crashed writer leaves the lock at most 10s.
+state_lock() {
+  local i=0
+  while ! mkdir "$STATE_LOCK" 2>/dev/null; do
+    i=$(( i + 1 ))
+    [ "$i" -ge 100 ] && { rm -rf "$STATE_LOCK"; continue; }
+    sleep 0.1
+  done
+}
+
+state_unlock() { rm -rf "$STATE_LOCK"; }
 
 state_set() {
   local key="$1"; shift
@@ -119,7 +135,9 @@ state_set() {
     filter="$filter | .prs[\$k][\$f_$1] = \$v_$1"
     shift 2
   done
+  state_lock
   "$JQ_BIN" "${args[@]}" "$filter" "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE"
+  state_unlock
 }
 
 lock_acquire() {
@@ -137,6 +155,55 @@ lock_acquire() {
 }
 
 lock_release() { rm -rf "$LOCK_DIR"; }
+
+# --- per-PR running markers ---------------------------------------------------
+# One marker directory per review in flight. Reviews run as detached background
+# processes, so the markers are what prevents starting the same PR twice and
+# what bounds concurrency.
+marker_path() {
+  printf '%s/%s\n' "$RUNNING_DIR" "$(printf '%s#%s' "$1" "$2" | tr '/#' '--')"
+}
+
+marker_acquire() {
+  local m pid
+  m=$(marker_path "$1" "$2")
+  if mkdir "$m" 2>/dev/null; then
+    printf '%s\n' "$$" >"$m/pid"; return 0
+  fi
+  pid=$(cat "$m/pid" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  log "removed stale running marker for $1#$2 (pid ${pid:-?})"
+  rm -rf "$m"
+  mkdir "$m" 2>/dev/null || return 1
+  printf '%s\n' "$$" >"$m/pid"
+}
+
+marker_alive() {
+  local m pid
+  m=$(marker_path "$1" "$2")
+  [ -d "$m" ] || return 1
+  pid=$(cat "$m/pid" 2>/dev/null)
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+marker_release() { rm -rf "$(marker_path "$1" "$2")"; }
+
+# Live reviews only; markers of crashed processes are cleaned up on the way.
+running_count() {
+  local m pid n=0
+  for m in "$RUNNING_DIR"/*; do
+    [ -d "$m" ] || continue
+    pid=$(cat "$m/pid" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      n=$(( n + 1 ))
+    else
+      rm -rf "$m"
+    fi
+  done
+  printf '%s\n' "$n"
+}
 
 # word-in-list test, Bash 3.2 friendly. Callers pass the list unquoted on
 # purpose so the shell splits it into words.
@@ -184,14 +251,24 @@ latest_request_at() {
 }
 
 ensure_clone() {
-  local nwo="$1" dir
+  local nwo="$1" dir lock i=0
   dir="$CLONE_DIR/${nwo%%/*}/${nwo#*/}"
+  lock="$dir.lock"
+  mkdir -p "$(dirname "$dir")"
+  # Concurrent reviews of the same repo must not clone or fetch into the same
+  # directory at once. Waits up to 5 minutes, then assumes a crashed holder.
+  while ! mkdir "$lock" 2>/dev/null; do
+    i=$(( i + 1 ))
+    [ "$i" -ge 600 ] && { rm -rf "$lock"; continue; }
+    sleep 0.5
+  done
   if [ -d "$dir/.git" ]; then
     "$GIT_BIN" -C "$dir" fetch --prune --quiet origin >/dev/null 2>&1
   else
-    mkdir -p "$(dirname "$dir")"
-    "$GH_BIN" repo clone "$nwo" "$dir" -- --quiet >/dev/null 2>&1 || return 1
+    "$GH_BIN" repo clone "$nwo" "$dir" -- --quiet >/dev/null 2>&1 \
+      || { rm -rf "$lock"; return 1; }
   fi
+  rm -rf "$lock"
   printf '%s\n' "$dir"
 }
 
@@ -248,15 +325,17 @@ cmd_poll() {
   require_tools
   state_init
 
+  # The lock only guards the poll itself now. Reviews run detached, tracked by
+  # their running markers, so a long review no longer blocks polling.
   if ! lock_acquire; then
-    log "skipped: a review is already running (pid $(cat "$LOCK_DIR/pid" 2>/dev/null))"
+    log "skipped: another poll is running (pid $(cat "$LOCK_DIR/pid" 2>/dev/null))"
     exit 0
   fi
   trap lock_release EXIT INT TERM
 
   local base_args raw more prs count fields teams t
   base_args="--state=open --limit=100"
-  fields="number,repository,title"
+  fields="number,repository,title,author"
 
   MY_LOGIN=$("$GH_BIN" api user --jq .login 2>>"$LOG_FILE")
   [ -n "$MY_LOGIN" ] || { log "could not determine your GitHub login"; exit 1; }
@@ -291,22 +370,34 @@ cmd_poll() {
     [ -n "$more" ] && raw="$raw$more"
   done
 
-  # Slurp the concatenated result arrays into one deduplicated list.
-  prs=$(printf '%s' "$raw" | "$JQ_BIN" -s \
-        'add | unique_by(.repository.nameWithOwner + "#" + (.number|tostring))')
+  # Slurp the concatenated result arrays into one deduplicated list. Your own
+  # PRs are dropped by default: you watch those yourself, or trigger a review
+  # on purpose with `prbot run`.
+  # shellcheck disable=SC2016
+  prs=$(printf '%s' "$raw" | "$JQ_BIN" -s --arg me "$MY_LOGIN" --arg skipown "$SKIP_OWN" \
+        'add | unique_by(.repository.nameWithOwner + "#" + (.number|tostring))
+         | if $skipown == "1" then map(select(.author.login != $me)) else . end')
 
   count=$(printf '%s' "$prs" | "$JQ_BIN" 'length')
   if [ "$count" = "0" ]; then log "no open review requests"; exit 0; fi
   log "$count open review request(s)"
 
-  local started=0
+  local started=0 running slots
+  running=$(running_count)
+  slots=$(( MAX_CONCURRENT - running ))
+  if [ "$slots" -le 0 ]; then
+    log "at capacity: $running review(s) running (MAX_CONCURRENT=$MAX_CONCURRENT)"
+    exit 0
+  fi
 
   # Tab separated so Bash 3.2 gets by without mapfile. The loop runs in this
   # shell (process substitution, not a pipe) so `started` survives iterations.
   while IFS=$'\t' read -r nwo num title; do
     [ -n "$nwo" ] || continue
-    [ "$started" -ge "$MAX_PER_TICK" ] && break
+    [ "$started" -ge "$slots" ] && break
     key="$nwo#$num"
+
+    marker_alive "$nwo" "$num" && continue
 
     # shellcheck disable=SC2086
     if [ -n "$EXCLUDE_REPOS" ] && in_list "$nwo" $EXCLUDE_REPOS; then
@@ -357,12 +448,29 @@ cmd_poll() {
       continue
     fi
 
-    review_pr "$nwo" "$num" "$sha" "$title" "$req_at"
+    # Hand the review to a detached background process. The marker is acquired
+    # here (under the poll lock) so two polls can never start the same PR; the
+    # child re-stamps its own pid and removes the marker when it exits.
+    marker_acquire "$nwo" "$num" || continue
+    "$SELF" _review "$nwo" "$num" "$sha" "$title" "$req_at" </dev/null >/dev/null 2>&1 &
+    printf '%s\n' "$!" >"$(marker_path "$nwo" "$num")/pid"
+    log "$key: review launched (pid $!)"
     started=$(( started + 1 ))
   done < <(printf '%s' "$prs" | "$JQ_BIN" -r \
       '.[] | [.repository.nameWithOwner, (.number|tostring), .title] | @tsv')
 
   exit 0
+}
+
+# Internal entry point for one detached review. Owns the running marker.
+cmd_review_one() {
+  state_init
+  local nwo="$1" num="$2"
+  printf '%s\n' "$$" >"$(marker_path "$nwo" "$num")/pid" 2>/dev/null
+  # $nwo/$num expand now on purpose; locals are gone when the EXIT trap fires.
+  # shellcheck disable=SC2064
+  trap "marker_release '$nwo' '$num'" EXIT INT TERM
+  review_pr "$@"
 }
 
 # --- manual trigger ---------------------------------------------------------
@@ -379,8 +487,9 @@ cmd_run() {
              num="$arg" ;;
     *) die "usage: prbot run <pr-url> | <owner/repo#number> | <number>" ;;
   esac
-  lock_acquire || die "a review is already running"
-  trap lock_release EXIT INT TERM
+  marker_acquire "$nwo" "$num" || die "a review of $nwo#$num is already running"
+  # shellcheck disable=SC2064
+  trap "marker_release '$nwo' '$num'" EXIT INT TERM
   meta=$("$GH_BIN" pr view "$num" --repo "$nwo" --json headRefOid,title) || die "pr view failed"
   sha=$(printf '%s' "$meta" | "$JQ_BIN" -r .headRefOid)
   title=$(printf '%s' "$meta" | "$JQ_BIN" -r .title)
@@ -396,8 +505,14 @@ cmd_status() {
   else
     printf 'agent:  not installed, run: prbot install\n'
   fi
-  if [ -d "$LOCK_DIR" ]; then
-    printf 'run:    active, pid %s\n' "$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+  local running m
+  running=$(running_count)
+  if [ "$running" -gt 0 ]; then
+    printf 'run:    %s review(s) running\n' "$running"
+    for m in "$RUNNING_DIR"/*; do
+      [ -d "$m" ] || continue
+      printf '        %s (pid %s)\n' "$(basename "$m")" "$(cat "$m/pid" 2>/dev/null)"
+    done
   else
     printf 'run:    idle\n'
   fi
@@ -407,8 +522,9 @@ cmd_status() {
   else
     printf 'teams:  ignored, direct requests only\n'
   fi
-  printf 'limits: %s attempts per request, %s review per tick\n' \
-    "$MAX_RETRIES" "$MAX_PER_TICK"
+  printf 'limits: %s attempts per request, %s concurrent reviews\n' \
+    "$MAX_RETRIES" "$MAX_CONCURRENT"
+  printf 'own PRs: %s\n' "$([ "$SKIP_OWN" = "1" ] && echo "skipped (prbot run to review manually)" || echo "reviewed")"
   printf 'config: %s\n\n' "$CONFIG_FILE"
   printf 'recent reviews:\n'
   "$JQ_BIN" -r '.prs | to_entries | map(select(.value.at)) | sort_by(.value.at) | reverse
@@ -451,6 +567,9 @@ cmd_install() {
   </dict>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
+  <!-- Reviews outlive the poll as background processes; without this launchd
+       would kill the whole process group when the poll exits. -->
+  <key>AbandonProcessGroup</key><true/>
 </dict>
 </plist>
 PLIST
@@ -475,15 +594,19 @@ INCLUDE_TEAMS=1
 TEAMS=""                 # empty discovers your teams; or "acme-inc/backend"
 
 # A review starts as soon as a new request for you appears, so there is no
-# pacing to configure. These only bound failure and concurrency.
+# pacing to configure. These only bound failure and concurrency. Each review
+# spawns several Codex runs, so MAX_CONCURRENT multiplies cost and load.
 MAX_RETRIES=3
-MAX_PER_TICK=1
+MAX_CONCURRENT=3
 POLL_INTERVAL=300        # re-run `prbot install` after changing this
 
 # Safety. Fork PRs and bot PRs run foreign code locally through direnv/codex.
 SKIP_DRAFTS=1
 SKIP_FORKS=1
 SKIP_BOTS=1
+
+# Your own PRs are skipped by default; review one on purpose with `prbot run`.
+SKIP_OWN=1
 
 # Passed straight to pr-codex-review. Use "--dry-run" to review without posting.
 REVIEW_ARGS=""
@@ -519,6 +642,7 @@ EOF
 
 case "${1:-}" in
   poll)      shift; cmd_poll "$@" ;;
+  _review)   shift; cmd_review_one "$@" ;;
   run)       shift; [ $# -ge 1 ] || die "missing PR argument"; cmd_run "$@" ;;
   status)    cmd_status ;;
   logs)      shift; cmd_logs "${1:-50}" ;;
