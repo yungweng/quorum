@@ -19,9 +19,6 @@ jobs:
     name: Bump formula
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    concurrency:
-      group: quorum-release-and-tap
-      queue: max
     steps:
       - name: Check out quorum
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -19,37 +19,20 @@ runs:
         ssh-key: ${{ inputs.deploy-key }}
         path: tap
 
-    - name: Check release order
+    - name: Validate release tag
       id: plan
       env:
         TAG: ${{ inputs.tag }}
       shell: bash
       run: |
-        FORMULA=tap/Formula/quorum.rb
         if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
           echo "::error::release tag $TAG is not vX.Y.Z"
           exit 1
         fi
-        CURRENT_TAG=$(sed -n \
-          's|^  url ".*/archive/refs/tags/\(v[^"]*\)\.tar\.gz"$|\1|p' \
-          "$FORMULA")
-        if [[ ! "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "::error::could not read a vX.Y.Z tag from $FORMULA"
-          exit 1
-        fi
-        NEWEST_TAG=$(printf '%s\n%s\n' "$CURRENT_TAG" "$TAG" |
-          LC_ALL=C sort -V | tail -n 1)
-        if [[ "$NEWEST_TAG" != "$TAG" ]]; then
-          echo "$FORMULA already points to newer $CURRENT_TAG; not replacing it with $TAG."
-          echo "update=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        echo "update=true" >> "$GITHUB_OUTPUT"
         echo "url=https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz" \
           >> "$GITHUB_OUTPUT"
 
     - name: Compute release tarball checksum
-      if: steps.plan.outputs.update == 'true'
       id: checksum
       env:
         URL: ${{ steps.plan.outputs.url }}
@@ -70,7 +53,6 @@ runs:
         echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
     - name: Update formula
-      if: steps.plan.outputs.update == 'true'
       env:
         SHA256: ${{ steps.checksum.outputs.sha256 }}
         TAG: ${{ inputs.tag }}
@@ -78,15 +60,56 @@ runs:
       shell: bash
       run: |
         FORMULA=tap/Formula/quorum.rb
-        sed -i \
-          -e "s|^  url \".*\"$|  url \"$URL\"|" \
-          -e "s|^  sha256 \".*\"$|  sha256 \"$SHA256\"|" \
-          "$FORMULA"
-        if git -C tap diff --quiet; then
-          echo "Formula already up to date, nothing to push."
-          exit 0
+        BRANCH=$(git -C tap branch --show-current)
+        if [[ -z "$BRANCH" ]]; then
+          echo "::error::tap checkout is not on a branch"
+          exit 1
         fi
         git -C tap config user.name "github-actions[bot]"
         git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
-        git -C tap commit -am "quorum ${TAG}"
-        git -C tap push
+
+        # A fast-forward push is the compare-and-swap. If another release wins
+        # it, start again from that commit and recheck the formula version.
+        for attempt in 1 2 3 4 5; do
+          if ! git -C tap fetch --quiet origin "$BRANCH"; then
+            if [[ $attempt == 5 ]]; then
+              echo "::error::could not refresh the tap after $attempt attempts"
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            continue
+          fi
+          git -C tap reset --hard "origin/$BRANCH"
+
+          CURRENT_TAG=$(sed -n \
+            's|^  url ".*/archive/refs/tags/\(v[^"]*\)\.tar\.gz"$|\1|p' \
+            "$FORMULA")
+          if [[ ! "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::could not read a vX.Y.Z tag from $FORMULA"
+            exit 1
+          fi
+          NEWEST_TAG=$(printf '%s\n%s\n' "$CURRENT_TAG" "$TAG" |
+            LC_ALL=C sort -V | tail -n 1)
+          if [[ "$NEWEST_TAG" != "$TAG" ]]; then
+            echo "$FORMULA already points to newer $CURRENT_TAG; not replacing it with $TAG."
+            exit 0
+          fi
+
+          sed -i \
+            -e "s|^  url \".*\"$|  url \"$URL\"|" \
+            -e "s|^  sha256 \".*\"$|  sha256 \"$SHA256\"|" \
+            "$FORMULA"
+          if git -C tap diff --quiet; then
+            echo "Formula already up to date, nothing to push."
+            exit 0
+          fi
+          git -C tap commit -am "quorum ${TAG}"
+          if git -C tap push origin "HEAD:$BRANCH"; then
+            exit 0
+          fi
+          if [[ $attempt == 5 ]]; then
+            echo "::error::tap changed during all $attempt push attempts"
+            exit 1
+          fi
+          sleep $((attempt * 2))
+        done

@@ -95,11 +95,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Keep the release and its formula push in one non-cancelling critical
-    # section. queue: max preserves every version-changing main workflow.
-    concurrency:
-      group: quorum-release-and-tap
-      queue: max
     permissions:
       contents: write
     steps:

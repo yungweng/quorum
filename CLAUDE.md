@@ -112,9 +112,11 @@ deliberate and easy to get wrong if you touch it: GitHub does not start a
 workflow from an event raised with the default `GITHUB_TOKEN`, so a release the
 CI cut for itself never arrives as a `release: published` event. Releases
 published by hand still enter through `update-homebrew-tap.yml`. Both paths use
-the same action and the same non-cancelling concurrency queue, so release
-creation and the formula push are one critical section. The action also refuses
-to replace a newer formula tag with an older one.
+the same action. Its formula push is an optimistic compare-and-swap: it fetches
+the current tap branch, refuses to replace a newer formula tag with an older
+one, and retries from the new head when another release pushes first. This
+avoids relying on Actions concurrency, which drops all but one pending run in a
+shared group.
 
 Rerunning the version-changing workflow carries an existing tag through to the
 formula step, so a failed update can be retried without creating the release
