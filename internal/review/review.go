@@ -133,16 +133,29 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Cache collection takes this same lock from its liveness check through
+	// dependency eviction. Create and claim the run while holding it so
+	// collection must happen wholly before this startup or see this run as live.
+	unlockCache, err := proc.LockDir(filepath.Dir(o.DepsDir))
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(run.output, 0o755); err != nil {
+		unlockCache()
 		return nil, err
 	}
-	// Claim the directory before the GC runs: it is what stops this run, and
-	// every other one in flight, from being collected out from under itself.
-	if err := proc.Claim(run.root); err != nil {
+	releaseClaim, err := proc.Claim(run.root)
+	if err != nil {
+		unlockCache()
 		return nil, err
 	}
+	defer releaseClaim()
 
-	if removed := r.gc(ctx, o); removed > 0 {
+	// The new run has not linked a dependency tree yet, so the age sweep may
+	// still evict trees if no older run is using them.
+	removed := r.gc(ctx, o, run.root)
+	unlockCache()
+	if removed > 0 {
 		rep.Info(fmt.Sprintf("gc: removed %d old cache dir(s)", removed))
 	}
 
@@ -558,8 +571,9 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 
 // gc drops run directories and shared dependency trees nothing has needed for a
 // while, and clears worktree registrations left behind by killed runs.
-func (r *Runner) gc(ctx context.Context, o Options) int {
+func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 	removed := 0
+	otherLive := false
 	entries, err := os.ReadDir(o.RunsDir)
 	if err == nil {
 		cutoff := time.Now().Add(-runRetention)
@@ -569,6 +583,9 @@ func (r *Runner) gc(ctx context.Context, o Options) int {
 			}
 			dir := filepath.Join(o.RunsDir, e.Name())
 			if proc.Claimed(dir) {
+				if dir != current {
+					otherLive = true
+				}
 				continue
 			}
 			info, err := e.Info()
@@ -583,8 +600,13 @@ func (r *Runner) gc(ctx context.Context, o Options) int {
 			}
 		}
 	}
-	cache := deps.Cache{Root: o.DepsDir}
-	removed += cache.GC(depsRetention)
+	// A live review may have a node_modules symlink into any shared tree. The
+	// current run is excluded because startup holds the cache lock and has not
+	// linked anything yet.
+	if !otherLive {
+		cache := deps.Cache{Root: o.DepsDir}
+		removed += cache.GC(depsRetention)
+	}
 	r.Git.WorktreePrune(ctx, o.RepoRoot)
 	return removed
 }

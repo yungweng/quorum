@@ -20,7 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -137,7 +137,8 @@ func Alive(pid int) bool {
 // ClaimFile is what Claim writes into a directory it is holding.
 const ClaimFile = "run.pid"
 
-// Claim marks a directory as belonging to this process for as long as it runs.
+// Claim marks a directory as belonging to this process until the returned
+// release function is called.
 //
 // The cache collector has to tell a run that is over from one still using its
 // worktree, and no registry can answer that for it: the agent's markers cover
@@ -145,23 +146,86 @@ const ClaimFile = "run.pid"
 // looked finished from the moment it began and could have its worktree deleted
 // underneath it. The claim lives in the directory because the directory is what
 // gets collected.
-func Claim(dir string) error {
-	return os.WriteFile(filepath.Join(dir, ClaimFile), []byte(strconv.Itoa(os.Getpid())), 0o644)
+//
+// The file lock, rather than the PID written for diagnostics, identifies the
+// process instance. The kernel releases it when the process exits, so PID reuse
+// cannot make a dead run look live.
+func Claim(dir string) (func(), error) {
+	path := filepath.Join(dir, ClaimFile)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("claiming %s: %w", dir, err)
+	}
+	fail := func(err error) (func(), error) {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+		return nil, err
+	}
+	if err := f.Truncate(0); err != nil {
+		return fail(err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	if _, err := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); err != nil {
+		return fail(err)
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			// Remove the name while the old inode is still locked. A new
+			// claimant can then create its own file without this release
+			// deleting it after the unlock.
+			os.Remove(path)
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+		})
+	}, nil
 }
 
-// Claimed reports whether the process holding a directory is still running.
-// No claim at all counts as unclaimed, which is what makes a directory left by
-// a killed run, or by a version that wrote none, collectable.
+// Claimed reports whether a process still holds a directory's claim lock.
+// A missing or unlocked claim counts as unclaimed, which makes a directory
+// left by a killed run, or by a version that wrote none, collectable.
 func Claimed(dir string) bool {
-	b, err := os.ReadFile(filepath.Join(dir, ClaimFile))
+	f, err := os.OpenFile(filepath.Join(dir, ClaimFile), os.O_RDWR, 0)
 	if err != nil {
 		return false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return false
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		// Failure to take the lock means another process has it. Treat any
+		// other lock error conservatively too: deleting an uncertain run is
+		// worse than leaving it for the next collection.
+		return true
 	}
-	return Alive(pid)
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
+}
+
+// LockDir takes an exclusive cross-process lock on an existing directory.
+// Cache callers lock their common root to serialize run claims with collection
+// without creating a file that would make a dry run change disk.
+func LockDir(dir string) (func(), error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("locking %s: %w", dir, err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+		})
+	}, nil
 }
 
 // ExitCode extracts the exit status from a Run error. A timeout reports

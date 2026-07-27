@@ -58,7 +58,12 @@ func (a *app) cmdPoll(args []string) int {
 	// The sweeps inside a run only drop what is a week old, which a couple of
 	// days of heavy use fills a disk well ahead of. Enforcing the budget here is
 	// what keeps that from needing somebody to notice and run `quorum gc`.
-	if freed, _ := a.collect(false); freed > 0 {
+	freed, _, err := a.collect(false)
+	if err != nil {
+		a.log.Printf("cache collection failed: %v", err)
+		return 1
+	}
+	if freed > 0 {
 		a.log.Printf("cache was over its budget, freed %s", ui.Bytes(freed))
 	}
 

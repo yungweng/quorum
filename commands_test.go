@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -11,10 +10,10 @@ import (
 	"github.com/yungweng/quorum/internal/proc"
 )
 
-// stalePID is above PID_MAX on macOS and above the default pid_max on Linux, so
-// it can never name a running process. Its bytes count towards the size of the
-// run directory like everything else, which the expectations below spell out.
-const stalePID = "2147483647"
+// staleClaim is an unlocked claim left by a run that is over. Its bytes count
+// towards the size of the run directory like everything else, which the
+// expectations below spell out.
+const staleClaim = "2147483647"
 
 // gigabytes expresses a byte count as the GB the config holds, exactly: the
 // divisor is a power of two, so nothing is lost on the way back.
@@ -31,14 +30,16 @@ func fill(t *testing.T, path string, n int) {
 	}
 }
 
-// makeRun builds a run directory of the given shape, claimed by pid.
-func makeRun(t *testing.T, root, name string, worktree, output int, pid string) string {
+// makeRun builds a run directory of the given shape.
+func makeRun(t *testing.T, root, name string, worktree, output int, claim string) string {
 	t.Helper()
 	dir := filepath.Join(root, name)
 	fill(t, filepath.Join(dir, "worktree", "checkout"), worktree)
 	fill(t, filepath.Join(dir, "output", "final-pr-comment.md"), output)
-	if err := os.WriteFile(filepath.Join(dir, proc.ClaimFile), []byte(pid), 0o644); err != nil {
-		t.Fatal(err)
+	if claim != "" {
+		if err := os.WriteFile(filepath.Join(dir, proc.ClaimFile), []byte(claim), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return dir
 }
@@ -47,14 +48,19 @@ func makeRun(t *testing.T, root, name string, worktree, output int, pid string) 
 // answers for any more.
 func staleRun(t *testing.T, root, name string, worktree, output int) string {
 	t.Helper()
-	return makeRun(t, root, name, worktree, output, stalePID)
+	return makeRun(t, root, name, worktree, output, staleClaim)
 }
 
-// liveRun is a run directory claimed by this test process, so it reads as still
-// in flight.
+// liveRun holds the run's claim lock until the test ends.
 func liveRun(t *testing.T, root, name string, worktree, output int) string {
 	t.Helper()
-	return makeRun(t, root, name, worktree, output, strconv.Itoa(os.Getpid()))
+	dir := makeRun(t, root, name, worktree, output, "")
+	release, err := proc.Claim(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	return dir
 }
 
 // depsTree is a published shared dependency tree. Which repository and lock
@@ -85,6 +91,15 @@ func assertCollected(t *testing.T, freed int64, removed int, wantFreed int64, wa
 	}
 }
 
+func mustCollect(t *testing.T, a *app, dry bool) (int64, int) {
+	t.Helper()
+	freed, removed, err := a.collect(dry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return freed, removed
+}
+
 // A failed review keeps its worktree so --resume-run can pick it up. Below the
 // budget there is no reason to take that away.
 func TestCollectLeavesFailedRunsAloneBelowBudget(t *testing.T) {
@@ -92,7 +107,7 @@ func TestCollectLeavesFailedRunsAloneBelowBudget(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(1000)
 	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
 
-	freed, removed := a.collect(false)
+	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 0, 0)
 	if !exists(filepath.Join(run, "worktree")) {
 		t.Error("worktree of a failed run was deleted below the budget, --resume-run needs it")
@@ -106,7 +121,7 @@ func TestCollectDropsWorktreesBeforeOutput(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(500)
 	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
 
-	freed, removed := a.collect(false)
+	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 800, 0)
 	if exists(filepath.Join(run, "worktree")) {
 		t.Error("worktree survived over the budget")
@@ -124,7 +139,7 @@ func TestCollectNeverTouchesALiveRun(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(100)
 	run := liveRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
 
-	freed, removed := a.collect(false)
+	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 0, 0)
 	if !exists(filepath.Join(run, "worktree")) {
 		t.Error("worktree of a running review was deleted")
@@ -144,8 +159,8 @@ func TestCollectDropsWholeRunDirectoriesNext(t *testing.T) {
 	}
 
 	// Both worktrees, then everything left in the older directory.
-	freed, removed := a.collect(false)
-	assertCollected(t, freed, removed, int64(100+100+400+len(stalePID)), 1)
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, int64(100+100+400+len(staleClaim)), 1)
 	if exists(old) {
 		t.Error("the older run directory survived")
 	}
@@ -160,7 +175,7 @@ func TestCollectCoversBabysitRuns(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(100)
 	run := staleRun(t, a.p.BabysitRuns, "owner-repo-pr-1", 800, 0)
 
-	freed, removed := a.collect(false)
+	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 800, 0)
 	if exists(filepath.Join(run, "worktree")) {
 		t.Error("babysit worktree survived over the budget")
@@ -175,8 +190,8 @@ func TestCollectDropsDependencyTreesLast(t *testing.T) {
 	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
 	tree := depsTree(t, a.p.DepsCache, 1000)
 
-	freed, removed := a.collect(false)
-	assertCollected(t, freed, removed, int64(100+100+len(stalePID)+1000), 1)
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, int64(100+100+len(staleClaim)+1000), 1)
 	if exists(run) {
 		t.Error("the run directory survived")
 	}
@@ -193,7 +208,7 @@ func TestCollectSparesDependencyTreesWhileARunIsLive(t *testing.T) {
 	liveRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
 	tree := depsTree(t, a.p.DepsCache, 1000)
 
-	freed, removed := a.collect(false)
+	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 0, 0)
 	if !exists(tree) {
 		t.Error("a dependency tree a running review may be linked against was deleted")
@@ -208,8 +223,8 @@ func TestCollectDryRunDeletesNothing(t *testing.T) {
 	tree := depsTree(t, a.p.DepsCache, 1000)
 
 	before := a.cacheSize()
-	freed, removed := a.collect(true)
-	assertCollected(t, freed, removed, int64(100+100+len(stalePID)+1000), 1)
+	freed, removed := mustCollect(t, a, true)
+	assertCollected(t, freed, removed, int64(100+100+len(staleClaim)+1000), 1)
 	if !exists(run) || !exists(tree) {
 		t.Error("a dry run deleted something")
 	}
@@ -224,7 +239,7 @@ func TestCollectDoesNothingWithoutABudget(t *testing.T) {
 	a.cfg.CacheBudgetGB = 0
 	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
 
-	freed, removed := a.collect(false)
+	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 0, 0)
 	if !exists(filepath.Join(run, "worktree")) {
 		t.Error("worktree was deleted with no budget set")
@@ -238,8 +253,48 @@ func TestCollectLeavesTheRememberedSizeCorrect(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(500)
 	staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
 
-	freed, _ := a.collect(false)
-	if got, want := a.cacheSize(), int64(100+len(stalePID)); got != want {
+	freed, _ := mustCollect(t, a, false)
+	if got, want := a.cacheSize(), int64(100+len(staleClaim)); got != want {
 		t.Fatalf("remembered cache size is %d after freeing %d bytes, want %d", got, freed, want)
+	}
+}
+
+// Run startup and collection share the dependency-root lock. A startup that
+// gets there first can publish its claim before collection checks liveness, so
+// the collector cannot delete a tree the new run is about to link.
+func TestCollectSerializesDependencyEvictionWithRunStartup(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(150)
+	tree := depsTree(t, a.p.DepsCache, 1000)
+
+	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, _, err := a.collect(false)
+		done <- err
+	}()
+	<-started
+	select {
+	case err := <-done:
+		unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("collection did not wait for the run-startup lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	liveRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !exists(tree) {
+		t.Error("dependency tree was deleted after a run claimed its worktree")
 	}
 }

@@ -306,7 +306,10 @@ func (a *app) cmdGC(args []string) int {
 			dry = true
 		}
 	}
-	freed, removed := a.collect(dry)
+	freed, removed, err := a.collect(dry)
+	if err != nil {
+		return a.die("cache collection: %v", err)
+	}
 	if freed > 0 || removed > 0 {
 		verb := "removed"
 		if dry {
@@ -426,16 +429,25 @@ func runSizes(dir string) (worktree, output int64) {
 // of runs that are over, which are one checkout away from being back; then
 // whole run directories, oldest first, which takes their output with them; and
 // only then shared dependency trees, which cost a full install to rebuild.
-func (a *app) collect(dry bool) (freed int64, removed int) {
+func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	limit := a.budgetBytes()
 	if limit <= 0 {
-		return 0, 0
+		return 0, 0, nil
 	}
+	// Run startup takes the same lock while publishing its claim. Once this
+	// holds it, no run can appear between the liveness check and dependency
+	// eviction, and any run that claimed first is visible below.
+	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer unlock()
+
 	// Measured, not the remembered value: this is about to delete things.
 	a.setCacheSize(dirSize(a.p.ReviewRuns) + dirSize(a.p.BabysitRuns) + dirSize(a.p.DepsCache))
 	total := a.cacheBytes
 	if total <= limit {
-		return 0, 0
+		return 0, 0, nil
 	}
 	// What survives is the new total, so the next reader does not walk again.
 	// A dry run leaves the disk alone, so it must leave the number alone too.
@@ -457,7 +469,7 @@ func (a *app) collect(dry bool) (freed int64, removed int) {
 
 	for _, r := range runs {
 		if total <= limit {
-			return freed, removed
+			return freed, removed, nil
 		}
 		if r.live {
 			continue
@@ -468,7 +480,7 @@ func (a *app) collect(dry bool) (freed int64, removed int) {
 	// so reaching this point means it dropped every collectable worktree.
 	for _, r := range runs {
 		if total <= limit {
-			return freed, removed
+			return freed, removed, nil
 		}
 		if r.live {
 			continue
@@ -480,7 +492,7 @@ func (a *app) collect(dry bool) (freed int64, removed int) {
 	// A run that is still going owns its worktree, and through the symlinks in
 	// that worktree it owns shared trees this cannot tell apart from the rest.
 	if slices.ContainsFunc(runs, func(r runEntry) bool { return r.live }) {
-		return freed, removed
+		return freed, removed, nil
 	}
 	for _, t := range (deps.Cache{Root: a.p.DepsCache}).Trees() {
 		if total <= limit {
@@ -488,7 +500,7 @@ func (a *app) collect(dry bool) (freed int64, removed int) {
 		}
 		drop(t.Path, dirSize(t.Path))
 	}
-	return freed, removed
+	return freed, removed, nil
 }
 
 func plural(n int) string {

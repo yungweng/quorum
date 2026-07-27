@@ -86,12 +86,13 @@ Each of these is a place where the port does something different on purpose.
    because the daemon and the pipeline were separate binaries.
 
 9. **A run directory says itself whether it is still in use.** Every run writes
-   its pid to `run.pid` and the collector reads it. prbot could only ask its own
-   markers, which cover reviews the daemon started and nothing else, so a
-   `quorum review` in a terminal looked finished from the moment it began and a
-   concurrent `gc` could delete the worktree it was reviewing in. The claim is
-   also what the age sweeps use, in place of the "skip the directory I am in"
-   exception each of them carried.
+   its pid to `run.pid` for diagnostics and holds a lock on that file. The
+   collector checks the lock, so a reused pid cannot revive a stale claim.
+   prbot could only ask its own markers, which cover reviews the daemon started
+   and nothing else, so a `quorum review` in a terminal looked finished from
+   the moment it began and a concurrent `gc` could delete the worktree it was
+   reviewing in. The claim is also what the age sweeps use, in place of the
+   "skip the directory I am in" exception each of them carried.
 
 10. **The cache budget is enforced by the poll, and covers the whole cache.**
     Only `~/.cache/quorum/reviews` was ever measured or trimmed, and only when
@@ -101,7 +102,9 @@ Each of these is a place where the port does something different on purpose.
     a leftover worktree belongs to a failed run, and taking it on sight would
     quietly cancel `--resume-run` (kept, above). Above it the order is worktrees,
     then whole run directories oldest first, then dependency trees, cheapest to
-    rebuild first, and never while a run is in flight.
+    rebuild first, and never while a run is in flight. Run startup and
+    collection share a cache-root lock, so dependency eviction cannot pass its
+    liveness check while a new run is publishing its claim.
 
 ## What the merge removed rather than ported
 

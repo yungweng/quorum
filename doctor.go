@@ -63,7 +63,10 @@ func (a *app) cmdDoctor(args []string) int {
 	}
 
 	w.Printf("%s\n", w.Bold("applying fixes"))
-	freed, removed := a.collect(false)
+	freed, removed, err := a.collect(false)
+	if err != nil {
+		return a.die("cache collection: %v", err)
+	}
 	if freed > 0 || removed > 0 {
 		w.Printf("  cache      freed %s\n", ui.Bytes(freed))
 	}
