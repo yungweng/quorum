@@ -131,15 +131,16 @@ jobs:
           fi
 
           TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "$TAG is already released, nothing to do."
+            echo "$TAG is already released; the tap can still be retried."
             exit 0
           fi
           echo "Releasing $TAG from $CURRENT_SHA."
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "create=true" >> "$GITHUB_OUTPUT"
 
       - name: Cut the release
-        if: steps.plan.outputs.tag != ''
+        if: steps.plan.outputs.create == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.plan.outputs.tag }}

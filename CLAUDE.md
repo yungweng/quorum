@@ -113,4 +113,6 @@ workflow from an event raised with the default `GITHUB_TOKEN`, so a release the
 CI cut for itself never arrives as a `release: published` event. That is why
 `update-homebrew-tap.yml` is also a `workflow_call` and is invoked directly.
 Keep both triggers: the event still covers a release published by hand, and the
-tag check means the two paths cannot both fire for one version.
+direct call covers a release made with the default token. Rerunning the
+version-changing workflow carries an existing tag through to the `tap` job, so
+a failed formula update can be retried without creating the release again.
