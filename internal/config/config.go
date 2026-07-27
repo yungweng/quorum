@@ -1,7 +1,8 @@
-// Package config reads and writes prbot's configuration file.
+// Package config reads and writes quorum's configuration file.
 //
-// The file is the same shell-syntax KEY=value file the shell version of prbot
-// sourced, so upgrading does not ask the user to migrate anything. It is parsed
+// The file is the same shell-syntax KEY=value file prbot used, so upgrading
+// does not ask the user to migrate anything. It now also carries the review and
+// babysit settings that used to be command-line flags on two separate tools. It is parsed
 // here rather than sourced: only assignments are understood, and anything else
 // in the file is reported instead of executed.
 package config
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config is the fully resolved configuration: file values on top of defaults.
@@ -38,16 +40,49 @@ type Config struct {
 	SkipBots   bool
 	SkipOwn    bool
 
-	ReviewArgs string
-	Notify     bool
+	// Review settings. These used to be flags on a separate binary that the
+	// daemon passed through as an opaque REVIEW_ARGS string.
+	ReviewModel   string
+	ReviewEffort  string
+	ReviewTimeout time.Duration
+	Post          bool // false is the old REVIEW_ARGS="--dry-run"
 
-	// Unknown keeps assignments prbot does not recognise so that rewriting the
+	// Babysit settings for the fix sessions.
+	FixModel   string
+	FixEffort  string
+	MaxIter    int
+	MaxCIFixes int
+	FixTimeout time.Duration
+	// Sandboxed opts the fix sessions out of
+	// --dangerously-bypass-approvals-and-sandbox. They then run under the
+	// user's own codex config, which must allow commands, network and push or
+	// every fix round fails.
+	Sandboxed bool
+
+	// AgentAction is what the daemon does with a pull request that asks for a
+	// review: "review" posts one and stops, "babysit" runs the full fix loop.
+	// Only possible now that both live in one binary.
+	AgentAction string
+
+	Notify bool
+
+	// ReviewArgs is the retired pass-through string. It is still read so an
+	// existing config keeps working, and dropped when the file is rewritten.
+	ReviewArgs string
+
+	// Unknown keeps assignments quorum does not recognise so that rewriting the
 	// file never silently drops something the user put there.
 	Unknown map[string]string
 }
 
+// Agent actions.
+const (
+	ActionReview  = "review"
+	ActionBabysit = "babysit"
+)
+
 // Default mirrors the defaults the shell version shipped, with the resource
-// limits added. LoadLimit is off by default: the point of prbot is that a
+// limits added. LoadLimit is off by default: the point of the agent is that a
 // review starts when it is requested, and MaxConcurrent is the honest place to
 // say how many of them you want at once.
 func Default() Config {
@@ -64,8 +99,55 @@ func Default() Config {
 		SkipForks:     true,
 		SkipBots:      true,
 		SkipOwn:       true,
-		Notify:        true,
-		Unknown:       map[string]string{},
+
+		ReviewModel:   "gpt-5.6-terra",
+		ReviewEffort:  "medium",
+		ReviewTimeout: 45 * time.Minute,
+		Post:          true,
+
+		MaxIter:    12,
+		MaxCIFixes: 3,
+		FixTimeout: 2 * time.Hour,
+
+		AgentAction: ActionReview,
+
+		Notify:  true,
+		Unknown: map[string]string{},
+	}
+}
+
+// ParseDuration accepts what the shell tools accepted: a bare number of
+// seconds, or a value like 30m, 45m, 2h. Zero disables the timeout it belongs
+// to, which is why it is a valid value rather than an error.
+func ParseDuration(v string) (time.Duration, error) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		if n < 0 {
+			return 0, fmt.Errorf("duration must not be negative")
+		}
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("expected seconds or a duration like 30m, 45m, 1h, or 0")
+	}
+	return d, nil
+}
+
+// FormatDuration renders a duration the way the config file writes it.
+func FormatDuration(d time.Duration) string {
+	switch {
+	case d == 0:
+		return "0"
+	case d%time.Hour == 0:
+		return strconv.Itoa(int(d/time.Hour)) + "h"
+	case d%time.Minute == 0:
+		return strconv.Itoa(int(d/time.Minute)) + "m"
+	default:
+		return strconv.Itoa(int(d/time.Second)) + "s"
 	}
 }
 
@@ -195,8 +277,39 @@ func (c *Config) set(key, value string) {
 		c.LoadLimit = floatOr(value, c.LoadLimit)
 	case "CACHE_BUDGET_GB":
 		c.CacheBudgetGB = floatOr(value, c.CacheBudgetGB)
+	case "REVIEW_MODEL":
+		c.ReviewModel = strings.TrimSpace(value)
+	case "REVIEW_EFFORT":
+		c.ReviewEffort = strings.TrimSpace(value)
+	case "REVIEW_TIMEOUT":
+		c.ReviewTimeout = durationOr(value, c.ReviewTimeout)
+	case "POST":
+		c.Post = truthy(value)
+	case "FIX_MODEL":
+		c.FixModel = strings.TrimSpace(value)
+	case "FIX_EFFORT":
+		c.FixEffort = strings.TrimSpace(value)
+	case "MAX_ITER":
+		c.MaxIter = intOr(value, c.MaxIter)
+	case "MAX_CI_FIXES":
+		c.MaxCIFixes = intOr(value, c.MaxCIFixes)
+	case "FIX_TIMEOUT":
+		c.FixTimeout = durationOr(value, c.FixTimeout)
+	case "SANDBOXED":
+		c.Sandboxed = truthy(value)
+	case "AGENT_ACTION":
+		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
+			c.AgentAction = v
+		}
 	case "REVIEW_ARGS":
+		// Retired: it was passed verbatim to a separate binary that no longer
+		// exists. The only flag anyone used through it was --dry-run, so that
+		// one keeps working; the rest is preserved for the user to see and
+		// migrate rather than silently ignored.
 		c.ReviewArgs = value
+		if strings.Contains(value, "--dry-run") {
+			c.Post = false
+		}
 	default:
 		if c.Unknown == nil {
 			c.Unknown = map[string]string{}
@@ -234,6 +347,14 @@ func intOr(v string, fallback int) int {
 	return n
 }
 
+func durationOr(v string, fallback time.Duration) time.Duration {
+	d, err := ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
+}
+
 func floatOr(v string, fallback float64) float64 {
 	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
 	if err != nil {
@@ -254,13 +375,13 @@ func num(f float64) string {
 }
 
 // Render produces the config file text: the current values with the comments
-// that explain them, plus any assignment prbot did not recognise.
+// that explain them, plus any assignment quorum did not recognise.
 func (c Config) Render() string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
-	w("# prbot configuration. One KEY=value per line, # starts a comment.\n")
-	w("# Edit by hand or run: prbot setup\n\n")
+	w("# quorum configuration. One KEY=value per line, # starts a comment.\n")
+	w("# Edit by hand or run: quorum config\n\n")
 
 	w("# Scope. Empty means every review request assigned to you, anywhere.\n")
 	w("ORGS=%q\n", strings.Join(c.Orgs, " "))
@@ -282,18 +403,41 @@ func (c Config) Render() string {
 	w("CACHE_BUDGET_GB=%s\t# review cache is trimmed to this size, 0 disables\n\n", num(c.CacheBudgetGB))
 
 	w("MAX_RETRIES=%d\n", c.MaxRetries)
-	w("POLL_INTERVAL=%d\t\t# re-run `prbot install` after changing this\n\n", c.PollInterval)
+	w("POLL_INTERVAL=%d\t\t# re-run `quorum install` after changing this\n\n", c.PollInterval)
 
 	w("# Safety. Fork and bot PRs run foreign code locally through direnv.\n")
 	w("SKIP_DRAFTS=%s\n", bit(c.SkipDrafts))
 	w("SKIP_FORKS=%s\n", bit(c.SkipForks))
 	w("SKIP_BOTS=%s\n", bit(c.SkipBots))
-	w("SKIP_OWN=%s\t\t\t# your own PRs; review one on purpose with `prbot run`\n\n", bit(c.SkipOwn))
+	w("SKIP_OWN=%s\t\t\t# your own PRs; review one on purpose with `quorum run`\n\n", bit(c.SkipOwn))
 
-	w("# Passed straight to pr-codex-review. Use \"--dry-run\" to skip posting.\n")
-	w("REVIEW_ARGS=%q\n\n", c.ReviewArgs)
+	w("# Reviews. POST=0 writes the comment to disk instead of posting it,\n")
+	w("# which is the cautious way to start until you trust the output.\n")
+	w("REVIEW_MODEL=%q\n", c.ReviewModel)
+	w("REVIEW_EFFORT=%q\t# minimal, low, medium, high, xhigh\n", c.ReviewEffort)
+	w("REVIEW_TIMEOUT=%q\t# per reviewer pass, 0 disables\n", FormatDuration(c.ReviewTimeout))
+	w("POST=%s\n\n", bit(c.Post))
+
+	w("# Babysit: the fix sessions that work through review findings.\n")
+	w("# Empty model or effort leaves your codex defaults alone.\n")
+	w("FIX_MODEL=%q\n", c.FixModel)
+	w("FIX_EFFORT=%q\n", c.FixEffort)
+	w("MAX_ITER=%d\t\t# review -> fix rounds before giving up\n", c.MaxIter)
+	w("MAX_CI_FIXES=%d\t\t# CI fix attempts per green-CI phase\n", c.MaxCIFixes)
+	w("FIX_TIMEOUT=%q\t\t# per codex fix step; keep above your CI runtime\n", FormatDuration(c.FixTimeout))
+	w("SANDBOXED=%s\t\t# 1 uses your codex sandbox defaults instead of bypassing them\n\n", bit(c.Sandboxed))
+
+	w("# What the agent does with a pull request that asks for your review:\n")
+	w("# \"review\" posts a review and stops, \"babysit\" runs the full fix loop.\n")
+	w("AGENT_ACTION=%q\n\n", c.AgentAction)
 
 	w("NOTIFY=%s\n", bit(c.Notify))
+
+	if c.ReviewArgs != "" {
+		w("\n# Retired: pr-codex-review is built in now, so this is no longer passed\n")
+		w("# anywhere. Use REVIEW_MODEL, REVIEW_EFFORT, REVIEWERS and POST instead.\n")
+		w("# REVIEW_ARGS=%q\n", c.ReviewArgs)
+	}
 
 	if len(c.Unknown) > 0 {
 		keys := make([]string, 0, len(c.Unknown))
@@ -301,7 +445,7 @@ func (c Config) Render() string {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		w("\n# Kept as written; prbot does not use these.\n")
+		w("\n# Kept as written; quorum does not use these.\n")
 		for _, k := range keys {
 			w("%s=%q\n", k, c.Unknown[k])
 		}

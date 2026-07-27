@@ -1,4 +1,4 @@
-// Package ui renders prbot's terminal output.
+// Package ui renders quorum's terminal output.
 //
 // Everything degrades: without a terminal there are no colours, no hyperlinks
 // and no box drawing, so piping status into a file or a launchd log produces
@@ -107,7 +107,7 @@ func (w *Writer) Section(title string, count int, total int) {
 }
 
 // Truncate shortens s to at most n display cells, marking the cut with an
-// ellipsis. It counts runes, which is right for the titles prbot prints.
+// ellipsis. It counts runes, which is right for the titles quorum prints.
 func Truncate(s string, n int) string {
 	if n <= 0 {
 		return ""

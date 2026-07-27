@@ -14,7 +14,7 @@ func (r *Runner) notify(title, body, url string) {
 		return
 	}
 	if bin, err := exec.LookPath("terminal-notifier"); err == nil {
-		args := []string{"-title", title, "-message", body, "-group", "io.github.prbot"}
+		args := []string{"-title", title, "-message", body, "-group", "io.github.quorum"}
 		if url != "" {
 			args = append(args, "-open", url)
 		}

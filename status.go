@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/prbot/internal/runner"
-	"github.com/yungweng/prbot/internal/state"
-	"github.com/yungweng/prbot/internal/ui"
+	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/ui"
 )
 
 // recentCount is how many finished reviews the dashboard shows.
@@ -23,7 +23,7 @@ func (a *app) cmdStatus(args []string) int {
 	return 0
 }
 
-// dashboard renders everything prbot knows in one screen: what is running, what
+// dashboard renders everything quorum knows in one screen: what is running, what
 // is waiting, what came back, and whether the machine is in a state to do more.
 func (a *app) dashboard(w *ui.Writer) {
 	file, err := state.Read(a.p.StateFile)
@@ -58,7 +58,7 @@ func (a *app) dashboard(w *ui.Writer) {
 }
 
 func (a *app) header(w *ui.Writer) {
-	left := "prbot " + Version
+	left := "quorum " + Version
 	right := a.agentLine()
 	gap := w.Width - len(left) - len(right) - 1
 	if gap < 2 {
@@ -74,7 +74,7 @@ func (a *app) header(w *ui.Writer) {
 // agentLine describes the launchd agent and when it last actually did work.
 func (a *app) agentLine() string {
 	if !a.agentLoaded() {
-		return "agent not installed, run: prbot install"
+		return "agent not installed, run: quorum install"
 	}
 	every := fmt.Sprintf("every %s", ui.Duration(time.Duration(a.cfg.PollInterval)*time.Second))
 	at, _, ok := a.lastPoll()
@@ -156,7 +156,7 @@ func (a *app) sectionRecent(w *ui.Writer, recent []state.Entry) {
 			}
 		case state.GaveUp:
 			mark = w.Red("✗")
-			detail = w.Red("gave up") + w.Dim(", retry: prbot run "+e.Key)
+			detail = w.Red("gave up") + w.Dim(", retry: quorum run "+e.Key)
 		default:
 			mark = w.Dim("–")
 			detail = w.Dim("skipped: " + e.Reason)
@@ -235,13 +235,13 @@ func (a *app) sectionSystem(w *ui.Writer) {
 		w.Printf("  %s %s\n", w.Dim(ui.Pad("load", 10)), text)
 	}
 
-	size := dirSize(a.p.ReviewCache)
+	size := dirSize(a.p.ReviewRuns)
 	cache := ui.Bytes(size)
 	if a.cfg.CacheBudgetGB > 0 {
 		limit := int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
 		cache += " of " + ui.Bytes(limit)
 		if size > limit {
-			cache = w.Yellow(cache) + w.Dim("  run: prbot gc")
+			cache = w.Yellow(cache) + w.Dim("  run: quorum gc")
 		}
 	}
 	w.Printf("  %s %s\n", w.Dim(ui.Pad("cache", 10)), cache)

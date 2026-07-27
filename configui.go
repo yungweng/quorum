@@ -7,12 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yungweng/prbot/internal/config"
-	"github.com/yungweng/prbot/internal/ui"
+	"github.com/yungweng/quorum/internal/codex"
+	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/ui"
 	"golang.org/x/term"
 )
 
-// setting is one editable row of `prbot config`. Everything prbot reads from
+// setting is one editable row of `quorum config`. Everything quorum reads from
 // the config file appears here: a value you can only reach by opening the file
 // in an editor is a value you forget you set.
 type setting struct {
@@ -91,7 +92,7 @@ func (a *app) settings() []setting {
 		{"poll interval", func(c config.Config) string {
 			return fmt.Sprintf("every %s", ui.Duration(secs(c.PollInterval)))
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "How often should prbot look for new requests?", c, []option{
+			return a.pick(in, "How often should quorum look for new requests?", c, []option{
 				{"every 2 minutes", "picks things up quickly",
 					func(c *config.Config) { c.PollInterval = 120 },
 					func(c config.Config) bool { return c.PollInterval <= 120 }},
@@ -105,7 +106,7 @@ func (a *app) settings() []setting {
 		}},
 
 		{"attempts", func(c config.Config) string {
-			return fmt.Sprintf("%d before prbot gives up on a request", c.MaxRetries)
+			return fmt.Sprintf("%d before quorum gives up on a request", c.MaxRetries)
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
 			return a.editNumber(in, "attempts per request before giving up", c.MaxRetries, 1, 10, &c.MaxRetries)
 		}},
@@ -157,7 +158,7 @@ func (a *app) settings() []setting {
 			if c.CacheBudgetGB <= 0 {
 				return "off, the review cache is never trimmed"
 			}
-			return fmt.Sprintf("%s GB, trimmed by prbot gc", trimNum(c.CacheBudgetGB))
+			return fmt.Sprintf("%s GB, trimmed by quorum gc", trimNum(c.CacheBudgetGB))
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
 			v, err := a.askText(in, "review cache budget in GB, 0 turns it off", trimNum(c.CacheBudgetGB))
 			if err != nil {
@@ -198,36 +199,78 @@ func (a *app) settings() []setting {
 				{"when a review finishes or fails", "click to open the posted comment",
 					func(c *config.Config) { c.Notify = true },
 					func(c config.Config) bool { return c.Notify }},
-				{"none", "check with: prbot",
+				{"none", "check with: quorum",
 					func(c *config.Config) { c.Notify = false },
 					func(c config.Config) bool { return !c.Notify }},
 			}, nil)
 		}},
 
 		{"posting", func(c config.Config) string {
-			if strings.Contains(c.ReviewArgs, "--dry-run") {
+			if !c.Post {
 				return "kept local, nothing is posted to GitHub"
 			}
 			return "posted as a comment on the pull request"
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
 			return a.pick(in, "Should reviews be posted to GitHub?", c, []option{
 				{"post them", "a comment on the pull request",
-					func(c *config.Config) { c.ReviewArgs = removeFlag(c.ReviewArgs, "--dry-run") },
-					func(c config.Config) bool { return !strings.Contains(c.ReviewArgs, "--dry-run") }},
-				{"keep them local", "adds --dry-run; findings stay in the run directory",
-					func(c *config.Config) { c.ReviewArgs = addFlag(c.ReviewArgs, "--dry-run") },
-					func(c config.Config) bool { return strings.Contains(c.ReviewArgs, "--dry-run") }},
+					func(c *config.Config) { c.Post = true },
+					func(c config.Config) bool { return c.Post }},
+				{"keep them local", "findings stay in the run directory",
+					func(c *config.Config) { c.Post = false },
+					func(c config.Config) bool { return !c.Post }},
 			}, nil)
 		}},
 
-		{"extra flags", func(c config.Config) string {
-			return orNone(c.ReviewArgs)
+		{"review model", func(c config.Config) string {
+			return fmt.Sprintf("%s, effort %s", c.ReviewModel, c.ReviewEffort)
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "extra flags passed straight to pr-codex-review", c.ReviewArgs)
+			v, err := a.askText(in, "model for the reviewers and the aggregator", c.ReviewModel)
 			if err != nil {
 				return err
 			}
-			c.ReviewArgs = strings.TrimSpace(v)
+			if v = strings.TrimSpace(v); v != "" {
+				c.ReviewModel = v
+			}
+			return a.pick(in, "How hard should the reviewers think?", c, effortOptions(
+				func(c *config.Config) *string { return &c.ReviewEffort }), nil)
+		}},
+
+		{"agent does", func(c config.Config) string {
+			if c.AgentAction == config.ActionBabysit {
+				return "the full fix loop: review, fix, CI, repeat"
+			}
+			return "one review, posted as a comment"
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			return a.pick(in, "What should the agent do with a PR that asks for your review?", c, []option{
+				{"review it", "post one review and stop",
+					func(c *config.Config) { c.AgentAction = config.ActionReview },
+					func(c config.Config) bool { return c.AgentAction != config.ActionBabysit }},
+				{"babysit it", "review, fix the findings, wait for CI, repeat until clean",
+					func(c *config.Config) { c.AgentAction = config.ActionBabysit },
+					func(c config.Config) bool { return c.AgentAction == config.ActionBabysit }},
+			}, nil)
+		}},
+
+		{"fix sessions", func(c config.Config) string {
+			model := c.FixModel
+			if model == "" {
+				model = "your codex default"
+			}
+			return fmt.Sprintf("%s, up to %d rounds, %s per step",
+				model, c.MaxIter, config.FormatDuration(c.FixTimeout))
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, "model for the fix sessions (empty keeps your codex default)", c.FixModel)
+			if err != nil {
+				return err
+			}
+			c.FixModel = strings.TrimSpace(v)
+			n, err := a.askText(in, "maximum review to fix rounds", fmt.Sprint(c.MaxIter))
+			if err != nil {
+				return err
+			}
+			if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && i >= 1 {
+				c.MaxIter = i
+			}
 			return nil
 		}},
 	}
@@ -293,7 +336,7 @@ func (a *app) settingsMenu() int {
 	}
 
 	fmt.Fprintln(w.Out)
-	w.Printf("%s\n", w.Bold("prbot config"))
+	w.Printf("%s\n", w.Bold("quorum config"))
 	w.Printf("%s\n\n", w.Dim("↑↓ to move, enter to change, s to save, q to leave"))
 	draw(true)
 
@@ -327,7 +370,7 @@ func (a *app) settingsMenu() int {
 			}
 			w.Home()
 			fmt.Fprintln(w.Out)
-			w.Printf("%s\n", w.Bold("prbot config"))
+			w.Printf("%s\n", w.Bold("quorum config"))
 			w.Printf("%s\n\n", w.Dim("↑↓ to move, enter to change, s to save, q to leave"))
 			draw(true)
 			continue
@@ -436,7 +479,7 @@ func (a *app) editNumber(in *bufio.Reader, prompt string, current, lo, hi int, d
 }
 
 func (a *app) editScope(in *bufio.Reader, cfg *config.Config) error {
-	return a.pick(in, "Which pull requests should prbot pick up?", cfg, []option{
+	return a.pick(in, "Which pull requests should quorum pick up?", cfg, []option{
 		{"every repository that asks you", "any org, any repo, including your personal ones",
 			func(c *config.Config) { c.Orgs, c.Repos = nil, nil },
 			func(c config.Config) bool { return len(c.Orgs) == 0 && len(c.Repos) == 0 }},
@@ -500,3 +543,18 @@ func fieldsOrNil(s string) []string {
 }
 
 func trimNum(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+
+// effortOptions builds the reasoning-effort picker for whichever field the
+// caller points at.
+func effortOptions(field func(*config.Config) *string) []option {
+	var out []option
+	for _, level := range codex.Efforts {
+		out = append(out, option{level, "", func(c *config.Config) {
+			*field(c) = level
+		}, func(c config.Config) bool {
+			cc := c
+			return *field(&cc) == level
+		}})
+	}
+	return out
+}

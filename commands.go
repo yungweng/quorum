@@ -15,16 +15,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yungweng/prbot/internal/config"
-	"github.com/yungweng/prbot/internal/runner"
-	"github.com/yungweng/prbot/internal/state"
-	"github.com/yungweng/prbot/internal/ui"
+	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/ui"
 )
 
 // cmdRun reviews one pull request now, whatever the queue and the filters say.
 func (a *app) cmdRun(args []string) int {
 	if len(args) == 0 {
-		return a.die("usage: prbot run <pr-url> | <owner/repo#number> | <number>")
+		return a.die("usage: quorum run <pr-url> | <owner/repo#number> | <number>")
 	}
 	repo, number, err := a.resolvePR(args[0])
 	if err != nil {
@@ -57,7 +57,8 @@ func (a *app) cmdRun(args []string) int {
 		return a.die("%v", err)
 	}
 	a.log.Echo = func(s string) { fmt.Println(s) }
-	r := &runner.Runner{Cfg: a.cfg, P: a.p, Log: a.log, ReviewBin: t.Review, GitBin: t.Git, GHBin: t.GH}
+	r := &runner.Runner{Cfg: a.cfg, P: a.p, Log: a.log, GitBin: t.Git, GHBin: t.GH,
+		CodexBin: t.Codex, DirenvBin: t.Direnv, GH: client, Git: a.newGit(t.Git)}
 	if err := r.Review(ctx, key, repo, number, details.HeadRefOid, details.Title, ""); err != nil {
 		return 1
 	}
@@ -215,7 +216,7 @@ type runEntry struct {
 // all of the space and are reproducible, and only then whole run directories,
 // oldest first, until the cache fits its budget.
 func (a *app) collect(dry bool) (freed int64, removed int) {
-	entries, err := os.ReadDir(a.p.ReviewCache)
+	entries, err := os.ReadDir(a.p.ReviewRuns)
 	if err != nil {
 		return 0, 0
 	}
@@ -235,7 +236,7 @@ func (a *app) collect(dry bool) (freed int64, removed int) {
 		if !e.IsDir() || e.Name() == "deps" {
 			continue
 		}
-		path := filepath.Join(a.p.ReviewCache, e.Name())
+		path := filepath.Join(a.p.ReviewRuns, e.Name())
 		info, err := e.Info()
 		if err != nil {
 			continue
@@ -265,7 +266,7 @@ func (a *app) collect(dry bool) (freed int64, removed int) {
 		return freed, removed
 	}
 	limit := int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
-	total := dirSize(a.p.ReviewCache)
+	total := dirSize(a.p.ReviewRuns)
 	if dry {
 		total -= freed
 	}

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/prbot/internal/runner"
-	"github.com/yungweng/prbot/internal/state"
-	"github.com/yungweng/prbot/internal/ui"
+	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/ui"
 )
 
 // check is one line of the doctor report.
@@ -54,7 +54,7 @@ func (a *app) cmdDoctor(args []string) int {
 
 	if !fix {
 		if worst > 0 {
-			w.Printf("  %s\n\n", w.Dim("prbot doctor --fix applies what can be applied automatically"))
+			w.Printf("  %s\n\n", w.Dim("quorum doctor --fix applies what can be applied automatically"))
 		}
 		if worst == 2 {
 			return 1
@@ -71,7 +71,7 @@ func (a *app) cmdDoctor(args []string) int {
 		w.Printf("  state      cleared %d interrupted review(s)\n", n)
 	}
 	if runtime.GOOS == "darwin" {
-		for _, dir := range []string{a.p.ReviewCache, filepath.Dir(a.p.CloneDir)} {
+		for _, dir := range []string{a.p.ReviewRuns, filepath.Dir(a.p.CloneDir)} {
 			if isTimeMachineIncluded(dir) {
 				if err := exec.Command("tmutil", "addexclusion", dir).Run(); err == nil {
 					w.Printf("  backups    excluded %s from Time Machine\n", dir)
@@ -94,8 +94,8 @@ func (a *app) runChecks() []check {
 	for _, spec := range []struct{ name, why string }{
 		{"gh", "GitHub access"},
 		{"git", "cloning and fetching"},
-		{"pr-codex-review", "the review itself"},
-		{"codex", "pr-codex-review runs it"},
+
+		{"codex", "the reviewer panel runs it"},
 		{"direnv", "entering project environments"},
 	} {
 		path, err := exec.LookPath(spec.name)
@@ -125,17 +125,17 @@ func (a *app) runChecks() []check {
 	// The agent and whether it is actually working.
 	switch {
 	case runtime.GOOS != "darwin":
-		out = append(out, check{"agent", "launchd is macOS only, run `prbot poll` from cron", 1, ""})
+		out = append(out, check{"agent", "launchd is macOS only, run `quorum poll` from cron", 1, ""})
 	case !a.agentLoaded():
-		out = append(out, check{"agent", "not installed", 1, "prbot install"})
+		out = append(out, check{"agent", "not installed", 1, "quorum install"})
 	default:
 		at, open, ok := a.lastPoll()
 		switch {
 		case !ok:
-			out = append(out, check{"agent", "loaded, but has not completed a poll yet", 1, "prbot poll"})
+			out = append(out, check{"agent", "loaded, but has not completed a poll yet", 1, "quorum poll"})
 		case time.Since(at) > 3*time.Duration(a.cfg.PollInterval)*time.Second:
 			out = append(out, check{"agent", "loaded, but the last poll was " + ui.Ago(at), 2,
-				"prbot poll to see the error, then prbot install to reload the agent"})
+				"quorum poll to see the error, then quorum install to reload the agent"})
 		default:
 			out = append(out, check{"agent", fmt.Sprintf("polled %s, %d open request(s)", ui.Ago(at), open), 0, ""})
 		}
@@ -143,7 +143,7 @@ func (a *app) runChecks() []check {
 
 	// Config.
 	if a.configErr != nil {
-		out = append(out, check{"config", a.configErr.Error(), 1, "prbot setup, or fix the file by hand"})
+		out = append(out, check{"config", a.configErr.Error(), 1, "quorum setup, or fix the file by hand"})
 	} else {
 		out = append(out, check{"config", a.p.Config, 0, ""})
 	}
@@ -151,29 +151,29 @@ func (a *app) runChecks() []check {
 	// Recent GitHub trouble, straight from the log.
 	if retries := a.countLog("retrying in"); retries > 0 {
 		out = append(out, check{"network", fmt.Sprintf("%d GitHub call(s) had to be retried recently", retries), 1,
-			"nothing to do, prbot retries by itself"})
+			"nothing to do, quorum retries by itself"})
 	}
 
 	// Interrupted reviews.
 	if n := a.orphanCount(); n > 0 {
 		out = append(out, check{"reviews", fmt.Sprintf("%d review(s) recorded as running with no process left", n), 1,
-			"prbot doctor --fix"})
+			"quorum doctor --fix"})
 	}
 
 	// Disk.
-	size := dirSize(a.p.ReviewCache)
+	size := dirSize(a.p.ReviewRuns)
 	limit := int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
 	switch {
 	case a.cfg.CacheBudgetGB <= 0:
 		out = append(out, check{"cache", ui.Bytes(size) + ", no budget set", 0, ""})
 	case size > limit:
-		out = append(out, check{"cache", fmt.Sprintf("%s, over the %s budget", ui.Bytes(size), ui.Bytes(limit)), 1, "prbot gc"})
+		out = append(out, check{"cache", fmt.Sprintf("%s, over the %s budget", ui.Bytes(size), ui.Bytes(limit)), 1, "quorum gc"})
 	default:
 		out = append(out, check{"cache", fmt.Sprintf("%s of %s", ui.Bytes(size), ui.Bytes(limit)), 0, ""})
 	}
 
-	if runtime.GOOS == "darwin" && isTimeMachineIncluded(a.p.ReviewCache) {
-		out = append(out, check{"backups", "the review cache is being backed up by Time Machine", 1, "prbot doctor --fix"})
+	if runtime.GOOS == "darwin" && isTimeMachineIncluded(a.p.ReviewRuns) {
+		out = append(out, check{"backups", "the review cache is being backed up by Time Machine", 1, "quorum doctor --fix"})
 	}
 
 	// Scheduling priority.

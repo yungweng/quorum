@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/yungweng/prbot/internal/config"
+	"github.com/yungweng/quorum/internal/config"
 	"golang.org/x/term"
 )
 
@@ -36,7 +36,7 @@ func (a *app) cmdSetup(args []string) int {
 	in := bufio.NewReader(os.Stdin)
 
 	fmt.Fprintln(w.Out)
-	w.Printf("%s\n", w.Bold("prbot setup"))
+	w.Printf("%s\n", w.Bold("quorum setup"))
 	w.Printf("%s\n", w.Dim("arrow keys to choose, enter to confirm, ctrl-c to leave"))
 
 	questions := []struct {
@@ -44,7 +44,7 @@ func (a *app) cmdSetup(args []string) int {
 		options []option
 	}{
 		{
-			"Which pull requests should prbot pick up?",
+			"Which pull requests should quorum pick up?",
 			[]option{
 				{"every repository that asks you", "any org, any repo, including your personal ones",
 					func(c *config.Config) { c.Orgs, c.Repos = nil, nil },
@@ -72,7 +72,7 @@ func (a *app) cmdSetup(args []string) int {
 			},
 		},
 		{
-			"How often should prbot look for new requests?",
+			"How often should quorum look for new requests?",
 			[]option{
 				{"every 2 minutes", "picks things up quickly", func(c *config.Config) { c.PollInterval = 120 },
 					func(c config.Config) bool { return c.PollInterval <= 120 }},
@@ -85,7 +85,7 @@ func (a *app) cmdSetup(args []string) int {
 		{
 			"What about your own pull requests?",
 			[]option{
-				{"skip them", "review one on purpose with: prbot run <pr>",
+				{"skip them", "review one on purpose with: quorum run <pr>",
 					func(c *config.Config) { c.SkipOwn = true },
 					func(c config.Config) bool { return c.SkipOwn }},
 				{"review them too", "whenever a review is requested from you on your own PR",
@@ -99,7 +99,7 @@ func (a *app) cmdSetup(args []string) int {
 				{"when a review finishes or fails", "click to open the posted comment",
 					func(c *config.Config) { c.Notify = true },
 					func(c config.Config) bool { return c.Notify }},
-				{"none", "check with: prbot",
+				{"none", "check with: quorum",
 					func(c *config.Config) { c.Notify = false },
 					func(c config.Config) bool { return !c.Notify }},
 			},
@@ -108,11 +108,22 @@ func (a *app) cmdSetup(args []string) int {
 			"Should reviews be posted to GitHub?",
 			[]option{
 				{"post them", "a comment on the pull request",
-					func(c *config.Config) { c.ReviewArgs = removeFlag(c.ReviewArgs, "--dry-run") },
-					func(c config.Config) bool { return !strings.Contains(c.ReviewArgs, "--dry-run") }},
-				{"keep them local", "adds --dry-run; findings stay in the run directory",
-					func(c *config.Config) { c.ReviewArgs = addFlag(c.ReviewArgs, "--dry-run") },
-					func(c config.Config) bool { return strings.Contains(c.ReviewArgs, "--dry-run") }},
+					func(c *config.Config) { c.Post = true },
+					func(c config.Config) bool { return c.Post }},
+				{"keep them local", "findings stay in the run directory",
+					func(c *config.Config) { c.Post = false },
+					func(c config.Config) bool { return !c.Post }},
+			},
+		},
+		{
+			"What should the agent do with a PR that asks for your review?",
+			[]option{
+				{"review it", "post one review and stop",
+					func(c *config.Config) { c.AgentAction = config.ActionReview },
+					func(c config.Config) bool { return c.AgentAction != config.ActionBabysit }},
+				{"babysit it", "review, fix the findings, wait for CI, repeat until clean",
+					func(c *config.Config) { c.AgentAction = config.ActionBabysit },
+					func(c config.Config) bool { return c.AgentAction == config.ActionBabysit }},
 			},
 		},
 	}
@@ -162,7 +173,7 @@ func (a *app) cmdSetup(args []string) int {
 	}
 	a.cfg = cfg
 	if !a.agentLoaded() && runtime.GOOS == "darwin" {
-		w.Printf("%s %s\n", w.Dim("next"), w.Bold("prbot install")+w.Dim(" to start the agent"))
+		w.Printf("%s %s\n", w.Dim("next"), w.Bold("quorum install")+w.Dim(" to start the agent"))
 	}
 	fmt.Fprintln(w.Out)
 	return 0
@@ -260,21 +271,4 @@ func (a *app) askText(in *bufio.Reader, prompt, current string) (string, error) 
 		return current, nil
 	}
 	return line, nil
-}
-
-func addFlag(args, flag string) string {
-	if strings.Contains(args, flag) {
-		return args
-	}
-	return strings.TrimSpace(args + " " + flag)
-}
-
-func removeFlag(args, flag string) string {
-	var kept []string
-	for _, f := range strings.Fields(args) {
-		if f != flag {
-			kept = append(kept, f)
-		}
-	}
-	return strings.Join(kept, " ")
 }

@@ -268,7 +268,7 @@ type timelineEvent struct {
 // LatestReviewRequest returns the timestamp of the most recent review request
 // aimed at login or at one of teamSlugs, or "" when there is none.
 //
-// This timestamp is the trigger: a request prbot has not recorded yet means
+// This timestamp is the trigger: a request quorum has not recorded yet means
 // review now, and re-requesting a review produces a fresh one on purpose.
 func (c *Client) LatestReviewRequest(ctx context.Context, repo string, number int, login string, teamSlugs []string) (string, error) {
 	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/issues/%d/timeline", repo, number), "--paginate")

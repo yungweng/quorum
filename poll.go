@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yungweng/prbot/internal/gh"
-	"github.com/yungweng/prbot/internal/runner"
-	"github.com/yungweng/prbot/internal/state"
+	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/state"
 )
 
-// candidate is one pull request the search returned, paired with what prbot
+// candidate is one pull request the search returned, paired with what quorum
 // already knows about it.
 type candidate struct {
 	pr    gh.PR
@@ -235,7 +235,7 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 		return c, false
 	}
 	if int(c.rec.Fails) >= a.cfg.MaxRetries {
-		a.log.Printf("%s: giving up after %d failed attempts, retry with: prbot run %s", key, c.rec.Fails, key)
+		a.log.Printf("%s: giving up after %d failed attempts, retry with: quorum run %s", key, c.rec.Fails, key)
 		a.record(key, func(rec *state.Record) {
 			rec.Mark(state.GaveUp, "too many failed attempts")
 			rec.ReqAt = reqAt
@@ -343,7 +343,8 @@ func (a *app) cmdReviewOne(args []string) int {
 	}
 	r := &runner.Runner{
 		Cfg: a.cfg, P: a.p, Log: a.log,
-		ReviewBin: t.Review, GitBin: t.Git, GHBin: t.GH,
+		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, DirenvBin: t.Direnv,
+		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
 	}
 	if err := r.Review(ctx, key, repo, atoi(number), sha, title, reqAt); err != nil {
 		return 1

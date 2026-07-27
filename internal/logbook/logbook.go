@@ -1,4 +1,4 @@
-// Package logbook writes prbot's log file.
+// Package logbook writes quorum's log file.
 //
 // The file is the record of what the agent did while nobody was watching, so
 // it has to survive unattended for months: it rotates itself, and every write
@@ -30,7 +30,7 @@ type Logger struct {
 
 func New(path string) *Logger { return &Logger{Path: path} }
 
-// Printf writes one line. Failures to log are swallowed: prbot has nowhere
+// Printf writes one line. Failures to log are swallowed: quorum has nowhere
 // better to report them, and losing a log line must never stop a review.
 func (l *Logger) Printf(format string, args ...any) {
 	msg := strings.TrimRight(fmt.Sprintf(format, args...), "\n")

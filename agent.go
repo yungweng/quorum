@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/yungweng/prbot/internal/paths"
+	"github.com/yungweng/quorum/internal/paths"
 )
 
 // The launchd job. AbandonProcessGroup matters: reviews outlive the poll that
@@ -42,7 +42,7 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 func (a *app) cmdInstall(args []string) int {
 	_ = args
 	if runtime.GOOS != "darwin" {
-		return a.die("install only supports macOS launchd; on Linux run `prbot poll` from a systemd timer or cron")
+		return a.die("install only supports macOS launchd; on Linux run `quorum poll` from a systemd timer or cron")
 	}
 	if _, err := a.findTools(); err != nil {
 		return a.die("%v", err)
@@ -81,6 +81,16 @@ func (a *app) cmdInstall(args []string) int {
 		return a.die("%v", err)
 	}
 
+	// An installed prbot agent polls the same repositories with the same
+	// GitHub account. Leaving it loaded would mean two agents racing for the
+	// same review requests, so it goes before this one comes up.
+	if legacy := legacyPlistPath(); legacy != "" {
+		if _, err := os.Stat(legacy); err == nil {
+			exec.Command("launchctl", "unload", legacy).Run()
+			a.out.Printf("unloaded the old prbot agent at %s\n", legacy)
+		}
+	}
+
 	exec.Command("launchctl", "unload", a.p.Plist).Run()
 	if out, err := exec.Command("launchctl", "load", a.p.Plist).CombinedOutput(); err != nil {
 		return a.die("launchctl load failed: %s", strings.TrimSpace(string(out)))
@@ -90,8 +100,8 @@ func (a *app) cmdInstall(args []string) int {
 	a.out.Printf("\n%s\n", a.out.Green("Agent installed."))
 	a.out.Printf("  polls every %d seconds and reviews what asks for you\n", a.cfg.PollInterval)
 	a.out.Printf("  config    %s\n", a.p.Config)
-	a.out.Printf("  next      %s to change scope and limits\n", a.out.Bold("prbot setup"))
-	a.out.Printf("            %s to see what it is doing\n\n", a.out.Bold("prbot"))
+	a.out.Printf("  next      %s to change scope and limits\n", a.out.Bold("quorum setup"))
+	a.out.Printf("            %s to see what it is doing\n\n", a.out.Bold("quorum"))
 	return 0
 }
 
@@ -112,6 +122,15 @@ func (a *app) agentLoaded() bool {
 		return false
 	}
 	return exec.Command("launchctl", "list", paths.PlistLabel).Run() == nil
+}
+
+// legacyPlistPath is where prbot installed its launchd job.
+func legacyPlistPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", paths.LegacyPlistLabel+".plist")
 }
 
 func xmlEscape(s string) string {

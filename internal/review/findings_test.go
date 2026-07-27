@@ -1,0 +1,195 @@
+package review
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// A comment with all five sections and real bullets is the shape everything
+// downstream counts on.
+const goodComment = `Hi @octocat, thanks for this.
+
+## Summary
+
+The change looks reasonable overall.
+
+## Blockers
+
+- The migration drops the column before the backfill runs.
+
+## Critical
+
+- ` + "`parseAmount`" + ` returns cents where callers expect euros.
+- The retry loop has no upper bound.
+
+## Suggestions
+
+- Extract the date handling into its own helper.
+
+## Questions
+
+None.
+`
+
+func write(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "final-pr-comment.md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestValidateAcceptsAWellFormedComment(t *testing.T) {
+	if err := ValidateComment(write(t, goodComment)); err != nil {
+		t.Errorf("a well formed comment was rejected: %v", err)
+	}
+}
+
+func TestCountsBulletsPerSection(t *testing.T) {
+	path := write(t, goodComment)
+	for _, tc := range []struct {
+		heading string
+		want    int
+	}{
+		{"Blockers", 1},
+		{"Critical", 2},
+		{"Suggestions", 1},
+		{"Questions", 0},
+	} {
+		if got := CountFile(path, tc.heading); got != tc.want {
+			t.Errorf("%s = %d, want %d", tc.heading, got, tc.want)
+		}
+	}
+}
+
+// Only Blockers and Critical may keep the fix loop alive. Counting Suggestions
+// or Questions as blocking would mean the loop can never converge, because both
+// are open-ended by nature.
+func TestOnlyBlockersAndCriticalBlock(t *testing.T) {
+	f := Findings{Blockers: 1, Critical: 2, Suggestions: 9, Questions: 9}
+	if f.Blocking() != 3 {
+		t.Errorf("Blocking() = %d, want 3", f.Blocking())
+	}
+	clean := Findings{Suggestions: 40, Questions: 40}
+	if clean.Blocking() != 0 {
+		t.Error("suggestions and questions were treated as blocking")
+	}
+}
+
+// A renamed or missing heading must fail loudly. Silently, it would count as
+// zero findings and a PR with real blockers would report itself clean.
+func TestValidateRejectsAMissingSection(t *testing.T) {
+	broken := `## Summary
+
+Fine.
+
+## Blockers
+
+None.
+
+## Critical
+
+None.
+
+## Suggestions
+
+None.
+`
+	err := ValidateComment(write(t, broken))
+	if err == nil {
+		t.Fatal("a comment without ## Questions was accepted")
+	}
+}
+
+// A finding written as prose instead of a bullet would count as zero.
+func TestValidateRejectsProseInsteadOfBullets(t *testing.T) {
+	prose := `## Summary
+
+Fine.
+
+## Blockers
+
+There is a serious problem with the migration ordering.
+
+## Critical
+
+None.
+
+## Suggestions
+
+None.
+
+## Questions
+
+None.
+`
+	if err := ValidateComment(write(t, prose)); err == nil {
+		t.Fatal("a prose finding was accepted and would have counted as zero blockers")
+	}
+}
+
+// Posting the aggregator's narration under the user's own name is worse than
+// failing the run.
+func TestValidateRejectsMetaOutput(t *testing.T) {
+	for _, meta := range []string{
+		"I tried to post this but could not.",
+		"Run gh pr comment 12 --body-file out.md to post it.",
+	} {
+		body := "## Summary\n\n" + meta + "\n\n## Blockers\n\nNone.\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
+		if err := ValidateComment(write(t, body)); err == nil {
+			t.Errorf("meta output was accepted: %q", meta)
+		}
+	}
+}
+
+func TestValidateRejectsACodeFence(t *testing.T) {
+	fenced := "```markdown\n" + goodComment + "\n```\n"
+	if err := ValidateComment(write(t, fenced)); err == nil {
+		t.Fatal("a fenced comment was accepted")
+	}
+}
+
+// "None." is the documented way to say a section is empty, in the spellings a
+// model actually produces.
+func TestNoneIsAcceptedInItsUsualSpellings(t *testing.T) {
+	for _, none := range []string{"None.", "none", "None", "NONE.", "None!"} {
+		body := "## Summary\n\nFine.\n\n## Blockers\n\n" + none +
+			"\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
+		if err := ValidateComment(write(t, body)); err != nil {
+			t.Errorf("%q was rejected: %v", none, err)
+		}
+	}
+}
+
+// Headings are matched case-insensitively with flexible spacing, because that
+// is what models produce, but the section still has to be the right one.
+func TestSectionMatchingIgnoresCaseAndSpacing(t *testing.T) {
+	body := "##   summary\n\nFine.\n\n##  BLOCKERS  \n\n- one\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
+	path := write(t, body)
+	if err := ValidateComment(path); err != nil {
+		t.Fatalf("unexpected rejection: %v", err)
+	}
+	if got := CountFile(path, "Blockers"); got != 1 {
+		t.Errorf("Blockers = %d, want 1", got)
+	}
+}
+
+// Bullets stop at the next level-2 heading, so a finding is never counted twice
+// or attributed to the wrong severity.
+func TestBulletsDoNotLeakAcrossSections(t *testing.T) {
+	path := write(t, goodComment)
+	if got := Count(readFile(t, path), "Summary"); got != 0 {
+		t.Errorf("Summary picked up %d bullets from later sections", got)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}

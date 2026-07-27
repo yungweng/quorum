@@ -51,6 +51,15 @@ jobs:
         run: |
           go run . --help >/dev/null
           go run . --version >/dev/null
+          # Each subcommand's help is built from the resolved config, so this
+          # also catches a format string that no longer matches its arguments.
+          go run . review --help >/dev/null
+          go run . babysit --help >/dev/null
+          # An unknown option must fail rather than be silently ignored.
+          if go run . review --not-a-real-flag 123 >/dev/null 2>&1; then
+            echo "::error::an unknown option was accepted"
+            exit 1
+          fi
 
   lint:
     name: Lint

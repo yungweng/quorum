@@ -2,11 +2,8 @@ package runner
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,38 +11,39 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yungweng/prbot/internal/config"
-	"github.com/yungweng/prbot/internal/logbook"
-	"github.com/yungweng/prbot/internal/paths"
-	"github.com/yungweng/prbot/internal/state"
+	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/logbook"
+	"github.com/yungweng/quorum/internal/loop"
+	"github.com/yungweng/quorum/internal/paths"
+	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/state"
 )
 
-// Runner performs one review from start to finish.
+// Runner performs one automated review from start to finish.
+//
+// It used to start pr-codex-review as a child process and then reconstruct what
+// had happened by scanning its stdout for a "Run dir" line and reading the JSON
+// it left behind. The review core is a package now, so the outcome is simply
+// the return value and the failure modes are typed errors.
 type Runner struct {
-	Cfg       config.Config
-	P         paths.P
-	Log       *logbook.Logger
-	ReviewBin string
-	GitBin    string
-	GHBin     string
+	Cfg config.Config
+	P   paths.P
+	Log *logbook.Logger
+
+	GH     *gh.Client
+	Git    git.G
+	GitBin string
+	GHBin  string
+
+	CodexBin  string
+	DirenvBin string
 }
 
-// Findings is the machine readable summary pr-codex-review writes.
-type Findings struct {
-	Blockers           int    `json:"blockers"`
-	Critical           int    `json:"critical"`
-	Suggestions        int    `json:"suggestions"`
-	Questions          int    `json:"questions"`
-	ReviewersSucceeded int    `json:"reviewers_succeeded"`
-	ReviewersRequested int    `json:"reviewers_requested"`
-	Posted             bool   `json:"posted"`
-	CommentURL         string `json:"comment_url"`
-	HeadSHA            string `json:"head_sha"`
-}
-
-// Review clones or refreshes the repository, runs pr-codex-review against the
-// pull request and records the outcome. It is called in the detached child
-// process that owns the marker.
+// Review clones or refreshes the repository, reviews the pull request and
+// records the outcome. It runs in the detached child process that owns the
+// marker.
 func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, reqAt string) error {
 	r.applyPriority()
 
@@ -73,22 +71,30 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		rec.StartedAt = state.Now()
 	})
 
-	runDir, runErr := r.exec(ctx, clone, repo, number, runLog, func(dir string) {
-		// pr-codex-review prints its run directory early. Recording it lets
-		// status follow the reviewers while the review is still going.
-		r.mutate(key, func(rec *state.Record) { rec.RunDir = dir })
-	})
+	action := r.Cfg.AgentAction
+	if action == "" {
+		action = config.ActionReview
+	}
 
-	findings, ferr := readFindings(runDir)
-	if runErr == nil && ferr == nil {
-		r.Log.Printf("%s: done, %d blockers %d critical %d suggestions %d questions -> %s",
-			key, findings.Blockers, findings.Critical, findings.Suggestions, findings.Questions,
-			orDash(findings.CommentURL))
+	var (
+		findings review.Findings
+		runDir   string
+		runErr   error
+	)
+	switch action {
+	case config.ActionBabysit:
+		findings, runDir, runErr = r.babysit(ctx, key, clone, repo, number, runLog)
+	default:
+		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, runLog)
+	}
+
+	if runErr == nil {
+		r.Log.Printf("%s: done, %s -> %s", key, findings.Summary(), orDash(urlOf(findings)))
 		r.mutate(key, func(rec *state.Record) {
 			rec.Mark(state.OK, "")
 			rec.SHA = sha
 			rec.RunDir = runDir
-			rec.CommentURL = findings.CommentURL
+			rec.CommentURL = urlOf(findings)
 			rec.Blockers = state.Num(findings.Blockers)
 			rec.Critical = state.Num(findings.Critical)
 			rec.Suggestions = state.Num(findings.Suggestions)
@@ -98,22 +104,114 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			rec.ReqAt = reqAt
 		})
 		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number),
-			summaryLine(findings), findings.CommentURL)
+			summaryLine(findings), urlOf(findings))
 		return nil
 	}
 
-	reason := "pr-codex-review failed"
-	if runErr != nil {
-		reason = runErr.Error()
-	} else if ferr != nil {
-		reason = fmt.Sprintf("no findings written: %v", ferr)
-	}
+	reason := runErr.Error()
 	r.Log.Printf("%s: FAILED, %s (log: %s)", key, reason, runLog)
 	// The request timestamp stays unrecorded on purpose, so the next poll
 	// retries until MaxRetries is reached.
 	r.recordFailureWith(key, sha, runDir, reason, runLog)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
+}
+
+// reviewOnce posts one review and stops.
+func (r *Runner) reviewOnce(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, error) {
+	logFile, err := os.Create(runLog)
+	if err != nil {
+		return review.Findings{}, "", err
+	}
+	defer logFile.Close()
+
+	rev := &review.Runner{
+		GH:  r.GH,
+		Git: r.Git,
+		// Recording the run directory as soon as it exists lets the dashboard
+		// follow the reviewers while the review is still going.
+		Rep: &logReporter{w: logFile, onRunDir: func(dir string) {
+			r.mutate(key, func(rec *state.Record) { rec.RunDir = dir })
+		}},
+	}
+	res, err := rev.Run(ctx, r.reviewOptions(repo, number, clone))
+	if err != nil {
+		return review.Findings{}, "", err
+	}
+	return res.Findings, res.RunDir, nil
+}
+
+// babysit runs the full fix loop instead of a single review.
+//
+// This is what the three separate tools could not do: the daemon knew how to
+// start a review but had no way to reach the fix pipeline, because that was a
+// different binary with its own idea of where things live.
+func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, error) {
+	logFile, err := os.Create(runLog)
+	if err != nil {
+		return review.Findings{}, "", err
+	}
+	defer logFile.Close()
+
+	rev := &review.Runner{GH: r.GH, Git: r.Git, Rep: review.NopReporter{}}
+	pipe := &loop.Pipeline{
+		GH:     r.GH,
+		Git:    r.Git,
+		Review: rev,
+		Rep:    &loopLogReporter{w: logFile},
+		// No terminal behind a launchd agent, so interactive gates must abort
+		// rather than wait for input that can never arrive.
+		In: nil,
+	}
+	res, err := pipe.Run(ctx, loop.Options{
+		Repo:          repo,
+		RepoRoot:      clone,
+		Number:        number,
+		Model:         r.Cfg.FixModel,
+		Effort:        r.Cfg.FixEffort,
+		Reviewers:     r.Cfg.Reviewers,
+		ReviewModel:   r.Cfg.ReviewModel,
+		ReviewEffort:  r.Cfg.ReviewEffort,
+		MaxIter:       r.Cfg.MaxIter,
+		MaxCIFixes:    r.Cfg.MaxCIFixes,
+		FixTimeout:    r.Cfg.FixTimeout,
+		Bypass:        !r.Cfg.Sandboxed,
+		Interactive:   false,
+		UseDirenv:     true,
+		RunsDir:       r.P.BabysitRuns,
+		ReviewRunsDir: r.P.ReviewRuns,
+		DepsDir:       r.P.DepsCache,
+		CodexBin:      r.CodexBin,
+		DirenvBin:     r.DirenvBin,
+	})
+	if res == nil {
+		return review.Findings{}, "", err
+	}
+	return res.LastFindings, res.RunDir, err
+}
+
+// reviewOptions maps the daemon's configuration onto a review run.
+func (r *Runner) reviewOptions(repo string, number int, clone string) review.Options {
+	return review.Options{
+		Repo:     repo,
+		Number:   number,
+		RepoRoot: clone,
+		// No concurrency limit: every pass runs at once, which is the point. A
+		// review that trickles through its passes is a review you wait for.
+		Runs:          r.Cfg.Reviewers,
+		Model:         r.Cfg.ReviewModel,
+		Effort:        r.Cfg.ReviewEffort,
+		ReviewTimeout: r.Cfg.ReviewTimeout,
+		Post:          r.Cfg.Post,
+		UseDirenv:     true,
+		// Never passed for an automated run: allowing an .envrc the PR itself
+		// changed means executing a stranger's code unattended.
+		AllowEnvrcChange: false,
+		RunsDir:          r.P.ReviewRuns,
+		DepsDir:          r.P.DepsCache,
+		CodexBin:         r.CodexBin,
+		DirenvBin:        r.DirenvBin,
+	}
 }
 
 // mutate updates the state file and complains loudly if it cannot. Losing this
@@ -134,109 +232,6 @@ func (r *Runner) applyPriority() {
 	if err := syscall.Setpriority(syscall.PRIO_PROCESS, os.Getpid(), r.Cfg.Nice); err != nil {
 		r.Log.Printf("could not set priority to %d: %v", r.Cfg.Nice, err)
 	}
-}
-
-// exec runs pr-codex-review and returns the run directory it reported.
-func (r *Runner) exec(ctx context.Context, dir, repo string, number int, runLog string, onRunDir func(string)) (string, error) {
-	args := []string{fmt.Sprintf("https://github.com/%s/pull/%d", repo, number), "--no-notify"}
-	// No --concurrency: pr-codex-review then runs every pass at once, which is
-	// the point. Anyone who wants it throttled can say so in REVIEW_ARGS.
-	if r.Cfg.Reviewers > 0 {
-		args = append(args, "-n", fmt.Sprint(r.Cfg.Reviewers))
-	}
-	args = append(args, strings.Fields(r.Cfg.ReviewArgs)...)
-
-	f, err := os.Create(runLog)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	tee := &runDirScanner{out: f, found: onRunDir}
-	cmd := exec.CommandContext(ctx, r.ReviewBin, args...)
-	cmd.Dir = dir
-	cmd.Stdout = tee
-	cmd.Stderr = tee
-	cmd.Env = os.Environ()
-	err = cmd.Run()
-	tee.flush()
-	if err != nil {
-		return tee.dir, fmt.Errorf("pr-codex-review: %w", err)
-	}
-	return tee.dir, nil
-}
-
-// runDirScanner passes everything through to the log while watching for the
-// "Run dir" line of pr-codex-review's header.
-type runDirScanner struct {
-	out   io.Writer
-	found func(string)
-	buf   bytes.Buffer
-	dir   string
-}
-
-func (s *runDirScanner) Write(p []byte) (int, error) {
-	n, err := s.out.Write(p)
-	if s.dir == "" {
-		s.buf.Write(p[:n])
-		s.scan()
-	}
-	return n, err
-}
-
-func (s *runDirScanner) scan() {
-	for s.dir == "" {
-		line, err := s.buf.ReadString('\n')
-		if err != nil {
-			// Incomplete line: put it back and wait for the rest.
-			s.buf.Reset()
-			s.buf.WriteString(line)
-			return
-		}
-		if dir, ok := parseRunDir(line); ok {
-			s.dir = dir
-			if s.found != nil {
-				s.found(dir)
-			}
-		}
-	}
-}
-
-func (s *runDirScanner) flush() {
-	if s.dir == "" {
-		if dir, ok := parseRunDir(s.buf.String()); ok {
-			s.dir = dir
-		}
-	}
-}
-
-// parseRunDir reads the "  Run dir    /path" line of the header.
-func parseRunDir(line string) (string, bool) {
-	t := strings.TrimSpace(line)
-	rest, ok := strings.CutPrefix(t, "Run dir")
-	if !ok {
-		return "", false
-	}
-	rest = strings.TrimSpace(rest)
-	if rest == "" || !strings.HasPrefix(rest, "/") {
-		return "", false
-	}
-	return rest, true
-}
-
-func readFindings(runDir string) (Findings, error) {
-	var f Findings
-	if runDir == "" {
-		return f, fmt.Errorf("pr-codex-review did not report a run directory")
-	}
-	b, err := os.ReadFile(filepath.Join(runDir, "output", "findings.json"))
-	if err != nil {
-		return f, err
-	}
-	if err := json.Unmarshal(b, &f); err != nil {
-		return f, err
-	}
-	return f, nil
 }
 
 func (r *Runner) recordFailure(key, sha, runDir, reason string) {
@@ -304,16 +299,16 @@ func lockPath(path string) (func(), error) {
 	}, nil
 }
 
-// Progress is what a running review reports about itself, read from
-// pr-codex-review's event log.
+// Progress is what a running review reports about itself.
 type Progress struct {
 	Done      int
 	Failed    int
 	Requested int
 }
 
-// ReadProgress counts finished reviewers of a run in flight. A run directory
-// that is not there yet simply reports nothing.
+// ReadProgress counts finished reviewers of a run in flight, from the events
+// log the run writes as it goes. A run directory that is not there yet simply
+// reports nothing.
 func ReadProgress(runDir string, requested int) (Progress, bool) {
 	if runDir == "" {
 		return Progress{}, false
@@ -336,11 +331,18 @@ func ReadProgress(runDir string, requested int) (Progress, bool) {
 	return p, true
 }
 
-func summaryLine(f Findings) string {
+func summaryLine(f review.Findings) string {
 	if f.Blockers == 0 && f.Critical == 0 && f.Suggestions == 0 && f.Questions == 0 {
 		return "nothing found"
 	}
 	return fmt.Sprintf("%d blockers, %d critical, %d suggestions", f.Blockers, f.Critical, f.Suggestions)
+}
+
+func urlOf(f review.Findings) string {
+	if f.CommentURL == nil {
+		return ""
+	}
+	return *f.CommentURL
 }
 
 func nameOf(repo string) string {

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUnquote(t *testing.T) {
@@ -146,7 +147,14 @@ func TestRoundTrip(t *testing.T) {
 	want.CacheBudgetGB = 2
 	want.SkipOwn = false
 	want.Notify = false
-	want.ReviewArgs = "--dry-run -n 4"
+	want.ReviewModel = "gpt-5.4-mini"
+	want.ReviewEffort = "low"
+	want.Post = false
+	want.FixEffort = "high"
+	want.MaxIter = 4
+	want.FixTimeout = 90 * time.Minute
+	want.Sandboxed = true
+	want.AgentAction = ActionBabysit
 	want.Unknown = map[string]string{"FUTURE_KEY": "keep me"}
 
 	path := filepath.Join(t.TempDir(), "config")
@@ -162,6 +170,41 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if got.Unknown["FUTURE_KEY"] != "keep me" {
 		t.Error("an unrecognised key was dropped on rewrite")
+	}
+}
+
+// REVIEW_ARGS was passed verbatim to a separate binary that no longer exists.
+// It has to keep working on read, because --dry-run through it is how people
+// ran reviews without posting, and it has to disappear on write, because
+// leaving it in a rewritten file would suggest it still does something.
+func TestRetiredReviewArgsMapsDryRunAndIsNotRewritten(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(path, []byte("REVIEW_ARGS=\"--dry-run -n 4\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Post {
+		t.Error("REVIEW_ARGS=--dry-run did not turn posting off")
+	}
+	if got.ReviewArgs != "--dry-run -n 4" {
+		t.Errorf("the old value was not preserved for the user to see: %q", got.ReviewArgs)
+	}
+
+	if err := got.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ReviewArgs != "" {
+		t.Errorf("REVIEW_ARGS survived a rewrite as a live setting: %q", again.ReviewArgs)
+	}
+	if again.Post {
+		t.Error("POST was not written out, so the dry-run intent was lost on rewrite")
 	}
 }
 

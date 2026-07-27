@@ -1,4 +1,4 @@
-module github.com/yungweng/prbot
+module github.com/yungweng/quorum
 
 go 1.25.0
 

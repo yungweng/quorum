@@ -1,4 +1,4 @@
-// Package state stores what prbot knows about every pull request it has seen.
+// Package state stores what quorum knows about every pull request it has seen.
 //
 // Reviews run as separate processes and all write the same file, so every
 // mutation takes an exclusive lock, re-reads, changes and writes atomically.

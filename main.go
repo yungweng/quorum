@@ -1,5 +1,10 @@
-// Command prbot watches GitHub for review requests aimed at you and runs
-// pr-codex-review on each one.
+// Command quorum reviews pull requests with a panel of independent Codex
+// reviewers, drives them to green, and can do both unattended.
+//
+// It replaces three separate tools: pr-codex-review (the reviewer panel),
+// babysit (the review-fix loop) and prbot (the launchd agent that triggered
+// reviews). They shared a review core, a cache and a config but talked to each
+// other across process boundaries, which is where most of their fragility sat.
 package main
 
 import (
@@ -8,15 +13,27 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/yungweng/prbot/internal/config"
-	"github.com/yungweng/prbot/internal/gh"
-	"github.com/yungweng/prbot/internal/logbook"
-	"github.com/yungweng/prbot/internal/paths"
-	"github.com/yungweng/prbot/internal/ui"
+	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/logbook"
+	"github.com/yungweng/quorum/internal/paths"
+	"github.com/yungweng/quorum/internal/ui"
 )
 
 // Version is the release. The Homebrew formula builds it in with -ldflags.
-var Version = "0.5.1"
+var Version = "1.0.0"
+
+// Exit codes. The first five are inherited from babysit, so scripts wrapped
+// around it keep working.
+const (
+	exitOK           = 0
+	exitError        = 1
+	exitGateAborted  = 2
+	exitCIRed        = 3
+	exitNotConverged = 4
+	exitNoProgress   = 5
+)
 
 // app carries what every command needs.
 type app struct {
@@ -47,6 +64,10 @@ func run(args []string) int {
 	switch cmd {
 	case "", "status":
 		return a.cmdStatus(args)
+	case "review":
+		return a.cmdReview(args)
+	case "babysit":
+		return a.cmdBabysit(args)
 	case "watch":
 		return a.cmdWatch(args)
 	case "poll":
@@ -71,14 +92,14 @@ func run(args []string) int {
 		return a.cmdConfig(args)
 	case "--version", "-v", "version":
 		fmt.Println(Version)
-		return 0
+		return exitOK
 	case "-h", "--help", "help":
 		a.usage()
-		return 0
+		return exitOK
 	default:
 		a.err.Printf("unknown command: %s\n\n", cmd)
 		a.usage()
-		return 1
+		return exitError
 	}
 }
 
@@ -102,13 +123,18 @@ func newApp() *app {
 	}
 }
 
-// tools resolves the external binaries prbot drives. launchd starts jobs with a
-// minimal environment and never reads a shell profile, so PATH is widened with
-// the usual install locations before anything is looked up.
+// tools resolves the external binaries quorum drives. launchd starts jobs with
+// a minimal environment and never reads a shell profile, so PATH is widened
+// with the usual install locations before anything is looked up.
+//
+// pr-codex-review is deliberately absent: the reviewer panel is part of this
+// binary now, which also retires the version coupling the fix loop had to it.
 type tools struct {
-	GH     string
-	Git    string
-	Review string
+	GH    string
+	Git   string
+	Codex string
+	// Direnv is optional: repositories without an .envrc never need it.
+	Direnv string
 }
 
 func (a *app) findTools() (tools, error) {
@@ -121,7 +147,7 @@ func (a *app) findTools() (tools, error) {
 	}{
 		{"gh", &t.GH},
 		{"git", &t.Git},
-		{"pr-codex-review", &t.Review},
+		{"codex", &t.Codex},
 	} {
 		path, err := exec.LookPath(spec.name)
 		if err != nil {
@@ -130,6 +156,8 @@ func (a *app) findTools() (tools, error) {
 		}
 		*spec.dst = path
 	}
+	t.Direnv, _ = exec.LookPath("direnv")
+
 	if len(missing) > 0 {
 		return t, fmt.Errorf("missing required tools: %s", strings.Join(missing, ", "))
 	}
@@ -179,28 +207,33 @@ func (a *app) newGH(bin string) *gh.Client {
 	return c
 }
 
+func (a *app) newGit(bin string) git.G { return git.New(bin) }
+
 func (a *app) usage() {
-	fmt.Printf(`prbot %s - run pr-codex-review automatically on PRs that request your review
+	fmt.Printf(`quorum %s - a panel of Codex reviewers for your pull requests
 
-  prbot                 what is running, queued and finished
-  prbot watch           the same, redrawn as it changes
-  prbot run <pr>        review one PR now: url, owner/repo#number, or number
-  prbot logs [n]        follow the log
-  prbot doctor [--fix]  check the setup and report what to do about it
-  prbot setup           configure scope, limits and notifications
-  prbot install         install the launchd agent (polls every %ds)
-  prbot uninstall       remove the agent
-  prbot poll            run one poll cycle by hand
-  prbot gc              trim the review cache to its budget
-  prbot config          change any setting, or --path for the file location
+  quorum review <pr>     review one PR now and post the comment
+  quorum babysit [pr]    review, fix, wait for CI, repeat until it is clean
 
-Requires: gh (authenticated), git, pr-codex-review.
+  quorum                 what is running, queued and finished
+  quorum watch           the same, redrawn as it changes
+  quorum run <pr>        hand one PR to the agent right now
+  quorum logs [n]        follow the log
+  quorum doctor [--fix]  check the setup and report what to do about it
+  quorum setup           configure scope, limits and notifications
+  quorum install         install the launchd agent (polls every %ds)
+  quorum uninstall       remove the agent
+  quorum poll            run one poll cycle by hand
+  quorum gc              trim the cache to its budget
+  quorum config          change any setting, or --path for the file location
+
+Requires: gh (authenticated), git, codex. direnv is optional.
 Config: %s
 `, Version, a.cfg.PollInterval, a.p.Config)
 }
 
 // die prints to stderr and returns the exit code, so callers can `return a.die(...)`.
 func (a *app) die(format string, args ...any) int {
-	fmt.Fprintf(os.Stderr, "prbot: "+format+"\n", args...)
-	return 1
+	fmt.Fprintf(os.Stderr, "quorum: "+format+"\n", args...)
+	return exitError
 }
