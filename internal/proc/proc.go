@@ -189,8 +189,8 @@ func Claim(dir string) (func(), error) {
 }
 
 // Claimed reports whether a process still holds a directory's claim lock.
-// A missing or unlocked claim counts as unclaimed, which makes a directory
-// left by a killed run, or by a version that wrote none, collectable.
+// A missing or unlocked claim counts as unclaimed; callers decide whether a
+// compatibility grace still protects a directory written by an older version.
 func Claimed(dir string) bool {
 	f, err := os.OpenFile(filepath.Join(dir, ClaimFile), os.O_RDWR, 0)
 	if err != nil {

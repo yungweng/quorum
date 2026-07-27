@@ -94,7 +94,9 @@ Each of these is a place where the port does something different on purpose.
    reviewing in. The claim is also what the age sweeps use, in place of the
    "skip the directory I am in" exception each of them carried. The collector
    also honors the old live-marker/state mapping during upgrades from v1.0.1,
-   whose runs have no claim file.
+   whose runs have no claim file. A recent claimless run also gets the ordinary
+   seven-day retention window because a v1.0.1 terminal run has no marker to
+   map.
 
 10. **The cache budget is enforced by the poll, and covers the whole cache.**
     Only `~/.cache/quorum/reviews` was ever measured or trimmed, and only when

@@ -168,10 +168,42 @@ func TestCollectNeverTouchesALiveRun(t *testing.T) {
 	}
 }
 
+func TestCollectNeverTouchesARecentLegacyTerminalRunDuringUpgrade(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(100)
+	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 0, 0)
+	if !exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree of a recent v1.0.1 terminal review was deleted")
+	}
+}
+
+func TestCollectDropsAnExpiredLegacyTerminalRun(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
+	expired := time.Now().Add(-legacyRunGrace - time.Hour)
+	if err := os.Chtimes(run, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree of an expired v1.0.1 terminal review survived")
+	}
+}
+
 func TestCollectNeverTouchesALegacyLiveRunDuringUpgrade(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(100)
 	run := legacyLiveRun(t, a, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	expired := time.Now().Add(-legacyRunGrace - time.Hour)
+	if err := os.Chtimes(run, expired, expired); err != nil {
+		t.Fatal(err)
+	}
 
 	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 0, 0)
@@ -184,6 +216,10 @@ func TestCollectProtectsRunsWhenALegacyMarkerCannotBeMapped(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(100)
 	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
+	expired := time.Now().Add(-legacyRunGrace - time.Hour)
+	if err := os.Chtimes(run, expired, expired); err != nil {
+		t.Fatal(err)
+	}
 	marker, got, err := runner.Acquire(a.p.RunningDir, "owner/repo#1")
 	if err != nil || !got {
 		t.Fatalf("acquiring legacy marker: got=%v err=%v", got, err)

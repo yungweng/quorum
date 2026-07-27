@@ -368,9 +368,15 @@ type runEntry struct {
 	output   int64
 }
 
+// legacyRunGrace matches the ordinary run retention. Runs created before
+// claims existed have no other liveness signal when started from a terminal,
+// so recent claimless directories stay protected during the upgrade window.
+const legacyRunGrace = 7 * 24 * time.Hour
+
 // runDirs lists every review and babysit run directory, oldest first.
 func (a *app) runDirs() []runEntry {
 	legacyLive, protectAllLegacy := a.legacyLiveRuns()
+	legacyCutoff := time.Now().Add(-legacyRunGrace)
 	var runs []runEntry
 	for _, root := range []string{a.p.ReviewRuns, a.p.BabysitRuns} {
 		entries, err := os.ReadDir(root)
@@ -387,7 +393,10 @@ func (a *app) runDirs() []runEntry {
 			}
 			path := filepath.Join(root, e.Name())
 			worktree, output := runSizes(path)
-			live := proc.Claimed(path) || protectAllLegacy ||
+			_, claimErr := os.Stat(filepath.Join(path, proc.ClaimFile))
+			recentLegacy := os.IsNotExist(claimErr) &&
+				!info.ModTime().Before(legacyCutoff)
+			live := proc.Claimed(path) || recentLegacy || protectAllLegacy ||
 				legacyLive[filepath.Clean(path)] || legacyLive[e.Name()]
 			runs = append(runs, runEntry{
 				path: path, mod: info.ModTime(), live: live,
