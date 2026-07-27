@@ -138,3 +138,86 @@ func TestLinkWrapsTextWhenSupported(t *testing.T) {
 		t.Errorf("empty url produced %q", got)
 	}
 }
+
+// countingWriter records how many separate writes reached it. It deliberately
+// offers nothing but Write: an embedded strings.Builder would hand its
+// WriteString to io.WriteString and the writes would go uncounted.
+type countingWriter struct {
+	buf    strings.Builder
+	writes int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.writes++
+	return c.buf.Write(p)
+}
+
+func (c *countingWriter) String() string { return c.buf.String() }
+
+// The flicker watch used to show came from erasing the screen and then drawing
+// into it: for a moment the terminal had nothing to display. A frame must reach
+// it in one write, and must never clear first.
+func TestPaintDoesNotClearAndWritesOnce(t *testing.T) {
+	var c countingWriter
+	w := &Writer{Out: &c, Color: true, Links: true, Width: 80, Height: 24}
+	w.Paint("first\nsecond\n")
+
+	got := c.String()
+	if strings.Contains(got, "\x1b[2J") {
+		t.Error("Paint cleared the screen, which is what caused the flicker")
+	}
+	if c.writes != 1 {
+		t.Errorf("Paint made %d writes, want 1", c.writes)
+	}
+	if !strings.HasPrefix(got, "\x1b[H") {
+		t.Errorf("frame did not start at cursor home: %q", got)
+	}
+	// Every line erases its own tail, so a shorter line cannot leave the end of
+	// a longer previous one behind.
+	if n := strings.Count(got, "\x1b[K"); n != 2 {
+		t.Errorf("erased %d line tails, want one per line", n)
+	}
+	// And one erase at the end removes whatever the taller previous frame left.
+	if !strings.HasSuffix(got, "\x1b[J") {
+		t.Errorf("frame did not erase below itself: %q", got)
+	}
+}
+
+// A frame taller than the terminal would scroll, and after scrolling the next
+// cursor-home is in the wrong place.
+func TestPaintKeepsTheFrameOnScreen(t *testing.T) {
+	var b strings.Builder
+	w := &Writer{Out: &b, Color: true, Width: 80, Height: 3}
+	w.Paint("one\ntwo\nthree\nfour\nfive\n")
+
+	got := b.String()
+	if strings.Contains(got, "four") || strings.Contains(got, "five") {
+		t.Errorf("frame was not cut to the terminal height: %q", got)
+	}
+	for _, want := range []string{"one", "two", "three"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("line %q went missing: %q", want, got)
+		}
+	}
+}
+
+// Without a terminal there is no cursor to move and no attribute to set, so
+// Paint has to degrade to plain text like everything else in this package.
+func TestPaintAndStrikeStayPlainWithoutATerminal(t *testing.T) {
+	var b strings.Builder
+	w := &Writer{Out: &b, Width: 80}
+	if got := w.Strike("merged"); got != "merged" {
+		t.Errorf("Strike = %q on a plain writer", got)
+	}
+	w.Paint("one\ntwo\n")
+	if got := b.String(); got != "one\ntwo\n" {
+		t.Errorf("Paint = %q, want the frame unchanged", got)
+	}
+}
+
+func TestStrikeCrossesOutOnATerminal(t *testing.T) {
+	w := &Writer{Out: &strings.Builder{}, Color: true, Width: 80}
+	if got := w.Strike("merged"); got != "\x1b[9mmerged\x1b[0m" {
+		t.Errorf("Strike = %q", got)
+	}
+}

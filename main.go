@@ -22,7 +22,7 @@ import (
 )
 
 // Version is the release. The Homebrew formula builds it in with -ldflags.
-var Version = "1.0.0"
+var Version = "1.0.1"
 
 // Exit codes. The first five are inherited from babysit, so scripts wrapped
 // around it keep working.

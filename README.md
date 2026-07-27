@@ -216,6 +216,20 @@ RECENT
   ✗ project-phoenix #1993      yesterday  failed after 2 attempt(s)
 ```
 
+RUNNING and QUEUED stay on screen when they are empty. A section that
+disappears when it has nothing in it cannot be told apart from a section that
+does not exist, which is the wrong answer to "is anything being reviewed right
+now".
+
+`quorum watch` adds one thing the single-shot dashboard leaves out: it asks
+GitHub every 30 seconds how the pull requests on screen ended, and crosses out
+the ones that have been merged. That is a whole batch in one GraphQL request,
+kept off the redraw path, so a screen that repaints every three seconds neither
+waits on the network nor earns a rate limit. Merged is struck through and
+labelled `merged`; closed without merging is labelled `closed unmerged` and is
+not struck out, because it is not a success. The word matters as much as the
+styling: terminals that do not know SGR 9 drop a strikethrough silently.
+
 Polling, not webhooks: a webhook needs a publicly reachable endpoint on your
 laptop, and GitHub discards deliveries while it is asleep. Polling catches up by
 itself on the next tick. The search costs 12 API requests per hour against a

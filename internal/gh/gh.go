@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -251,6 +253,81 @@ func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Detail
 		return d, fmt.Errorf("%w: gh pr view %s#%d returned no head sha", ErrTransient, repo, number)
 	}
 	return d, nil
+}
+
+// The states a pull request can be in, as GitHub spells them.
+const (
+	StateOpen   = "OPEN"
+	StateClosed = "CLOSED"
+	StateMerged = "MERGED"
+)
+
+// safeRepo matches the owner/name shapes GitHub actually allows. Repository
+// names reach PRStates from the state file and are interpolated into a query,
+// so anything else is dropped rather than quoted and hoped for.
+var safeRepo = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+// PRStates reports whether each pull request is still open, closed or merged.
+//
+// It takes "owner/repo#number" keys and answers in one GraphQL round trip
+// whatever the number of pull requests, because the caller is a screen that
+// redraws: one request per visible line would turn a dashboard into a source of
+// rate limiting. Keys it cannot parse are left out of the result rather than
+// reported, since a caller that only decorates its output cannot do anything
+// about them.
+func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string, error) {
+	type target struct {
+		alias       string
+		key         string
+		owner, name string
+		number      int
+	}
+	var targets []target
+	var q strings.Builder
+	q.WriteString("query {")
+	for _, key := range keys {
+		repo, numText, ok := strings.Cut(key, "#")
+		if !ok || !safeRepo.MatchString(repo) {
+			continue
+		}
+		number, err := strconv.Atoi(numText)
+		if err != nil || number <= 0 {
+			continue
+		}
+		owner, name, _ := strings.Cut(repo, "/")
+		alias := fmt.Sprintf("p%d", len(targets))
+		targets = append(targets, target{alias, key, owner, name, number})
+		fmt.Fprintf(&q, " %s: repository(owner: %q, name: %q) { pullRequest(number: %d) { state } }",
+			alias, owner, name, number)
+	}
+	q.WriteString(" }")
+	if len(targets) == 0 {
+		return map[string]string{}, nil
+	}
+
+	out, err := c.run(ctx, "api", "graphql", "-f", "query="+q.String())
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Data map[string]*struct {
+			PullRequest *struct {
+				State string `json:"state"`
+			} `json:"pullRequest"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return nil, fmt.Errorf("gh api graphql: %w", err)
+	}
+	states := make(map[string]string, len(targets))
+	for _, t := range targets {
+		// A repository that has gone away answers null, which is not an error
+		// worth failing the whole batch over: the other pull requests are fine.
+		if node := resp.Data[t.alias]; node != nil && node.PullRequest != nil {
+			states[t.key] = node.PullRequest.State
+		}
+	}
+	return states, nil
 }
 
 // timelineEvent is the subset of the timeline API this needs.

@@ -18,10 +18,13 @@ import (
 
 // Writer renders to one output stream.
 type Writer struct {
-	Out    io.Writer
-	Color  bool
-	Links  bool
-	Width  int
+	Out   io.Writer
+	Color bool
+	Links bool
+	Width int
+	// Height is the terminal's row count, 0 when it is not a terminal. Only
+	// watch uses it, to keep a frame from scrolling the screen it is painting.
+	Height int
 	indent string
 }
 
@@ -41,10 +44,20 @@ func New(out *os.File) *Writer {
 	// few older ones print the escape instead, so keep it to a terminal that
 	// announces itself.
 	w.Links = true
-	if width, _, err := term.GetSize(fd); err == nil && width > 20 {
+	if width, height, err := term.GetSize(fd); err == nil && width > 20 {
 		w.Width = width
+		w.Height = height
 	}
 	return w
+}
+
+// To returns a copy of w that renders somewhere else while keeping the
+// terminal's capabilities. watch builds a whole frame in memory this way, which
+// is what lets it reach the screen in a single write.
+func (w *Writer) To(out io.Writer) *Writer {
+	c := *w
+	c.Out = out
+	return &c
 }
 
 // ANSI attributes.
@@ -58,6 +71,7 @@ const (
 	fgBlue    = "\x1b[34m"
 	fgMagenta = "\x1b[35m"
 	fgCyan    = "\x1b[36m"
+	strike    = "\x1b[9m"
 )
 
 func (w *Writer) style(code, s string) string {
@@ -75,6 +89,10 @@ func (w *Writer) Yellow(s string) string  { return w.style(fgYellow, s) }
 func (w *Writer) Blue(s string) string    { return w.style(fgBlue, s) }
 func (w *Writer) Magenta(s string) string { return w.style(fgMagenta, s) }
 func (w *Writer) Cyan(s string) string    { return w.style(fgCyan, s) }
+
+// Strike crosses text out. Terminals that do not know SGR 9 print the text
+// plainly, so nothing may rely on it alone to carry meaning.
+func (w *Writer) Strike(s string) string { return w.style(strike, s) }
 
 // Link wraps text in an OSC 8 hyperlink so clicking it opens url. Terminals
 // without support print text alone, which is why text must stand on its own.
@@ -201,4 +219,40 @@ func (w *Writer) Home() {
 	if w.Color {
 		fmt.Fprint(w.Out, "\x1b[H\x1b[2J")
 	}
+}
+
+// Paint puts one prepared frame on the screen.
+//
+// It deliberately does not clear first. Erasing the screen and then drawing
+// into it leaves a moment where the terminal has nothing to show, and at a
+// redraw every few seconds that moment is the flicker. Instead the cursor goes
+// home, every line erases only its own tail as it is written, and one erase at
+// the end removes whatever the previous frame left below this one. The whole
+// frame reaches the terminal in a single write, so no partial screen is ever
+// visible either.
+func (w *Writer) Paint(frame string) {
+	if !w.Color {
+		fmt.Fprint(w.Out, frame)
+		return
+	}
+	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
+	// A frame taller than the screen scrolls it, and once it has scrolled the
+	// next frame's cursor-home lands in the wrong place, which leaves exactly
+	// the debris this is meant to avoid. Cutting whole lines keeps every escape
+	// sequence balanced. A line wider than the terminal still wraps and counts
+	// as one, so callers keep their lines inside Width.
+	if w.Height > 0 && len(lines) > w.Height {
+		lines = lines[:w.Height]
+	}
+	var b strings.Builder
+	b.WriteString("\x1b[H")
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteString("\r\n")
+		}
+		b.WriteString(line)
+		b.WriteString("\x1b[K")
+	}
+	b.WriteString("\x1b[J")
+	fmt.Fprint(w.Out, b.String())
 }

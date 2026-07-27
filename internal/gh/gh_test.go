@@ -256,3 +256,76 @@ func TestPRDetailsRejectsEmptyHead(t *testing.T) {
 		t.Fatalf("err = %v, want ErrTransient for a missing head sha", err)
 	}
 }
+
+func TestPRStatesReadsABatch(t *testing.T) {
+	// One call, one alias per pull request, three different outcomes.
+	bin, countFile := fakeGH(t, `echo "$@" > `+t.TempDir()+`/args
+cat <<'JSON'
+{"data":{
+  "p0":{"pullRequest":{"state":"MERGED"}},
+  "p1":{"pullRequest":{"state":"OPEN"}},
+  "p2":{"pullRequest":{"state":"CLOSED"}}
+}}
+JSON`)
+	keys := []string{"moto-nrw/project-phoenix#2035", "moto-nrw/PyrePortal#392", "acme/api#7"}
+	got, err := testClient(bin).PRStates(context.Background(), keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"moto-nrw/project-phoenix#2035": StateMerged,
+		"moto-nrw/PyrePortal#392":       StateOpen,
+		"acme/api#7":                    StateClosed,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	// A dashboard redraws, so this must stay one round trip however many pull
+	// requests are on screen.
+	if n := calls(t, countFile); n != 1 {
+		t.Errorf("made %d calls for %d pull requests, want 1", n, len(keys))
+	}
+}
+
+// A repository that has gone away answers null. The other pull requests in the
+// same batch must still come back.
+func TestPRStatesSurvivesAMissingRepository(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"data":{"p0":null,"p1":{"pullRequest":{"state":"MERGED"}}}}'`)
+	got, err := testClient(bin).PRStates(context.Background(),
+		[]string{"gone/away#1", "acme/api#2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["gone/away#1"]; ok {
+		t.Error("a null repository produced a state")
+	}
+	if got["acme/api#2"] != StateMerged {
+		t.Errorf("acme/api#2 = %q, want MERGED", got["acme/api#2"])
+	}
+}
+
+// Repository names reach this from the state file and end up inside a query
+// string, so anything that is not a plain owner/name is dropped rather than
+// interpolated.
+func TestPRStatesDropsUnusableKeys(t *testing.T) {
+	bin, countFile := fakeGH(t, `echo '{"data":{}}'`)
+	bad := []string{
+		`acme/api"){pullRequest(number:1){state}} injected: repository(owner:"x`,
+		"no-number",
+		"acme/api#notanumber",
+		"acme/api#0",
+	}
+	got, err := testClient(bin).PRStates(context.Background(), bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want nothing", got)
+	}
+	// With nothing left to ask about, gh must not be run at all.
+	if n := calls(t, countFile); n != 0 {
+		t.Errorf("ran gh %d time(s) for keys it could not parse", n)
+	}
+}

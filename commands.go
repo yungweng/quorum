@@ -1,21 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -163,20 +168,126 @@ func (a *app) cmdWatch(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	ends := newEndStates()
+	if t, err := a.findTools(); err == nil {
+		go a.trackEnds(ctx, t.GH, ends)
+	}
+
 	a.out.AltScreen(true)
 	defer a.out.AltScreen(false)
 
+	var frame bytes.Buffer
+	painted := ""
 	for {
 		// Config and terminal size can change while watching.
 		a.reload()
-		a.out.Home()
-		a.dashboard(a.out)
-		a.out.Printf("%s\n", a.out.Dim("ctrl-c to leave"))
+		// The frame is built in memory and reaches the terminal in one write.
+		// Drawing straight to the screen shows it half finished on every pass.
+		frame.Reset()
+		screen := a.out.To(&frame)
+		shown := a.dashboard(screen, ends.snapshot())
+		screen.Printf("%s\n", screen.Dim("ctrl-c to leave"))
+		ends.want(shown)
+
+		// Most passes change nothing at all. Painting only what differs keeps
+		// the terminal quiet instead of rewriting an identical screen.
+		if next := frame.String(); next != painted {
+			a.out.Paint(next)
+			painted = next
+		}
+
 		select {
 		case <-ctx.Done():
 			return 0
 		case <-time.After(3 * time.Second):
 		}
+	}
+}
+
+// endStates caches how the pull requests on screen ended, so the redraw never
+// has to wait for GitHub.
+type endStates struct {
+	mu     sync.Mutex
+	state  map[string]string
+	keys   []string
+	change chan struct{}
+}
+
+func newEndStates() *endStates {
+	return &endStates{state: map[string]string{}, change: make(chan struct{}, 1)}
+}
+
+// snapshot is what the dashboard reads: a copy, so rendering never holds the
+// lock the refresher needs.
+func (e *endStates) snapshot() map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return maps.Clone(e.state)
+}
+
+// want records which pull requests are currently visible. A changed set wakes
+// the refresher, so a pull request that appears is looked up straight away
+// instead of waiting out the interval.
+func (e *endStates) want(keys []string) {
+	e.mu.Lock()
+	same := slices.Equal(e.keys, keys)
+	e.keys = keys
+	e.mu.Unlock()
+	if same {
+		return
+	}
+	select {
+	case e.change <- struct{}{}:
+	default: // a wake-up is already pending, one is enough
+	}
+}
+
+func (e *endStates) wanted() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.keys)
+}
+
+func (e *endStates) store(states map[string]string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.state = states
+}
+
+// trackEnds keeps the merge state of the visible pull requests roughly current.
+//
+// It runs beside the redraw and never inside it. The dashboard repaints every
+// few seconds, and asking GitHub at that rate would make the screen wait on the
+// network and earn a rate limit for a fact that only changes when somebody
+// presses a button. One batched query covers every visible pull request.
+func (a *app) trackEnds(ctx context.Context, ghBin string, e *endStates) {
+	client := gh.New(ghBin)
+	// No retries and a short deadline: this is decoration, and the next pass is
+	// thirty seconds away, which is sooner than a retried call would answer.
+	// Logging is off as well, because the logger echoes to the screen this is
+	// drawing on.
+	client.Attempts = 1
+	client.Timeout = 20 * time.Second
+	client.Log = nil
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.change:
+		case <-time.After(30 * time.Second):
+		}
+		keys := e.wanted()
+		if len(keys) == 0 {
+			continue
+		}
+		states, err := client.PRStates(ctx, keys)
+		if err != nil {
+			// Nothing on the screen depends on this, so a failed lookup keeps
+			// the previous answer rather than blanking what it already knows.
+			continue
+		}
+		e.store(states)
 	}
 }
 
