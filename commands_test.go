@@ -232,6 +232,29 @@ func TestCollectNeverTouchesALegacyLiveRunDuringUpgrade(t *testing.T) {
 	}
 }
 
+func TestCollectMatchesLegacyLiveRunsByFullPath(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	name := "owner-repo-pr-1-20260101-120000"
+	live := legacyLiveRun(t, a, a.p.ReviewRuns, name, 100, 100)
+	unrelated := makeRun(t, a.p.BabysitRuns, name, 800, 100, "")
+	expired := time.Now().Add(-legacyRunGrace - time.Hour)
+	for _, run := range []string{live, unrelated} {
+		if err := os.Chtimes(run, expired, expired); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if !exists(filepath.Join(live, "worktree")) {
+		t.Error("worktree of the live legacy review was deleted")
+	}
+	if exists(filepath.Join(unrelated, "worktree")) {
+		t.Error("an unrelated babysit run with the same basename was protected")
+	}
+}
+
 func TestCollectProtectsRunsWhenALegacyMarkerCannotBeMapped(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(100)

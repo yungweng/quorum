@@ -397,7 +397,7 @@ func (a *app) runDirs() []runEntry {
 			recentLegacy := os.IsNotExist(claimErr) &&
 				!info.ModTime().Before(legacyCutoff)
 			live := proc.Claimed(path) || recentLegacy || protectAllLegacy ||
-				legacyLive[filepath.Clean(path)] || legacyLive[e.Name()]
+				legacyLive[filepath.Clean(path)]
 			runs = append(runs, runEntry{
 				path: path, mod: info.ModTime(), live: live,
 				worktree: worktree, output: output,
@@ -422,7 +422,7 @@ func (a *app) legacyLiveRuns() (map[string]bool, bool) {
 		// Preserve all runs until its marker goes away.
 		return nil, true
 	}
-	live := make(map[string]bool, len(markers)*2)
+	live := make(map[string]bool, len(markers))
 	protectAll := false
 	for _, marker := range markers {
 		rec, ok := file.PRs[marker.Key]
@@ -432,7 +432,6 @@ func (a *app) legacyLiveRuns() (map[string]bool, bool) {
 		}
 		path := filepath.Clean(rec.RunDir)
 		live[path] = true
-		live[filepath.Base(path)] = true
 	}
 	return live, protectAll
 }
