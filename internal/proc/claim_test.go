@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 )
 
@@ -55,6 +56,32 @@ func TestClaimRefusesASecondHolder(t *testing.T) {
 	if second, err := Claim(dir); err == nil {
 		second()
 		t.Error("a second process instance could replace a live claim")
+	}
+}
+
+func TestClaimReleaseKeepsTheInodeForAResumedClaim(t *testing.T) {
+	dir := t.TempDir()
+	release, err := Claim(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ClaimFile)
+	collector, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer collector.Close()
+
+	release()
+	resumedRelease, err := Claim(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumedRelease()
+
+	if err := syscall.Flock(int(collector.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		syscall.Flock(int(collector.Fd()), syscall.LOCK_UN)
+		t.Error("a reader of the released claim missed the resumed claim on a different inode")
 	}
 }
 

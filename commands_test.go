@@ -168,6 +168,26 @@ func TestCollectNeverTouchesALiveRun(t *testing.T) {
 	}
 }
 
+func TestCollectTreatsAReleasedClaimAsCurrent(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
+	release, err := proc.Claim(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("a completed current-version run received the legacy grace period")
+	}
+	if !exists(filepath.Join(run, proc.ClaimFile)) {
+		t.Error("a released claim lost its current-version sentinel")
+	}
+}
+
 func TestCollectNeverTouchesARecentLegacyTerminalRunDuringUpgrade(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(100)

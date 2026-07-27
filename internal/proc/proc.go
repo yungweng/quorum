@@ -134,7 +134,8 @@ func Alive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// ClaimFile is what Claim writes into a directory it is holding.
+// ClaimFile is the persistent sentinel and lock file Claim writes into a run
+// directory.
 const ClaimFile = "run.pid"
 
 // Claim marks a directory as belonging to this process until the returned
@@ -149,7 +150,9 @@ const ClaimFile = "run.pid"
 //
 // The file lock, rather than the PID written for diagnostics, identifies the
 // process instance. The kernel releases it when the process exits, so PID reuse
-// cannot make a dead run look live.
+// cannot make a dead run look live. Release leaves the unlocked file in place
+// to keep the inode stable for concurrent readers and to distinguish runs made
+// by claim-aware versions from legacy run directories.
 func Claim(dir string) (func(), error) {
 	path := filepath.Join(dir, ClaimFile)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
@@ -178,10 +181,6 @@ func Claim(dir string) (func(), error) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			// Remove the name while the old inode is still locked. A new
-			// claimant can then create its own file without this release
-			// deleting it after the unlock.
-			os.Remove(path)
 			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 			f.Close()
 		})
