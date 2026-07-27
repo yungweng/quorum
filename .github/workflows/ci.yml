@@ -95,6 +95,11 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Keep the release and its formula push in one non-cancelling critical
+    # section. queue: max preserves pending version-changing main workflows.
+    concurrency:
+      group: quorum-release-and-tap
+      queue: max
     permissions:
       contents: write
     steps:
@@ -110,6 +115,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          set -o pipefail
+
           read_version() {
             git show "$1:main.go" | sed -n 's/^var Version = "\(.*\)"$/\1/p'
           }
@@ -157,7 +164,10 @@ jobs:
             exit 1
           fi
 
-          LATEST_VERSION=$(latest_release_version)
+          if ! LATEST_VERSION=$(latest_release_version); then
+            echo "::error::could not list existing releases"
+            exit 1
+          fi
           if [[ -n "$LATEST_VERSION" ]] && version_is_greater "$LATEST_VERSION" "$VERSION"; then
             echo "::error::refusing to release v$VERSION after newer release v$LATEST_VERSION"
             exit 1
@@ -191,74 +201,16 @@ jobs:
         if: steps.plan.outputs.create == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
           TAG: ${{ steps.plan.outputs.tag }}
           TARGET: ${{ github.sha }}
         run: |
-          latest_release_version() {
-            gh api --paginate "repos/$REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
-              sed -n 's/^v\([0-9]\+\.[0-9]\+\.[0-9]\+\)$/\1/p' |
-              sort -V |
-              tail -n 1
-          }
-          version_is_greater() {
-            local greatest
-            greatest=$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)
-            [[ "$1" != "$2" && "$greatest" == "$1" ]]
-          }
-
-          VERSION=${TAG#v}
-          LATEST_VERSION=$(latest_release_version)
-          if [[ -n "$LATEST_VERSION" ]] && version_is_greater "$LATEST_VERSION" "$VERSION"; then
-            echo "::error::refusing to release $TAG after newer release v$LATEST_VERSION"
-            exit 1
-          fi
-
           # One call, so there is no window where the tag exists without the
           # release it belongs to.
           gh release create "$TAG" \
             --target "$TARGET" \
             --title "$TAG" \
             --generate-notes \
-            --latest=false
-
-      # Every creator publishes as non-latest first, then converges GitHub's
-      # Latest marker on the highest stable version. Completion order cannot
-      # make an older release Latest.
-      - name: Mark the highest version as latest
-        if: steps.plan.outputs.tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          latest_release_version() {
-            gh api --paginate "repos/$REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
-              sed -n 's/^v\([0-9]\+\.[0-9]\+\.[0-9]\+\)$/\1/p' |
-              sort -V |
-              tail -n 1
-          }
-
-          for _ in 1 2 3 4 5; do
-            LATEST_VERSION=$(latest_release_version)
-            if [[ -z "$LATEST_VERSION" ]]; then
-              echo "::error::no stable X.Y.Z release exists after publishing"
-              exit 1
-            fi
-            LATEST_TAG="v$LATEST_VERSION"
-            gh release edit "$LATEST_TAG" --latest
-
-            # A concurrent creator may have published or changed Latest between
-            # the listing and the edit. Stop only after both views agree.
-            ACTUAL_LATEST=$(gh api "repos/$REPOSITORY/releases/latest" --jq .tag_name)
-            if [[ "$ACTUAL_LATEST" == "$LATEST_TAG" ]] &&
-              [[ "$(latest_release_version)" == "$LATEST_VERSION" ]]; then
-              exit 0
-            fi
-          done
-          echo "::error::release order kept changing while setting Latest"
-          exit 1
+            --latest
 
       - name: Update Homebrew tap
         if: steps.plan.outputs.tag != ''
