@@ -1,18 +1,11 @@
 name: Update Homebrew tap
 
-# Two ways in. A release published by hand arrives as an event. A release CI cut
-# for itself cannot: events raised with the default GITHUB_TOKEN never start
-# another workflow, which would leave the formula silently behind. So CI calls
-# this as a job of its own run instead, where no event is involved.
+# A release published by hand arrives here as an event. A release CI cuts with
+# the default GITHUB_TOKEN cannot trigger another workflow, so CI runs the same
+# formula action inside its serialized release job instead.
 on:
   release:
     types: [published]
-  workflow_call:
-    inputs:
-      tag:
-        description: The release tag to publish, e.g. v1.0.2
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -26,47 +19,17 @@ jobs:
     name: Bump formula
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    concurrency:
+      group: quorum-release-and-tap
+      queue: max
     steps:
-      - name: Compute release tarball checksum
-        id: checksum
-        run: |
-          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
-          # When CI just created the release, the tarball can take a moment to
-          # exist. Failing here would ship a release with a stale formula.
-          for attempt in 1 2 3 4 5; do
-            if curl -sSfL "$URL" -o release.tar.gz; then
-              break
-            fi
-            if [[ $attempt == 5 ]]; then
-              echo "::error::$URL did not become available"
-              exit 1
-            fi
-            sleep $((attempt * 5))
-          done
-          echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-
-      - name: Check out tap
-        uses: actions/checkout@v4
+      - name: Check out quorum
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: yungweng/homebrew-tap
-          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
-          path: tap
+          ref: ${{ github.event.repository.default_branch }}
 
-      - name: Update formula
-        run: |
-          FORMULA=tap/Formula/quorum.rb
-          sed -i \
-            -e 's|^  url ".*"$|  url "${{ steps.checksum.outputs.url }}"|' \
-            -e 's|^  sha256 ".*"$|  sha256 "${{ steps.checksum.outputs.sha256 }}"|' \
-            "$FORMULA"
-          if git -C tap diff --quiet; then
-            echo "Formula already up to date, nothing to push."
-            exit 0
-          fi
-          git -C tap config user.name "github-actions[bot]"
-          git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
-          git -C tap commit -am "quorum ${TAG}"
-          git -C tap push
+      - name: Update Homebrew tap
+        uses: ./.github/actions/update-homebrew-tap
+        with:
+          tag: ${{ github.event.release.tag_name }}
+          deploy-key: ${{ secrets.TAP_DEPLOY_KEY }}

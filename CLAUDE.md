@@ -107,16 +107,19 @@ commit; rerun the version-changing workflow instead.
 
 Patch for bugfixes, minor for anything that adds or changes a flag.
 
-The formula bump then runs as the `tap` job of that same run, which is
+The formula bump then runs as the last step of that release job, which is
 deliberate and easy to get wrong if you touch it: GitHub does not start a
 workflow from an event raised with the default `GITHUB_TOKEN`, so a release the
-CI cut for itself never arrives as a `release: published` event. That is why
-`update-homebrew-tap.yml` is also a `workflow_call` and is invoked directly.
-Keep both triggers: the event still covers a release published by hand, and the
-direct call covers a release made with the default token. Rerunning the
-version-changing workflow carries an existing tag through to the `tap` job, so
-a failed formula update can be retried without creating the release again. The
-retry first verifies that the existing tag resolves to the same commit; it
-fails rather than updating the formula from a same-version release elsewhere.
-The same check runs before release creation when a tag exists without a release,
-because GitHub would otherwise ignore `--target` and publish from that tag.
+CI cut for itself never arrives as a `release: published` event. Releases
+published by hand still enter through `update-homebrew-tap.yml`. Both paths use
+the same action and the same non-cancelling concurrency queue, so release
+creation and the formula push are one critical section. The action also refuses
+to replace a newer formula tag with an older one.
+
+Rerunning the version-changing workflow carries an existing tag through to the
+formula step, so a failed update can be retried without creating the release
+again. The retry first verifies that the existing tag resolves to the same
+commit; it fails rather than updating the formula from a same-version release
+elsewhere. The same check runs before release creation when a tag exists without
+a release, because GitHub would otherwise ignore `--target` and publish from
+that tag.

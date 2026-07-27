@@ -95,10 +95,13 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Keep the release and its formula push in one non-cancelling critical
+    # section. queue: max preserves every version-changing main workflow.
+    concurrency:
+      group: quorum-release-and-tap
+      queue: max
     permissions:
       contents: write
-    outputs:
-      tag: ${{ steps.plan.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,12 +184,9 @@ jobs:
             --title "$TAG" \
             --generate-notes
 
-  # Called rather than triggered: see the comment in the workflow itself.
-  tap:
-    name: Update Homebrew tap
-    needs: release
-    if: needs.release.outputs.tag != ''
-    uses: ./.github/workflows/update-homebrew-tap.yml
-    with:
-      tag: ${{ needs.release.outputs.tag }}
-    secrets: inherit
+      - name: Update Homebrew tap
+        if: steps.plan.outputs.tag != ''
+        uses: ./.github/actions/update-homebrew-tap
+        with:
+          tag: ${{ steps.plan.outputs.tag }}
+          deploy-key: ${{ secrets.TAP_DEPLOY_KEY }}
