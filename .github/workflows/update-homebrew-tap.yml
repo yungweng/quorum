@@ -1,19 +1,50 @@
 name: Update Homebrew tap
 
+# Two ways in. A release published by hand arrives as an event. A release CI cut
+# for itself cannot: events raised with the default GITHUB_TOKEN never start
+# another workflow, which would leave the formula silently behind. So CI calls
+# this as a job of its own run instead, where no event is involved.
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag to publish, e.g. v1.0.2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   bump-formula:
+    name: Bump formula
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
       - name: Compute release tarball checksum
         id: checksum
         run: |
-          TAG="${{ github.event.release.tag_name }}"
           URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
-          curl -sSfL "$URL" -o release.tar.gz
+          # When CI just created the release, the tarball can take a moment to
+          # exist. Failing here would ship a release with a stale formula.
+          for attempt in 1 2 3 4 5; do
+            if curl -sSfL "$URL" -o release.tar.gz; then
+              break
+            fi
+            if [[ $attempt == 5 ]]; then
+              echo "::error::$URL did not become available"
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
           echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
@@ -37,5 +68,5 @@ jobs:
           fi
           git -C tap config user.name "github-actions[bot]"
           git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
-          git -C tap commit -am "quorum ${{ github.event.release.tag_name }}"
+          git -C tap commit -am "quorum ${TAG}"
           git -C tap push

@@ -98,12 +98,18 @@ of PARITY.md against a PR you do not mind, starting with
 Distribution is the Homebrew tap `yungweng/homebrew-tap`. The formula there is
 updated automatically; never edit it by hand for a version bump.
 
-1. Set `Version` in `main.go`.
-2. Commit and push to `main`.
-3. `git tag vX.Y.Z && git push origin vX.Y.Z`
-4. `gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."`
-
-Publishing the release triggers `update-homebrew-tap.yml`, which recomputes the
-tarball SHA and pushes the bumped formula using the `TAP_DEPLOY_KEY` secret.
+Releasing is one edit: set `Version` in `main.go` and merge it to `main`. Do not
+tag by hand. The `release` job in `ci.yml` reads that constant, and if no
+`vX.Y.Z` release exists for it yet, creates the tag and the release from the
+commit that just passed the tests. A merge that leaves `Version` alone releases
+nothing, so ordinary changes need no thought about it.
 
 Patch for bugfixes, minor for anything that adds or changes a flag.
+
+The formula bump then runs as the `tap` job of that same run, which is
+deliberate and easy to get wrong if you touch it: GitHub does not start a
+workflow from an event raised with the default `GITHUB_TOKEN`, so a release the
+CI cut for itself never arrives as a `release: published` event. That is why
+`update-homebrew-tap.yml` is also a `workflow_call` and is invoked directly.
+Keep both triggers: the event still covers a release published by hand, and the
+tag check means the two paths cannot both fire for one version.
