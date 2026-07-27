@@ -246,6 +246,39 @@ func TestCollectDoesNothingWithoutABudget(t *testing.T) {
 	}
 }
 
+// A fresh installation has no cache root yet. An empty cache needs no lock,
+// and collection must not create anything just to prove that.
+func TestCollectTreatsAMissingCacheAsEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dry  bool
+	}{
+		{name: "real"},
+		{name: "dry", dry: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testApp(t)
+			cacheRoot := filepath.Join(t.TempDir(), "missing", "quorum")
+			a.p.ReviewRuns = filepath.Join(cacheRoot, "reviews")
+			a.p.BabysitRuns = filepath.Join(cacheRoot, "babysit")
+			a.p.DepsCache = filepath.Join(cacheRoot, "deps")
+			a.cfg.CacheBudgetGB = gigabytes(100)
+			if tc.dry {
+				a.setCacheSize(123)
+			}
+
+			freed, removed := mustCollect(t, a, tc.dry)
+			assertCollected(t, freed, removed, 0, 0)
+			if exists(cacheRoot) {
+				t.Error("collection created an empty cache root")
+			}
+			if tc.dry && a.cacheBytes != 123 {
+				t.Errorf("dry collection changed the remembered size to %d", a.cacheBytes)
+			}
+		})
+	}
+}
+
 // The dashboard redraws every three seconds, so the size it prints is a held
 // measurement; collecting must leave that value correct rather than stale.
 func TestCollectLeavesTheRememberedSizeCorrect(t *testing.T) {

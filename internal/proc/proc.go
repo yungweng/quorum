@@ -207,10 +207,12 @@ func Claimed(dir string) bool {
 	return false
 }
 
-// LockDir takes an exclusive cross-process lock on an existing directory.
-// Cache callers lock their common root to serialize run claims with collection
-// without creating a file that would make a dry run change disk.
+// LockDir creates a directory if needed and takes an exclusive cross-process
+// lock on it. Locking the directory itself avoids a persistent lock file.
 func LockDir(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(dir)
 	if err != nil {
 		return nil, err

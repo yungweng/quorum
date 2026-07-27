@@ -434,10 +434,20 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	if limit <= 0 {
 		return 0, 0, nil
 	}
+	cacheRoot := filepath.Dir(a.p.DepsCache)
+	if _, err := os.Stat(cacheRoot); err != nil {
+		if os.IsNotExist(err) {
+			if !dry {
+				a.setCacheSize(0)
+			}
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
 	// Run startup takes the same lock while publishing its claim. Once this
 	// holds it, no run can appear between the liveness check and dependency
 	// eviction, and any run that claimed first is visible below.
-	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	unlock, err := proc.LockDir(cacheRoot)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -99,10 +99,11 @@ Distribution is the Homebrew tap `yungweng/homebrew-tap`. The formula there is
 updated automatically; never edit it by hand for a version bump.
 
 Releasing is one edit: set `Version` in `main.go` and merge it to `main`. Do not
-tag by hand. The `release` job in `ci.yml` reads that constant, and if no
-`vX.Y.Z` release exists for it yet, creates the tag and the release from the
-commit that just passed the tests. A merge that leaves `Version` alone releases
-nothing, so ordinary changes need no thought about it.
+tag by hand. The `release` job in `ci.yml` reads that constant and creates the
+tag and release only when the current commit changed it from its first parent
+and no `vX.Y.Z` release exists yet. A merge that leaves `Version` alone releases
+nothing, so ordinary changes cannot retry a failed release from the wrong
+commit; rerun the version-changing workflow instead.
 
 Patch for bugfixes, minor for anything that adds or changes a flag.
 

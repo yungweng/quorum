@@ -57,3 +57,15 @@ func TestClaimRefusesASecondHolder(t *testing.T) {
 		t.Error("a second process instance could replace a live claim")
 	}
 }
+
+func TestLockDirCreatesTheDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new", "cache")
+	unlock, err := LockDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Errorf("lock directory was not created: %v", err)
+	}
+}

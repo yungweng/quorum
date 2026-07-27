@@ -84,9 +84,10 @@ jobs:
           args: --timeout=5m
 
   # Merging a version bump is what releases. The tag is derived from Version in
-  # main.go, so a merge that does not change it releases nothing, and a second
-  # push of the same version finds the tag taken and stops. Nothing here runs
-  # until the tests and the linter have passed on the very commit being tagged.
+  # main.go, so a merge that does not change it releases nothing. The current
+  # main commit itself must introduce the version; a failed release cannot be
+  # retried from a later, unrelated commit. Nothing here runs until the tests
+  # and the linter have passed on the commit being tagged.
   release:
     name: Release
     needs: [test, lint]
@@ -100,23 +101,41 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Work out whether this commit is a release
         id: plan
         env:
+          CURRENT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(sed -n 's/^var Version = "\(.*\)"$/\1/p' main.go)
+          read_version() {
+            git show "$1:main.go" | sed -n 's/^var Version = "\(.*\)"$/\1/p'
+          }
+
+          VERSION=$(read_version "$CURRENT_SHA" || true)
           if [[ -z "$VERSION" ]]; then
             echo "::error::could not read Version from main.go"
             exit 1
           fi
+
+          PARENT_VERSION=$(read_version "${CURRENT_SHA}^1" || true)
+          if [[ -z "$PARENT_VERSION" ]]; then
+            echo "::error::could not read Version from the previous main commit"
+            exit 1
+          fi
+          if [[ "$VERSION" == "$PARENT_VERSION" ]]; then
+            echo "Version $VERSION was not introduced by this commit, nothing to do."
+            exit 0
+          fi
+
           TAG="v$VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "$TAG is already released, nothing to do."
             exit 0
           fi
-          echo "Releasing $TAG."
+          echo "Releasing $TAG from $CURRENT_SHA."
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Cut the release
@@ -124,11 +143,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.plan.outputs.tag }}
+          TARGET: ${{ github.sha }}
         run: |
           # One call, so there is no window where the tag exists without the
           # release it belongs to.
           gh release create "$TAG" \
-            --target "${{ github.sha }}" \
+            --target "$TARGET" \
             --title "$TAG" \
             --generate-notes
 
