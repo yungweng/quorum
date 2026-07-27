@@ -208,6 +208,7 @@ func (r *Runner) reviewOptions(repo string, number int, clone string) review.Opt
 		// changed means executing a stranger's code unattended.
 		AllowEnvrcChange: false,
 		RunsDir:          r.P.ReviewRuns,
+		SharedRunsDirs:   []string{r.P.BabysitRuns},
 		DepsDir:          r.P.DepsCache,
 		CodexBin:         r.CodexBin,
 		DirenvBin:        r.DirenvBin,

@@ -80,10 +80,11 @@ type Options struct {
 	ResumeRun        string // reuse a run directory and only aggregate/post
 
 	// Paths
-	RunsDir   string // where run directories are created
-	DepsDir   string // shared dependency cache root
-	CodexBin  string
-	DirenvBin string
+	RunsDir        string   // where run directories are created
+	SharedRunsDirs []string // other run roots sharing the dependency cache
+	DepsDir        string   // shared dependency cache root
+	CodexBin       string
+	DirenvBin      string
 }
 
 // Result is what a finished run produced.
@@ -601,8 +602,18 @@ func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 				removed++
 			}
 		}
+	} else if !os.IsNotExist(err) {
+		// An unreadable run root may contain a live claim. Preserve shared
+		// trees rather than severing a dependency link we could not inspect.
+		otherLive = true
 	}
-	// A live review may have a node_modules symlink into any shared tree. A
+	for _, root := range o.SharedRunsDirs {
+		if claimedRunIn(root) {
+			otherLive = true
+			break
+		}
+	}
+	// A live run may have a node_modules symlink into any shared tree. A
 	// fresh current run is safe to exclude because startup holds the cache lock
 	// and it has not linked anything yet; ResumeRun covers retained worktrees.
 	if !otherLive && o.ResumeRun == "" {
@@ -611,6 +622,21 @@ func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 	}
 	r.Git.WorktreePrune(ctx, o.RepoRoot)
 	return removed
+}
+
+// claimedRunIn reports conservatively: an unreadable root may hide a live
+// claim, while a root that has never been created cannot.
+func claimedRunIn(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() && proc.Claimed(filepath.Join(root, e.Name())) {
+			return true
+		}
+	}
+	return false
 }
 
 func (o Options) withDefaults() Options {

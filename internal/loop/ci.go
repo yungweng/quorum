@@ -45,19 +45,20 @@ func (r *run) startReview(round int) {
 	r.review = br
 
 	opts := review.Options{
-		Repo:          r.o.Repo,
-		Number:        r.pr.Number,
-		RepoRoot:      r.o.RepoRoot,
-		Runs:          r.o.Reviewers,
-		Model:         r.o.ReviewModel,
-		Effort:        r.o.ReviewEffort,
-		Post:          true,
-		UseDirenv:     r.o.UseDirenv,
-		RunsDir:       r.o.ReviewRunsDir,
-		DepsDir:       r.o.DepsDir,
-		CodexBin:      r.o.CodexBin,
-		DirenvBin:     r.o.DirenvBin,
-		ReviewTimeout: review.DefaultReviewTimeout,
+		Repo:           r.o.Repo,
+		Number:         r.pr.Number,
+		RepoRoot:       r.o.RepoRoot,
+		Runs:           r.o.Reviewers,
+		Model:          r.o.ReviewModel,
+		Effort:         r.o.ReviewEffort,
+		Post:           true,
+		UseDirenv:      r.o.UseDirenv,
+		RunsDir:        r.o.ReviewRunsDir,
+		SharedRunsDirs: []string{r.o.RunsDir},
+		DepsDir:        r.o.DepsDir,
+		CodexBin:       r.o.CodexBin,
+		DirenvBin:      r.o.DirenvBin,
+		ReviewTimeout:  review.DefaultReviewTimeout,
 	}
 	go func() {
 		res, err := r.p.Review.Run(ctx, opts)
