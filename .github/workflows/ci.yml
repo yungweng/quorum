@@ -10,9 +10,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Superseding a pull request run is free. Superseding a run on main is not:
-  # it can land between cutting the release and updating the formula.
+  # Pull requests share a group so a new head cancels the old run. Main pushes
+  # use a unique group because GitHub replaces an existing pending run even
+  # when cancel-in-progress is false, which could discard a release commit.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
