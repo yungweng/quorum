@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,9 +19,10 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runner"
-	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
@@ -298,8 +298,7 @@ func (a *app) reload() {
 	a.out = ui.New(os.Stdout)
 }
 
-// cmdGC trims the review cache to its budget and clears anything left behind by
-// a run that did not finish.
+// cmdGC trims the cache to its budget.
 func (a *app) cmdGC(args []string) int {
 	dry := false
 	for _, arg := range args {
@@ -308,99 +307,186 @@ func (a *app) cmdGC(args []string) int {
 		}
 	}
 	freed, removed := a.collect(dry)
-	verb := "removed"
-	if dry {
-		verb = "would remove"
+	if freed > 0 || removed > 0 {
+		verb := "removed"
+		if dry {
+			verb = "would remove"
+		}
+		a.out.Printf("%s %d run director%s, %s\n", verb, removed, plural(removed), ui.Bytes(freed))
+		return 0
 	}
-	a.out.Printf("%s %d run director%s, %s\n", verb, removed, plural(removed), ui.Bytes(freed))
+	size, limit := a.cacheSize(), a.budgetBytes()
+	switch {
+	case limit <= 0:
+		a.out.Printf("cache is %s, no budget set\n", ui.Bytes(size))
+	case size > limit:
+		// Everything left is spoken for, so saying "within budget" would be a lie.
+		a.out.Printf("cache is %s, over its %s budget, but the rest belongs to a run in flight\n",
+			ui.Bytes(size), ui.Bytes(limit))
+	default:
+		a.out.Printf("cache is %s, within its %s budget\n", ui.Bytes(size), ui.Bytes(limit))
+	}
 	return 0
 }
 
-// runEntry is one run directory of pr-codex-review with its size and age.
-type runEntry struct {
-	path string
-	mod  time.Time
-	live bool
+// budgetBytes is the cache budget in bytes, or 0 when none is set.
+func (a *app) budgetBytes() int64 {
+	return int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
 }
 
-// collect deletes the worktrees of finished runs first, since they hold nearly
-// all of the space and are reproducible, and only then whole run directories,
-// oldest first, until the cache fits its budget.
-func (a *app) collect(dry bool) (freed int64, removed int) {
-	entries, err := os.ReadDir(a.p.ReviewRuns)
-	if err != nil {
-		return 0, 0
-	}
-	// Run directories in use by a live review must not be touched.
-	inUse := map[string]bool{}
-	file, _ := state.Read(a.p.StateFile)
-	for _, m := range runner.Live(a.p.RunningDir) {
-		if rec, ok := file.PRs[m.Key]; ok && rec.RunDir != "" {
-			inUse[filepath.Base(rec.RunDir)] = true
-		}
-	}
+// cacheSizeTTL is how long a measurement is reused. `quorum watch` redraws
+// every three seconds and the dependency trees run to tens of thousands of
+// files, so measuring per frame would spend the whole interval in stat calls
+// to render a line that reads the same either way.
+const cacheSizeTTL = time.Minute
 
+// cacheSize is everything the budget covers: both run caches and the shared
+// dependency trees. The managed clones are not in it, because their size is
+// bounded by how many repositories you review rather than by how often.
+func (a *app) cacheSize() int64 {
+	if time.Since(a.cacheAt) > cacheSizeTTL {
+		a.setCacheSize(dirSize(a.p.ReviewRuns) + dirSize(a.p.BabysitRuns) + dirSize(a.p.DepsCache))
+	}
+	return a.cacheBytes
+}
+
+func (a *app) setCacheSize(n int64) {
+	a.cacheBytes, a.cacheAt = n, time.Now()
+}
+
+// runEntry is one run directory, with its size split into the worktree and
+// everything else because the two are collected in different rounds.
+type runEntry struct {
+	path     string
+	mod      time.Time
+	live     bool
+	worktree int64
+	output   int64
+}
+
+// runDirs lists every review and babysit run directory, oldest first.
+func (a *app) runDirs() []runEntry {
 	var runs []runEntry
-	for _, e := range entries {
-		// deps holds the shared dependency trees, which pr-codex-review keys by
-		// lock file hash and manages itself.
-		if !e.IsDir() || e.Name() == "deps" {
-			continue
-		}
-		path := filepath.Join(a.p.ReviewRuns, e.Name())
-		info, err := e.Info()
+	for _, root := range []string{a.p.ReviewRuns, a.p.BabysitRuns} {
+		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
 		}
-		runs = append(runs, runEntry{path: path, mod: info.ModTime(), live: inUse[e.Name()]})
-	}
-
-	// Worktrees of runs that are over: the review output stays readable.
-	for _, r := range runs {
-		if r.live {
-			continue
-		}
-		wt := filepath.Join(r.path, "worktree")
-		size := dirSize(wt)
-		if size == 0 {
-			continue
-		}
-		if !dry {
-			if err := os.RemoveAll(wt); err != nil {
+		for _, e := range entries {
+			if !e.IsDir() {
 				continue
 			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			path := filepath.Join(root, e.Name())
+			worktree, output := runSizes(path)
+			runs = append(runs, runEntry{
+				path: path, mod: info.ModTime(), live: proc.Claimed(path),
+				worktree: worktree, output: output,
+			})
 		}
-		freed += size
+	}
+	slices.SortFunc(runs, func(a, b runEntry) int { return a.mod.Compare(b.mod) })
+	return runs
+}
+
+// runSizes splits a run directory into its worktree and everything else, in one
+// walk. Two calls to dirSize would descend the worktree twice, and the worktree
+// is nearly every file a run has.
+func runSizes(dir string) (worktree, output int64) {
+	prefix := filepath.Join(dir, "worktree") + string(filepath.Separator)
+	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // an unreadable subtree is not worth failing over
+		}
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return nil //nolint:nilerr // symlinks point at the shared cache, counted there
+		}
+		if strings.HasPrefix(path, prefix) {
+			worktree += info.Size()
+		} else {
+			output += info.Size()
+		}
+		return nil
+	})
+	return worktree, output
+}
+
+// collect trims the cache to its budget.
+//
+// Below the budget it does nothing on purpose. A worktree that outlived its run
+// belongs to a review that failed, and --resume-run needs it; clearing those on
+// sight would take the resume with it, which is what the seven-day sweep at the
+// start of every run is for.
+//
+// Above the budget it works in rounds, cheapest to replace first: the worktrees
+// of runs that are over, which are one checkout away from being back; then
+// whole run directories, oldest first, which takes their output with them; and
+// only then shared dependency trees, which cost a full install to rebuild.
+func (a *app) collect(dry bool) (freed int64, removed int) {
+	limit := a.budgetBytes()
+	if limit <= 0 {
+		return 0, 0
+	}
+	// Measured, not the remembered value: this is about to delete things.
+	a.setCacheSize(dirSize(a.p.ReviewRuns) + dirSize(a.p.BabysitRuns) + dirSize(a.p.DepsCache))
+	total := a.cacheBytes
+	if total <= limit {
+		return 0, 0
+	}
+	// What survives is the new total, so the next reader does not walk again.
+	// A dry run leaves the disk alone, so it must leave the number alone too.
+	if !dry {
+		defer func() { a.setCacheSize(total) }()
 	}
 
-	if a.cfg.CacheBudgetGB <= 0 {
-		return freed, removed
-	}
-	limit := int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
-	total := dirSize(a.p.ReviewRuns)
-	if dry {
-		total -= freed
-	}
-	if total <= limit {
-		return freed, removed
-	}
-	sort.Slice(runs, func(i, j int) bool { return runs[i].mod.Before(runs[j].mod) })
-	for _, r := range runs {
-		if total <= limit {
-			break
-		}
-		if r.live {
-			continue
-		}
-		size := dirSize(r.path)
+	runs := a.runDirs()
+	drop := func(path string, size int64) bool {
 		if !dry {
-			if err := os.RemoveAll(r.path); err != nil {
-				continue
+			if err := os.RemoveAll(path); err != nil {
+				return false
 			}
 		}
 		total -= size
 		freed += size
-		removed++
+		return true
+	}
+
+	for _, r := range runs {
+		if total <= limit {
+			return freed, removed
+		}
+		if r.live {
+			continue
+		}
+		drop(filepath.Join(r.path, "worktree"), r.worktree)
+	}
+	// Only the output is still there to free: the round above ends by returning,
+	// so reaching this point means it dropped every collectable worktree.
+	for _, r := range runs {
+		if total <= limit {
+			return freed, removed
+		}
+		if r.live {
+			continue
+		}
+		if drop(r.path, r.output) {
+			removed++
+		}
+	}
+	// A run that is still going owns its worktree, and through the symlinks in
+	// that worktree it owns shared trees this cannot tell apart from the rest.
+	if slices.ContainsFunc(runs, func(r runEntry) bool { return r.live }) {
+		return freed, removed
+	}
+	for _, t := range (deps.Cache{Root: a.p.DepsCache}).Trees() {
+		if total <= limit {
+			break
+		}
+		drop(t.Path, dirSize(t.Path))
 	}
 	return freed, removed
 }

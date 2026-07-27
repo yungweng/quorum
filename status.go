@@ -308,10 +308,9 @@ func (a *app) sectionSystem(w *ui.Writer) {
 		w.Printf("  %s %s\n", w.Dim(ui.Pad("load", 10)), text)
 	}
 
-	size := dirSize(a.p.ReviewRuns)
+	size := a.cacheSize()
 	cache := ui.Bytes(size)
-	if a.cfg.CacheBudgetGB > 0 {
-		limit := int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
+	if limit := a.budgetBytes(); limit > 0 {
 		cache += " of " + ui.Bytes(limit)
 		if size > limit {
 			cache = w.Yellow(cache) + w.Dim("  run: quorum gc")

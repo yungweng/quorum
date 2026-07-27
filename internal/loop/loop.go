@@ -259,6 +259,11 @@ func (r *run) prepare() error {
 			return err
 		}
 	}
+	// Claim the directory before the GC runs, so neither this run nor any other
+	// one in flight is collected while it is still using its worktree.
+	if err := proc.Claim(r.root); err != nil {
+		return err
+	}
 	r.gcOldRuns()
 
 	if err := r.p.Git.WorktreeAdd(r.ctx, r.o.RepoRoot, r.worktree, headSHA); err != nil {
@@ -576,7 +581,7 @@ func (r *run) gcOldRuns() {
 			continue
 		}
 		dir := filepath.Join(r.o.RunsDir, e.Name())
-		if dir == r.root {
+		if proc.Claimed(dir) {
 			continue
 		}
 		info, err := e.Info()

@@ -136,8 +136,13 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err := os.MkdirAll(run.output, 0o755); err != nil {
 		return nil, err
 	}
+	// Claim the directory before the GC runs: it is what stops this run, and
+	// every other one in flight, from being collected out from under itself.
+	if err := proc.Claim(run.root); err != nil {
+		return nil, err
+	}
 
-	if removed := r.gc(ctx, o, run.root); removed > 0 {
+	if removed := r.gc(ctx, o); removed > 0 {
 		rep.Info(fmt.Sprintf("gc: removed %d old cache dir(s)", removed))
 	}
 
@@ -553,7 +558,7 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 
 // gc drops run directories and shared dependency trees nothing has needed for a
 // while, and clears worktree registrations left behind by killed runs.
-func (r *Runner) gc(ctx context.Context, o Options, keep string) int {
+func (r *Runner) gc(ctx context.Context, o Options) int {
 	removed := 0
 	entries, err := os.ReadDir(o.RunsDir)
 	if err == nil {
@@ -563,7 +568,7 @@ func (r *Runner) gc(ctx context.Context, o Options, keep string) int {
 				continue
 			}
 			dir := filepath.Join(o.RunsDir, e.Name())
-			if dir == keep {
+			if proc.Claimed(dir) {
 				continue
 			}
 			info, err := e.Info()

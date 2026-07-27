@@ -210,50 +210,53 @@ func Unlink(links []string) {
 	}
 }
 
-// GC removes shared trees that no run has needed for maxAge, and returns how
-// many it deleted.
+// Tree is one shared dependency tree in the cache, with the last time a run
+// needed it.
+type Tree struct {
+	Path string
+	Used time.Time
+}
+
+// Trees lists every tree in the cache, least recently used first.
 //
-// Age is read from the .complete marker, which Link touches on every reuse.
+// Use is read from the .complete marker, which Link touches on every reuse.
 // The shell version stat'ed the directory instead, which does not work: writing
 // a file inside a directory leaves the directory's own mtime untouched, so a
 // tree that had been reused daily since it was created still looked untouched
 // and was deleted on schedule. Verified on macOS; the marker's mtime is the
 // value that actually tracks use.
-func (c Cache) GC(maxAge time.Duration) int {
-	repos, err := os.ReadDir(c.Root)
-	if err != nil {
-		return 0
+//
+// A tree with no marker is a publish that never finished. It sorts first,
+// because it is dead weight whatever the caller is deleting for.
+func (c Cache) Trees() []Tree {
+	// <root>/<repo>/<project>/<hash>, the layout dir writes.
+	matches, _ := filepath.Glob(filepath.Join(c.Root, "*", "*", "*"))
+	out := make([]Tree, 0, len(matches))
+	for _, tree := range matches {
+		t := Tree{Path: tree}
+		// The marker doubles as the check that this is a tree at all: nothing
+		// else at this depth can hold one.
+		if info, err := os.Stat(filepath.Join(tree, completeMarker)); err == nil {
+			t.Used = info.ModTime()
+		}
+		out = append(out, t)
 	}
+	slices.SortFunc(out, func(a, b Tree) int { return a.Used.Compare(b.Used) })
+	return out
+}
+
+// GC removes shared trees that no run has needed for maxAge, and returns how
+// many it deleted.
+func (c Cache) GC(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
 	removed := 0
-	for _, repo := range repos {
-		if !repo.IsDir() {
-			continue
+	for _, t := range c.Trees() {
+		// Ordered by use, so the first tree still in date ends the sweep.
+		if !t.Used.Before(cutoff) {
+			break
 		}
-		projects, err := os.ReadDir(filepath.Join(c.Root, repo.Name()))
-		if err != nil {
-			continue
-		}
-		for _, project := range projects {
-			if !project.IsDir() {
-				continue
-			}
-			base := filepath.Join(c.Root, repo.Name(), project.Name())
-			hashes, err := os.ReadDir(base)
-			if err != nil {
-				continue
-			}
-			for _, h := range hashes {
-				tree := filepath.Join(base, h.Name())
-				info, err := os.Stat(filepath.Join(tree, completeMarker))
-				// No marker means a publish that never finished; it is dead
-				// weight either way.
-				if err != nil || info.ModTime().Before(cutoff) {
-					if os.RemoveAll(tree) == nil {
-						removed++
-					}
-				}
-			}
+		if os.RemoveAll(t.Path) == nil {
+			removed++
 		}
 	}
 	return removed

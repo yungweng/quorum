@@ -400,7 +400,7 @@ func (c Config) Render() string {
 	w("REVIEWERS=%d\n", c.Reviewers)
 	w("NICE=%d\t\t\t# scheduling priority for reviews, 0 disables\n", c.Nice)
 	w("LOAD_LIMIT=%s\t\t# hold reviews back above this 1-minute load, 0 disables\n", num(c.LoadLimit))
-	w("CACHE_BUDGET_GB=%s\t# review cache is trimmed to this size, 0 disables\n\n", num(c.CacheBudgetGB))
+	w("CACHE_BUDGET_GB=%s\t# runs and dependency trees together, 0 disables\n\n", num(c.CacheBudgetGB))
 
 	w("MAX_RETRIES=%d\n", c.MaxRetries)
 	w("POLL_INTERVAL=%d\t\t# re-run `quorum install` after changing this\n\n", c.PollInterval)

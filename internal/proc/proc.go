@@ -16,7 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -117,6 +121,47 @@ func killGroup(pid int) {
 			}
 		}
 	}
+}
+
+// Alive reports whether a process exists. Signal 0 performs the permission and
+// existence checks without delivering anything; EPERM means it is there but
+// belongs to somebody else, which still counts as running.
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// ClaimFile is what Claim writes into a directory it is holding.
+const ClaimFile = "run.pid"
+
+// Claim marks a directory as belonging to this process for as long as it runs.
+//
+// The cache collector has to tell a run that is over from one still using its
+// worktree, and no registry can answer that for it: the agent's markers cover
+// only the reviews the agent itself started, so a `quorum review` in a terminal
+// looked finished from the moment it began and could have its worktree deleted
+// underneath it. The claim lives in the directory because the directory is what
+// gets collected.
+func Claim(dir string) error {
+	return os.WriteFile(filepath.Join(dir, ClaimFile), []byte(strconv.Itoa(os.Getpid())), 0o644)
+}
+
+// Claimed reports whether the process holding a directory is still running.
+// No claim at all counts as unclaimed, which is what makes a directory left by
+// a killed run, or by a version that wrote none, collectable.
+func Claimed(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, ClaimFile))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return false
+	}
+	return Alive(pid)
 }
 
 // ExitCode extracts the exit status from a Run error. A timeout reports

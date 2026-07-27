@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
@@ -22,7 +23,7 @@ import (
 )
 
 // Version is the release. The Homebrew formula builds it in with -ldflags.
-var Version = "1.0.1"
+var Version = "1.0.2"
 
 // Exit codes. The first five are inherited from babysit, so scripts wrapped
 // around it keep working.
@@ -46,6 +47,11 @@ type app struct {
 	// configErr records a config file that could not be fully parsed. Commands
 	// keep working on the defaults; doctor and status report it.
 	configErr error
+
+	// The last measurement of the cache, and when it was taken. Measuring means
+	// walking the dependency trees, which `quorum watch` must not do per frame.
+	cacheBytes int64
+	cacheAt    time.Time
 }
 
 func main() {

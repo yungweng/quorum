@@ -14,6 +14,7 @@ import (
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/ui"
 )
 
 // candidate is one pull request the search returned, paired with what quorum
@@ -53,6 +54,13 @@ func (a *app) cmdPoll(args []string) int {
 		return 0
 	}
 	defer unlock()
+
+	// The sweeps inside a run only drop what is a week old, which a couple of
+	// days of heavy use fills a disk well ahead of. Enforcing the budget here is
+	// what keeps that from needing somebody to notice and run `quorum gc`.
+	if freed, _ := a.collect(false); freed > 0 {
+		a.log.Printf("cache was over its budget, freed %s", ui.Bytes(freed))
+	}
 
 	// A review whose process was killed leaves a record claiming to be running.
 	// Turning those into failures here is what lets them be picked up again.
