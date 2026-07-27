@@ -115,4 +115,6 @@ CI cut for itself never arrives as a `release: published` event. That is why
 Keep both triggers: the event still covers a release published by hand, and the
 direct call covers a release made with the default token. Rerunning the
 version-changing workflow carries an existing tag through to the `tap` job, so
-a failed formula update can be retried without creating the release again.
+a failed formula update can be retried without creating the release again. The
+retry first verifies that the existing tag resolves to the same commit; it
+fails rather than updating the formula from a same-version release elsewhere.

@@ -109,6 +109,7 @@ jobs:
         env:
           CURRENT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           read_version() {
             git show "$1:main.go" | sed -n 's/^var Version = "\(.*\)"$/\1/p'
@@ -131,12 +132,21 @@ jobs:
           fi
 
           TAG="v$VERSION"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           if gh release view "$TAG" >/dev/null 2>&1; then
+            if ! TAG_SHA=$(gh api "repos/$REPOSITORY/commits/$TAG" --jq .sha); then
+              echo "::error::could not resolve existing release tag $TAG"
+              exit 1
+            fi
+            if [[ "$TAG_SHA" != "$CURRENT_SHA" ]]; then
+              echo "::error::$TAG points to $TAG_SHA, not release commit $CURRENT_SHA"
+              exit 1
+            fi
             echo "$TAG is already released; the tap can still be retried."
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Releasing $TAG from $CURRENT_SHA."
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "create=true" >> "$GITHUB_OUTPUT"
 
       - name: Cut the release

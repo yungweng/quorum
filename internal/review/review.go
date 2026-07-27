@@ -151,8 +151,10 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	defer releaseClaim()
 
-	// The new run has not linked a dependency tree yet, so the age sweep may
-	// still evict trees if no older run is using them.
+	// A fresh run has not linked a dependency tree yet, so the age sweep may
+	// evict trees if no older run is using them. A resumed worktree may retain
+	// links left by a hard interruption; preserve their targets until recovery
+	// has finished.
 	removed := r.gc(ctx, o, run.root)
 	unlockCache()
 	if removed > 0 {
@@ -600,10 +602,10 @@ func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 			}
 		}
 	}
-	// A live review may have a node_modules symlink into any shared tree. The
-	// current run is excluded because startup holds the cache lock and has not
-	// linked anything yet.
-	if !otherLive {
+	// A live review may have a node_modules symlink into any shared tree. A
+	// fresh current run is safe to exclude because startup holds the cache lock
+	// and it has not linked anything yet; ResumeRun covers retained worktrees.
+	if !otherLive && o.ResumeRun == "" {
 		cache := deps.Cache{Root: o.DepsDir}
 		removed += cache.GC(depsRetention)
 	}
