@@ -8,6 +8,8 @@ import (
 
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/proc"
+	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/state"
 )
 
 // staleClaim is an unlocked claim left by a run that is over. Its bytes count
@@ -60,6 +62,26 @@ func liveRun(t *testing.T, root, name string, worktree, output int) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(release)
+	return dir
+}
+
+// legacyLiveRun has no run.pid: v1.0.1 exposed liveness through its detached
+// review marker and state record instead.
+func legacyLiveRun(t *testing.T, a *app, root, name string, worktree, output int) string {
+	t.Helper()
+	dir := makeRun(t, root, name, worktree, output, "")
+	key := "owner/repo#1"
+	marker, got, err := runner.Acquire(a.p.RunningDir, key)
+	if err != nil || !got {
+		t.Fatalf("acquiring legacy marker: got=%v err=%v", got, err)
+	}
+	t.Cleanup(marker.Release)
+	if err := state.Mutate(a.p.StateFile, key, func(rec *state.Record) {
+		rec.Status = state.Running
+		rec.RunDir = dir
+	}); err != nil {
+		t.Fatal(err)
+	}
 	return dir
 }
 
@@ -143,6 +165,35 @@ func TestCollectNeverTouchesALiveRun(t *testing.T) {
 	assertCollected(t, freed, removed, 0, 0)
 	if !exists(filepath.Join(run, "worktree")) {
 		t.Error("worktree of a running review was deleted")
+	}
+}
+
+func TestCollectNeverTouchesALegacyLiveRunDuringUpgrade(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(100)
+	run := legacyLiveRun(t, a, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 0, 0)
+	if !exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree of a running v1.0.1 review was deleted")
+	}
+}
+
+func TestCollectProtectsRunsWhenALegacyMarkerCannotBeMapped(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(100)
+	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
+	marker, got, err := runner.Acquire(a.p.RunningDir, "owner/repo#1")
+	if err != nil || !got {
+		t.Fatalf("acquiring legacy marker: got=%v err=%v", got, err)
+	}
+	t.Cleanup(marker.Release)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 0, 0)
+	if !exists(filepath.Join(run, "worktree")) {
+		t.Error("run was deleted while a v1.0.1 review could not be mapped")
 	}
 }
 

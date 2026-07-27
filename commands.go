@@ -23,6 +23,7 @@ import (
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
@@ -369,6 +370,7 @@ type runEntry struct {
 
 // runDirs lists every review and babysit run directory, oldest first.
 func (a *app) runDirs() []runEntry {
+	legacyLive, protectAllLegacy := a.legacyLiveRuns()
 	var runs []runEntry
 	for _, root := range []string{a.p.ReviewRuns, a.p.BabysitRuns} {
 		entries, err := os.ReadDir(root)
@@ -385,14 +387,45 @@ func (a *app) runDirs() []runEntry {
 			}
 			path := filepath.Join(root, e.Name())
 			worktree, output := runSizes(path)
+			live := proc.Claimed(path) || protectAllLegacy ||
+				legacyLive[filepath.Clean(path)] || legacyLive[e.Name()]
 			runs = append(runs, runEntry{
-				path: path, mod: info.ModTime(), live: proc.Claimed(path),
+				path: path, mod: info.ModTime(), live: live,
 				worktree: worktree, output: output,
 			})
 		}
 	}
 	slices.SortFunc(runs, func(a, b runEntry) int { return a.mod.Compare(b.mod) })
 	return runs
+}
+
+// legacyLiveRuns preserves the marker/state liveness contract used before run
+// claims existed. It can be removed after upgrades from v1.0.1 no longer need
+// to coexist with reviews started by that version.
+func (a *app) legacyLiveRuns() (map[string]bool, bool) {
+	markers := runner.Live(a.p.RunningDir)
+	if len(markers) == 0 {
+		return nil, false
+	}
+	file, err := state.Read(a.p.StateFile)
+	if err != nil {
+		// A live legacy process with unreadable state cannot be mapped safely.
+		// Preserve all runs until its marker goes away.
+		return nil, true
+	}
+	live := make(map[string]bool, len(markers)*2)
+	protectAll := false
+	for _, marker := range markers {
+		rec, ok := file.PRs[marker.Key]
+		if !ok || rec.RunDir == "" {
+			protectAll = true
+			continue
+		}
+		path := filepath.Clean(rec.RunDir)
+		live[path] = true
+		live[filepath.Base(path)] = true
+	}
+	return live, protectAll
 }
 
 // runSizes splits a run directory into its worktree and everything else, in one

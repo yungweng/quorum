@@ -118,3 +118,5 @@ version-changing workflow carries an existing tag through to the `tap` job, so
 a failed formula update can be retried without creating the release again. The
 retry first verifies that the existing tag resolves to the same commit; it
 fails rather than updating the formula from a same-version release elsewhere.
+The same check runs before release creation when a tag exists without a release,
+because GitHub would otherwise ignore `--target` and publish from that tag.

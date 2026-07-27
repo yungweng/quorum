@@ -114,6 +114,17 @@ jobs:
           read_version() {
             git show "$1:main.go" | sed -n 's/^var Version = "\(.*\)"$/\1/p'
           }
+          verify_tag_target() {
+            local tag_sha
+            if ! tag_sha=$(gh api "repos/$REPOSITORY/commits/$TAG" --jq .sha); then
+              echo "::error::could not resolve existing tag $TAG"
+              return 1
+            fi
+            if [[ "$tag_sha" != "$CURRENT_SHA" ]]; then
+              echo "::error::$TAG points to $tag_sha, not release commit $CURRENT_SHA"
+              return 1
+            fi
+          }
 
           VERSION=$(read_version "$CURRENT_SHA" || true)
           if [[ -z "$VERSION" ]]; then
@@ -133,18 +144,24 @@ jobs:
 
           TAG="v$VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            if ! TAG_SHA=$(gh api "repos/$REPOSITORY/commits/$TAG" --jq .sha); then
-              echo "::error::could not resolve existing release tag $TAG"
-              exit 1
-            fi
-            if [[ "$TAG_SHA" != "$CURRENT_SHA" ]]; then
-              echo "::error::$TAG points to $TAG_SHA, not release commit $CURRENT_SHA"
+            if ! verify_tag_target; then
               exit 1
             fi
             echo "$TAG is already released; the tap can still be retried."
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          if ! TAG_REFS=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}"); then
+            echo "::error::could not check whether tag $TAG already exists"
+            exit 1
+          fi
+          if [[ -n "$TAG_REFS" ]]; then
+            if ! verify_tag_target; then
+              exit 1
+            fi
+          fi
+
           echo "Releasing $TAG from $CURRENT_SHA."
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "create=true" >> "$GITHUB_OUTPUT"

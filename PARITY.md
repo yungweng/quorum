@@ -92,7 +92,9 @@ Each of these is a place where the port does something different on purpose.
    and nothing else, so a `quorum review` in a terminal looked finished from
    the moment it began and a concurrent `gc` could delete the worktree it was
    reviewing in. The claim is also what the age sweeps use, in place of the
-   "skip the directory I am in" exception each of them carried.
+   "skip the directory I am in" exception each of them carried. The collector
+   also honors the old live-marker/state mapping during upgrades from v1.0.1,
+   whose runs have no claim file.
 
 10. **The cache budget is enforced by the poll, and covers the whole cache.**
     Only `~/.cache/quorum/reviews` was ever measured or trimmed, and only when
