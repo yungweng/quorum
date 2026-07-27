@@ -70,15 +70,16 @@ func (a *app) cmdReview(argv []string) int {
 
 	o := review.Options{
 		Repo: repo, Number: number, RepoRoot: repoRoot,
-		Model:     a.cfg.ReviewModel,
-		Effort:    a.cfg.ReviewEffort,
-		Runs:      a.cfg.Reviewers,
-		Post:      a.cfg.Post,
-		UseDirenv: t.Direnv != "",
-		RunsDir:   a.p.ReviewRuns,
-		DepsDir:   a.p.DepsCache,
-		CodexBin:  t.Codex,
-		DirenvBin: t.Direnv,
+		Model:          a.cfg.ReviewModel,
+		Effort:         a.cfg.ReviewEffort,
+		Runs:           a.cfg.Reviewers,
+		Post:           a.cfg.Post,
+		UseDirenv:      t.Direnv != "",
+		RunsDir:        a.p.ReviewRuns,
+		SharedRunsDirs: []string{a.p.BabysitRuns},
+		DepsDir:        a.p.DepsCache,
+		CodexBin:       t.Codex,
+		DirenvBin:      t.Direnv,
 	}
 	if o.Runs, err = args.intVal(o.Runs, "n", "runs"); err != nil {
 		return a.die("%v", err)

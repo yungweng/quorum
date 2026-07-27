@@ -284,7 +284,7 @@ MAX_CONCURRENT=6
 REVIEWERS=6
 NICE=10                  # reviews give way to your own work
 LOAD_LIMIT=0             # hold reviews back above this load, 0 disables
-CACHE_BUDGET_GB=5
+CACHE_BUDGET_GB=5        # runs and dependency trees together, 0 disables
 
 MAX_RETRIES=3
 POLL_INTERVAL=300        # re-run `quorum install` after changing this
@@ -353,7 +353,8 @@ So the environment is entered once before the reviewers start, and whatever the
 hook installed is moved to `~/.cache/quorum/deps/<repo>/<project>/<lock-hash>/`.
 The next run symlinks it back in, the hook's guard sees a populated directory
 and skips the install. Any change to the lock file produces a different hash, so
-a stale tree is never reused. Trees no run has needed for 14 days are deleted.
+a stale tree is never reused. Trees no run has needed for 14 days are deleted,
+and a cache over its budget gives them up last of all.
 
 Nothing to configure, and `--no-direnv` skips the whole step. Removing a
 worktree only removes the symlink, never the shared tree.
@@ -371,6 +372,16 @@ worktree only removes the symlink, never the shared tree.
 ~/.cache/quorum/deps/               shared dependency trees
 ~/.cache/quorum/repos/              managed clones
 ```
+
+A successful run deletes its own worktree, which is nearly all of what it took
+up; a failed one keeps it so `--resume-run` can pick it up. Run directories are
+dropped a week after anything last looked at them, dependency trees after two
+weeks. `CACHE_BUDGET_GB` bounds the three cache directories together, and every
+poll enforces it, so nothing is waiting on somebody to notice and run
+`quorum gc`. Over the budget the worktrees of finished runs go first, then whole
+run directories oldest first, then dependency trees, and a run still in flight
+is never touched. The managed clones are outside the budget: one per repository,
+bounded by how many you review.
 
 ## Troubleshooting
 

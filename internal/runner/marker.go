@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // A marker is the proof that a review is in flight. Reviews run as detached
@@ -61,7 +62,7 @@ func Acquire(dir, key string) (*Marker, bool, error) {
 			return nil, false, err
 		}
 		existing, ok := readMarker(path)
-		if ok && alive(existing.PID) {
+		if ok && proc.Alive(existing.PID) {
 			return nil, false, nil
 		}
 		// Stale: the holder died. Clear it and try once more.
@@ -99,26 +100,11 @@ func Live(dir string) []Marker {
 		}
 		path := filepath.Join(dir, e.Name())
 		m, ok := readMarker(path)
-		if !ok || !alive(m.PID) {
+		if !ok || !proc.Alive(m.PID) {
 			os.Remove(path)
 			continue
 		}
 		out = append(out, m)
 	}
 	return out
-}
-
-// alive reports whether a process exists. Signal 0 performs the permission and
-// existence checks without delivering anything.
-func alive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	// EPERM means it exists but belongs to somebody else, which still counts.
-	return err == nil || err == syscall.EPERM
 }

@@ -1,0 +1,115 @@
+name: Update Homebrew tap
+description: Point the quorum formula at a release without allowing a downgrade
+
+inputs:
+  tag:
+    description: The release tag to publish, e.g. v1.0.2
+    required: true
+  deploy-key:
+    description: SSH key that can push to the Homebrew tap
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check out tap
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: yungweng/homebrew-tap
+        ssh-key: ${{ inputs.deploy-key }}
+        path: tap
+
+    - name: Validate release tag
+      id: plan
+      env:
+        TAG: ${{ inputs.tag }}
+      shell: bash
+      run: |
+        if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::release tag $TAG is not vX.Y.Z"
+          exit 1
+        fi
+        echo "url=https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz" \
+          >> "$GITHUB_OUTPUT"
+
+    - name: Compute release tarball checksum
+      id: checksum
+      env:
+        URL: ${{ steps.plan.outputs.url }}
+      shell: bash
+      run: |
+        # When CI just created the release, the tarball can take a moment to
+        # exist. Failing here would ship a release with a stale formula.
+        for attempt in 1 2 3 4 5; do
+          if curl -sSfL "$URL" -o release.tar.gz; then
+            break
+          fi
+          if [[ $attempt == 5 ]]; then
+            echo "::error::$URL did not become available"
+            exit 1
+          fi
+          sleep $((attempt * 5))
+        done
+        echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+    - name: Update formula
+      env:
+        SHA256: ${{ steps.checksum.outputs.sha256 }}
+        TAG: ${{ inputs.tag }}
+        URL: ${{ steps.plan.outputs.url }}
+      shell: bash
+      run: |
+        FORMULA=tap/Formula/quorum.rb
+        BRANCH=$(git -C tap branch --show-current)
+        if [[ -z "$BRANCH" ]]; then
+          echo "::error::tap checkout is not on a branch"
+          exit 1
+        fi
+        git -C tap config user.name "github-actions[bot]"
+        git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # A fast-forward push is the compare-and-swap. If another release wins
+        # it, start again from that commit and recheck the formula version.
+        for attempt in 1 2 3 4 5; do
+          if ! git -C tap fetch --quiet origin "$BRANCH"; then
+            if [[ $attempt == 5 ]]; then
+              echo "::error::could not refresh the tap after $attempt attempts"
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            continue
+          fi
+          git -C tap reset --hard "origin/$BRANCH"
+
+          CURRENT_TAG=$(sed -n \
+            's|^  url ".*/archive/refs/tags/\(v[^"]*\)\.tar\.gz"$|\1|p' \
+            "$FORMULA")
+          if [[ ! "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::could not read a vX.Y.Z tag from $FORMULA"
+            exit 1
+          fi
+          NEWEST_TAG=$(printf '%s\n%s\n' "$CURRENT_TAG" "$TAG" |
+            LC_ALL=C sort -V | tail -n 1)
+          if [[ "$NEWEST_TAG" != "$TAG" ]]; then
+            echo "$FORMULA already points to newer $CURRENT_TAG; not replacing it with $TAG."
+            exit 0
+          fi
+
+          sed -i \
+            -e "s|^  url \".*\"$|  url \"$URL\"|" \
+            -e "s|^  sha256 \".*\"$|  sha256 \"$SHA256\"|" \
+            "$FORMULA"
+          if git -C tap diff --quiet; then
+            echo "Formula already up to date, nothing to push."
+            exit 0
+          fi
+          git -C tap commit -am "quorum ${TAG}"
+          if git -C tap push origin "HEAD:$BRANCH"; then
+            exit 0
+          fi
+          if [[ $attempt == 5 ]]; then
+            echo "::error::tap changed during all $attempt push attempts"
+            exit 1
+          fi
+          sleep $((attempt * 2))
+        done

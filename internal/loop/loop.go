@@ -137,6 +137,7 @@ func (p *Pipeline) Run(ctx context.Context, o Options) (*Result, error) {
 
 	r := &run{p: p, o: o, ctx: ctx, rep: p.reporter()}
 	if err := r.prepare(); err != nil {
+		r.releaseRunClaim()
 		return nil, err
 	}
 	defer r.cleanup()
@@ -155,12 +156,13 @@ type run struct {
 	ctx context.Context
 	rep Reporter
 
-	pr       gh.FullPR
-	branch   string
-	root     string
-	worktree string
-	logDir   string
-	msgDir   string
+	pr           gh.FullPR
+	branch       string
+	root         string
+	worktree     string
+	logDir       string
+	msgDir       string
+	releaseClaim func()
 
 	env   envexec.Env
 	codex codex.Options
@@ -254,12 +256,26 @@ func (r *run) prepare() error {
 	r.worktree = filepath.Join(r.root, "worktree")
 	r.logDir = filepath.Join(r.root, "logs")
 	r.msgDir = filepath.Join(r.root, "messages")
+	// Cache collection takes this same lock from its liveness check through
+	// dependency eviction. Create and claim the run while holding it so
+	// collection must happen wholly before this startup or see this run as live.
+	unlockCache, err := proc.LockDir(filepath.Dir(r.o.DepsDir))
+	if err != nil {
+		return err
+	}
 	for _, d := range []string{r.logDir, r.msgDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
+			unlockCache()
 			return err
 		}
 	}
+	r.releaseClaim, err = proc.Claim(r.root)
+	if err != nil {
+		unlockCache()
+		return err
+	}
 	r.gcOldRuns()
+	unlockCache()
 
 	if err := r.p.Git.WorktreeAdd(r.ctx, r.o.RepoRoot, r.worktree, headSHA); err != nil {
 		return err
@@ -576,7 +592,7 @@ func (r *run) gcOldRuns() {
 			continue
 		}
 		dir := filepath.Join(r.o.RunsDir, e.Name())
-		if dir == r.root {
+		if proc.Claimed(dir) {
 			continue
 		}
 		info, err := e.Info()
@@ -594,6 +610,14 @@ func (r *run) cleanup() {
 	r.killReview()
 	if !r.o.KeepWorktree {
 		r.p.Git.WorktreeRemove(r.ctx, r.o.RepoRoot, r.worktree)
+	}
+	r.releaseRunClaim()
+}
+
+func (r *run) releaseRunClaim() {
+	if r.releaseClaim != nil {
+		r.releaseClaim()
+		r.releaseClaim = nil
 	}
 }
 

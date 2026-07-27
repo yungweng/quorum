@@ -156,11 +156,11 @@ func (a *app) settings() []setting {
 
 		{"cache budget", func(c config.Config) string {
 			if c.CacheBudgetGB <= 0 {
-				return "off, the review cache is never trimmed"
+				return "off, the cache is never trimmed"
 			}
-			return fmt.Sprintf("%s GB, trimmed by quorum gc", trimNum(c.CacheBudgetGB))
+			return fmt.Sprintf("%s GB across runs and dependency trees", trimNum(c.CacheBudgetGB))
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "review cache budget in GB, 0 turns it off", trimNum(c.CacheBudgetGB))
+			v, err := a.askText(in, "cache budget in GB, 0 turns it off", trimNum(c.CacheBudgetGB))
 			if err != nil {
 				return err
 			}

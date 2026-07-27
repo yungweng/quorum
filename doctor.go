@@ -63,7 +63,10 @@ func (a *app) cmdDoctor(args []string) int {
 	}
 
 	w.Printf("%s\n", w.Bold("applying fixes"))
-	freed, removed := a.collect(false)
+	freed, removed, err := a.collect(false)
+	if err != nil {
+		return a.die("cache collection: %v", err)
+	}
 	if freed > 0 || removed > 0 {
 		w.Printf("  cache      freed %s\n", ui.Bytes(freed))
 	}
@@ -161,10 +164,10 @@ func (a *app) runChecks() []check {
 	}
 
 	// Disk.
-	size := dirSize(a.p.ReviewRuns)
-	limit := int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
+	size := a.cacheSize()
+	limit := a.budgetBytes()
 	switch {
-	case a.cfg.CacheBudgetGB <= 0:
+	case limit <= 0:
 		out = append(out, check{"cache", ui.Bytes(size) + ", no budget set", 0, ""})
 	case size > limit:
 		out = append(out, check{"cache", fmt.Sprintf("%s, over the %s budget", ui.Bytes(size), ui.Bytes(limit)), 1, "quorum gc"})

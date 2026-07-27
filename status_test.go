@@ -18,11 +18,13 @@ func testApp(t *testing.T) *app {
 	t.Helper()
 	dir := t.TempDir()
 	p := paths.P{
-		StateDir:   dir,
-		StateFile:  filepath.Join(dir, "state.json"),
-		Log:        filepath.Join(dir, "log"),
-		RunningDir: filepath.Join(dir, "running"),
-		ReviewRuns: filepath.Join(dir, "runs"),
+		StateDir:    dir,
+		StateFile:   filepath.Join(dir, "state.json"),
+		Log:         filepath.Join(dir, "log"),
+		RunningDir:  filepath.Join(dir, "running"),
+		ReviewRuns:  filepath.Join(dir, "runs"),
+		BabysitRuns: filepath.Join(dir, "babysit"),
+		DepsCache:   filepath.Join(dir, "deps"),
 	}
 	cfg := config.Config{MaxConcurrent: 6, Reviewers: 6, PollInterval: 120}
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}

@@ -80,10 +80,11 @@ type Options struct {
 	ResumeRun        string // reuse a run directory and only aggregate/post
 
 	// Paths
-	RunsDir   string // where run directories are created
-	DepsDir   string // shared dependency cache root
-	CodexBin  string
-	DirenvBin string
+	RunsDir        string   // where run directories are created
+	SharedRunsDirs []string // other run roots sharing the dependency cache
+	DepsDir        string   // shared dependency cache root
+	CodexBin       string
+	DirenvBin      string
 }
 
 // Result is what a finished run produced.
@@ -133,11 +134,31 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(run.output, 0o755); err != nil {
+	// Cache collection takes this same lock from its liveness check through
+	// dependency eviction. Create and claim the run while holding it so
+	// collection must happen wholly before this startup or see this run as live.
+	unlockCache, err := proc.LockDir(filepath.Dir(o.DepsDir))
+	if err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(run.output, 0o755); err != nil {
+		unlockCache()
+		return nil, err
+	}
+	releaseClaim, err := proc.Claim(run.root)
+	if err != nil {
+		unlockCache()
+		return nil, err
+	}
+	defer releaseClaim()
 
-	if removed := r.gc(ctx, o, run.root); removed > 0 {
+	// A fresh run has not linked a dependency tree yet, so the age sweep may
+	// evict trees if no older run is using them. A resumed worktree may retain
+	// links left by a hard interruption; preserve their targets until recovery
+	// has finished.
+	removed := r.gc(ctx, o, run.root)
+	unlockCache()
+	if removed > 0 {
 		rep.Info(fmt.Sprintf("gc: removed %d old cache dir(s)", removed))
 	}
 
@@ -553,8 +574,9 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 
 // gc drops run directories and shared dependency trees nothing has needed for a
 // while, and clears worktree registrations left behind by killed runs.
-func (r *Runner) gc(ctx context.Context, o Options, keep string) int {
+func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 	removed := 0
+	otherLive := false
 	entries, err := os.ReadDir(o.RunsDir)
 	if err == nil {
 		cutoff := time.Now().Add(-runRetention)
@@ -563,7 +585,10 @@ func (r *Runner) gc(ctx context.Context, o Options, keep string) int {
 				continue
 			}
 			dir := filepath.Join(o.RunsDir, e.Name())
-			if dir == keep {
+			if proc.Claimed(dir) {
+				if dir != current {
+					otherLive = true
+				}
 				continue
 			}
 			info, err := e.Info()
@@ -577,11 +602,41 @@ func (r *Runner) gc(ctx context.Context, o Options, keep string) int {
 				removed++
 			}
 		}
+	} else if !os.IsNotExist(err) {
+		// An unreadable run root may contain a live claim. Preserve shared
+		// trees rather than severing a dependency link we could not inspect.
+		otherLive = true
 	}
-	cache := deps.Cache{Root: o.DepsDir}
-	removed += cache.GC(depsRetention)
+	for _, root := range o.SharedRunsDirs {
+		if claimedRunIn(root) {
+			otherLive = true
+			break
+		}
+	}
+	// A live run may have a node_modules symlink into any shared tree. A
+	// fresh current run is safe to exclude because startup holds the cache lock
+	// and it has not linked anything yet; ResumeRun covers retained worktrees.
+	if !otherLive && o.ResumeRun == "" {
+		cache := deps.Cache{Root: o.DepsDir}
+		removed += cache.GC(depsRetention)
+	}
 	r.Git.WorktreePrune(ctx, o.RepoRoot)
 	return removed
+}
+
+// claimedRunIn reports conservatively: an unreadable root may hide a live
+// claim, while a root that has never been created cannot.
+func claimedRunIn(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() && proc.Claimed(filepath.Join(root, e.Name())) {
+			return true
+		}
+	}
+	return false
 }
 
 func (o Options) withDefaults() Options {
