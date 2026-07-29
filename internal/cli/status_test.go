@@ -112,6 +112,29 @@ func TestDashboardKeepsThePipelineVisibleWhenIdle(t *testing.T) {
 	}
 }
 
+// Cache size is linear in the number of cached files. The dashboard is an
+// interactive status path, so it must not start that walk merely to draw a
+// system summary.
+func TestDashboardDoesNotMeasureCache(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = 4
+	if err := os.MkdirAll(a.p.DepsCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.p.DepsCache, "tree"), []byte("cached"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	screen, _ := render(t, a, nil)
+
+	if !a.cacheAt.IsZero() {
+		t.Fatal("dashboard measured the cache")
+	}
+	if !strings.Contains(screen, "4.0 GB budget") {
+		t.Fatalf("dashboard is missing the cache budget:\n%s", screen)
+	}
+}
+
 // A fix loop started from a terminal never touches the state file and never
 // takes a review slot. The run cache is the only place it exists, so a
 // dashboard that only reads the state file shows nothing while one runs for

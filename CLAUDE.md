@@ -98,6 +98,26 @@ reporting without breaking the build.
   When you touch one, update all three. The README shows only the flags worth an
   example; the full table lives in the reference.
 
+## Local development
+
+Run the working tree directly while changing code:
+
+```bash
+go run . [command] [args...]
+```
+
+To make the current checkout the `quorum` used by the shell, rebuild the local
+binary:
+
+```bash
+go build -o ~/.local/bin/quorum .
+```
+
+On the maintainer's machine, `~/.local/bin` precedes `/opt/homebrew/bin`, so
+this local build wins over the Homebrew installation. `which quorum` should
+print `/Users/yonnock/.local/bin/quorum`; the Homebrew binary remains available
+at `/opt/homebrew/bin/quorum`.
+
 ## Checks before committing
 
 ```bash

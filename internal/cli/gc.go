@@ -62,10 +62,9 @@ func (a *app) budgetBytes() int64 {
 	return int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
 }
 
-// cacheSizeTTL is how long a measurement is reused. `quorum watch` redraws
-// every three seconds and the dependency trees run to tens of thousands of
-// files, so measuring per frame would spend the whole interval in stat calls
-// to render a line that reads the same either way.
+// cacheSizeTTL is how long one command reuses a measurement. Dependency trees
+// can contain tens of thousands of files, so collection and its final report
+// must not walk them twice.
 const cacheSizeTTL = time.Minute
 
 // cacheSize is everything the budget covers: both run caches and the shared
@@ -84,7 +83,16 @@ func (a *app) setCacheSize(n int64) {
 
 // measureCache walks everything the budget covers.
 func (a *app) measureCache() int64 {
-	return dirSize(a.p.ReviewRuns) + dirSize(a.p.BabysitRuns) + dirSize(a.p.DepsCache)
+	roots := []string{a.p.ReviewRuns, a.p.BabysitRuns, a.p.DepsCache}
+	sizes := make(chan int64, len(roots))
+	for _, root := range roots {
+		go func() { sizes <- dirSize(root) }()
+	}
+	var total int64
+	for range roots {
+		total += <-sizes
+	}
+	return total
 }
 
 // dirSize adds up a directory tree, ignoring anything it cannot read.

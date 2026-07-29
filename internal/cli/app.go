@@ -46,10 +46,15 @@ type app struct {
 	// keep working on the defaults; doctor and status report it.
 	configErr error
 
-	// The last measurement of the cache, and when it was taken. Measuring means
-	// walking the dependency trees, which `quorum watch` must not do per frame.
+	// The last measurement of the cache, and when it was taken. Measuring walks
+	// every cache file, so collection and its report must share the result.
 	cacheBytes int64
 	cacheAt    time.Time
+
+	// The dashboard redraws frequently; keep it from spawning launchctl on
+	// every frame while still noticing agent changes promptly.
+	agentOn bool
+	agentAt time.Time
 
 	removeAll func(string) error // replaced by gc tests that need deterministic failures
 }
@@ -182,11 +187,14 @@ func widenPath() {
 		"/usr/bin", "/bin", "/usr/sbin", "/sbin",
 	}
 	// npm puts globally installed tools such as codex into its own prefix,
-	// which is often somewhere non-standard.
-	if npm, err := exec.LookPath("npm"); err == nil {
-		if out, err := exec.Command(npm, "prefix", "-g").Output(); err == nil {
-			if prefix := strings.TrimSpace(string(out)); prefix != "" {
-				extra = append([]string{prefix + "/bin"}, extra...)
+	// which is often somewhere non-standard. Asking npm costs a subprocess, so
+	// skip it when the shell's existing PATH already resolves Codex.
+	if _, err := exec.LookPath("codex"); err != nil {
+		if npm, err := exec.LookPath("npm"); err == nil {
+			if out, err := exec.Command(npm, "prefix", "-g").Output(); err == nil {
+				if prefix := strings.TrimSpace(string(out)); prefix != "" {
+					extra = append([]string{prefix + "/bin"}, extra...)
+				}
 			}
 		}
 	}

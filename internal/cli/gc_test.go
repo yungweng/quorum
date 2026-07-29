@@ -410,8 +410,8 @@ func TestCollectTreatsAMissingCacheAsEmpty(t *testing.T) {
 	}
 }
 
-// The dashboard redraws every three seconds, so the size it prints is a held
-// measurement; collecting must leave that value correct rather than stale.
+// Collection and its final report share a measurement, so collection must
+// leave that value correct rather than stale.
 func TestCollectLeavesTheRememberedSizeCorrect(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(500)
