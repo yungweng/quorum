@@ -106,7 +106,9 @@ func (a *app) runChecks() []check {
 			level, fix := 2, "install "+spec.name
 			if spec.name == "direnv" {
 				// Only projects with an .envrc need it.
-				level, fix = 1, "install direnv, or set REVIEW_ARGS=\"--no-direnv\""
+				// REVIEW_ARGS is retired and only --dry-run is still read out of
+				// it, so pointing at it here would be advice that does nothing.
+				level, fix = 1, "install direnv, or pass --no-direnv"
 			}
 			out = append(out, check{spec.name, "not found, needed for " + spec.why, level, fix})
 			continue

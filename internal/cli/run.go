@@ -60,19 +60,42 @@ func (a *app) cmdRun(args []string) int {
 	return 0
 }
 
+// parseLogArgs reads the arguments of `quorum logs`.
+//
+// -n takes a line count, the way every other tool spells it. It used to mean
+// "do not follow", which is what --no-follow is for.
+func parseLogArgs(args []string) (lines int, follow bool, err error) {
+	lines, follow = 50, true
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; arg {
+		case "--no-follow":
+			follow = false
+		case "-n", "--lines":
+			if i+1 >= len(args) {
+				return 0, false, fmt.Errorf("%s requires a number of lines", arg)
+			}
+			i++
+			v, convErr := strconv.Atoi(args[i])
+			if convErr != nil {
+				return 0, false, fmt.Errorf("%s must be a number, got %q", arg, args[i])
+			}
+			lines = v
+		default:
+			v, convErr := strconv.Atoi(arg)
+			if convErr != nil {
+				return 0, false, fmt.Errorf("unknown argument: %s", arg)
+			}
+			lines = v
+		}
+	}
+	return lines, follow, nil
+}
+
 // cmdLogs follows the log file, printing the tail first.
 func (a *app) cmdLogs(args []string) int {
-	n := 50
-	follow := true
-	for _, arg := range args {
-		switch arg {
-		case "-n", "--no-follow":
-			follow = false
-		default:
-			if v, err := strconv.Atoi(arg); err == nil {
-				n = v
-			}
-		}
+	n, follow, err := parseLogArgs(args)
+	if err != nil {
+		return a.die("%v", err)
 	}
 	for _, line := range a.log.Tail(n) {
 		fmt.Println(line)

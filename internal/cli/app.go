@@ -221,7 +221,7 @@ func (a *app) usage() {
   quorum                 what is running, queued and finished
   quorum watch           the same, redrawn as it changes
   quorum run <pr>        hand one PR to the agent right now
-  quorum logs [n]        follow the log
+  quorum logs [-n N]     follow the log, --no-follow to print the tail and stop
   quorum doctor [--fix]  check the setup and report what to do about it
   quorum setup           configure scope, limits and notifications
   quorum install         install the launchd agent (polls every %ds)
