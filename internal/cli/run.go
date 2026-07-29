@@ -87,6 +87,9 @@ func parseLogArgs(args []string) (lines int, follow bool, err error) {
 			}
 			lines = v
 		}
+		if lines < 0 {
+			return 0, false, fmt.Errorf("number of lines must be non-negative, got %d", lines)
+		}
 	}
 	return lines, follow, nil
 }

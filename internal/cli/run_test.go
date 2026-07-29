@@ -39,6 +39,9 @@ func TestParseLogArgsRejectsBadInput(t *testing.T) {
 		{"-n"},              // no value
 		{"--lines"},         // no value
 		{"-n", "many"},      // not a number
+		{"-n", "-1"},        // negative short option
+		{"--lines", "-1"},   // negative long option
+		{"-1"},              // negative positional
 		{"--not-a-flag"},    // unknown option
 		{"--no-follow", ""}, // empty positional
 	} {
