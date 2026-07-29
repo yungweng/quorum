@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -7,7 +7,10 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -210,7 +213,7 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 		return c, false
 	}
 
-	if contains(a.cfg.ExcludeRepos, repo) {
+	if slices.Contains(a.cfg.ExcludeRepos, repo) {
 		return skip("excluded by config")
 	}
 	if a.cfg.SkipDrafts && pr.IsDraft {
@@ -413,6 +416,47 @@ func (a *app) record(key string, fn func(*state.Record)) {
 func (a *app) touchHeartbeat(open int) {
 	path := filepath.Join(a.p.StateDir, "last-poll")
 	os.WriteFile(path, []byte(time.Now().Format(time.RFC3339)+" "+itoa(open)+"\n"), 0o644)
+}
+
+// clearOrphans turns interrupted reviews into failures so the next poll can
+// pick them up again instead of leaving them stuck as running.
+//
+// It lives here rather than in doctor.go because every poll starts with it:
+// it is recovery the agent does for itself, not a diagnostic somebody asks for.
+func (a *app) clearOrphans() int {
+	file, err := state.Read(a.p.StateFile)
+	if err != nil {
+		return 0
+	}
+	live := map[string]bool{}
+	for _, m := range runner.Live(a.p.RunningDir) {
+		live[m.Key] = true
+	}
+	n := 0
+	for key, rec := range file.PRs {
+		if rec.Status != state.Running || live[key] {
+			continue
+		}
+		a.record(key, func(r *state.Record) {
+			r.Mark(state.Failed, "the review process stopped before it finished")
+			r.Fails++
+		})
+		n++
+	}
+	return n
+}
+
+// ownerOf is the owner half of "owner/repo".
+func ownerOf(repo string) string {
+	owner, _, _ := strings.Cut(repo, "/")
+	return owner
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }
 
 // tryLock takes the poll lock without waiting. held is false when another poll

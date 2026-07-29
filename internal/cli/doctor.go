@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -106,7 +106,9 @@ func (a *app) runChecks() []check {
 			level, fix := 2, "install "+spec.name
 			if spec.name == "direnv" {
 				// Only projects with an .envrc need it.
-				level, fix = 1, "install direnv, or set REVIEW_ARGS=\"--no-direnv\""
+				// REVIEW_ARGS is retired and only --dry-run is still read out of
+				// it, so pointing at it here would be advice that does nothing.
+				level, fix = 1, "install direnv, or pass --no-direnv"
 			}
 			out = append(out, check{spec.name, "not found, needed for " + spec.why, level, fix})
 			continue
@@ -241,31 +243,6 @@ func (a *app) orphanCount() int {
 		if rec.Status == state.Running && !live[key] {
 			n++
 		}
-	}
-	return n
-}
-
-// clearOrphans turns interrupted reviews into failures so the next poll can
-// pick them up again instead of leaving them stuck as running.
-func (a *app) clearOrphans() int {
-	file, err := state.Read(a.p.StateFile)
-	if err != nil {
-		return 0
-	}
-	live := map[string]bool{}
-	for _, m := range runner.Live(a.p.RunningDir) {
-		live[m.Key] = true
-	}
-	n := 0
-	for key, rec := range file.PRs {
-		if rec.Status != state.Running || live[key] {
-			continue
-		}
-		a.record(key, func(r *state.Record) {
-			r.Mark(state.Failed, "the review process stopped before it finished")
-			r.Fails++
-		})
-		n++
 	}
 	return n
 }

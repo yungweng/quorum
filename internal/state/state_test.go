@@ -15,20 +15,20 @@ func TestReadShellEraState(t *testing.T) {
 	legacy := `{
   "schema": 1,
   "prs": {
-    "Inference-GmbH/insura#103": {
+    "Crumb-GmbH/waffle-iron#103": {
       "day": "2026-07-25",
       "count": "1",
       "sha": "9bce811de6eed61345735d2b278b21670af46cf5",
       "status": "ok",
       "at": "2026-07-25T15:43:21",
-      "comment_url": "https://github.com/Inference-GmbH/insura/pull/103#issuecomment-5078706902",
+      "comment_url": "https://github.com/Crumb-GmbH/waffle-iron/pull/103#issuecomment-5078706902",
       "blockers": "0",
       "critical": "4",
-      "runlog": "/Users/x/.local/state/prbot/runs/insura.log",
+      "runlog": "/Users/x/.local/state/prbot/runs/waffle-iron.log",
       "req_at": "2026-07-16T12:50:30Z",
       "fails": "0"
     },
-    "moto-nrw/project-phoenix#1993": {
+    "crumbtray/toaster-api#1993": {
       "status": "failed",
       "at": "2026-07-25T22:49:25",
       "fails": "2"
@@ -43,14 +43,14 @@ func TestReadShellEraState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	insura := f.PRs["Inference-GmbH/insura#103"]
-	if insura.Critical != 4 || insura.Blockers != 0 || insura.Fails != 0 {
-		t.Errorf("string numbers did not parse: %+v", insura)
+	waffle := f.PRs["Crumb-GmbH/waffle-iron#103"]
+	if waffle.Critical != 4 || waffle.Blockers != 0 || waffle.Fails != 0 {
+		t.Errorf("string numbers did not parse: %+v", waffle)
 	}
-	if insura.Status != OK {
-		t.Errorf("status = %q", insura.Status)
+	if waffle.Status != OK {
+		t.Errorf("status = %q", waffle.Status)
 	}
-	if f.PRs["moto-nrw/project-phoenix#1993"].Fails != 2 {
+	if f.PRs["crumbtray/toaster-api#1993"].Fails != 2 {
 		t.Error("fails did not parse")
 	}
 
@@ -59,7 +59,7 @@ func TestReadShellEraState(t *testing.T) {
 		t.Fatalf("got %d entries", len(entries))
 	}
 	// Newest change first.
-	if entries[0].Key != "moto-nrw/project-phoenix#1993" {
+	if entries[0].Key != "crumbtray/toaster-api#1993" {
 		t.Errorf("wrong order: %s first", entries[0].Key)
 	}
 	// The zone-less timestamps of the old file still have to parse.
@@ -69,17 +69,17 @@ func TestReadShellEraState(t *testing.T) {
 }
 
 func TestEntryKeyParts(t *testing.T) {
-	e := Entry{Key: "moto-nrw/project-phoenix#2017"}
-	if e.Repo() != "moto-nrw/project-phoenix" {
+	e := Entry{Key: "crumbtray/toaster-api#2017"}
+	if e.Repo() != "crumbtray/toaster-api" {
 		t.Errorf("Repo = %q", e.Repo())
 	}
-	if e.Name() != "project-phoenix" {
+	if e.Name() != "toaster-api" {
 		t.Errorf("Name = %q", e.Name())
 	}
 	if e.Number() != 2017 {
 		t.Errorf("Number = %d", e.Number())
 	}
-	if e.URL() != "https://github.com/moto-nrw/project-phoenix/pull/2017" {
+	if e.URL() != "https://github.com/crumbtray/toaster-api/pull/2017" {
 		t.Errorf("URL = %q", e.URL())
 	}
 }

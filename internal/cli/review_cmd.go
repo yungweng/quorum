@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -117,7 +117,7 @@ func (a *app) cmdReview(argv []string) int {
 	rep.status = a.out.Status()
 
 	runner := &review.Runner{GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: rep}
-	a.out.Printf("%s\n", a.out.Bold("quorum "+Version))
+	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 
 	res, err := runner.Run(ctx, o)
 	if err != nil {

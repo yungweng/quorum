@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	// The first positional that looks like a PR is the PR; everything else is
 	// extra context for the fix session, which is how babysit behaved.
 	number := 0
-	var context []string
+	var extraContext []string
 	for _, p := range args.pos {
 		if number == 0 {
 			if n, argRepo, err := resolvePRArg(p, repo); err == nil {
@@ -71,12 +71,12 @@ func (a *app) cmdBabysit(argv []string) int {
 				continue
 			}
 		}
-		context = append(context, p)
+		extraContext = append(extraContext, p)
 	}
 
 	o := loop.Options{
 		Repo: repo, RepoRoot: repoRoot, Number: number,
-		Context:       strings.Join(context, " "),
+		Context:       strings.Join(extraContext, " "),
 		Model:         a.cfg.FixModel,
 		Effort:        a.cfg.FixEffort,
 		Reviewers:     a.cfg.Reviewers,
@@ -120,7 +120,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.die("direnv is not installed; rerun with --no-direnv")
 	}
 
-	ctx, stop := signal.NotifyContext(cmdContext(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	rep := &loopTermReporter{
@@ -143,7 +143,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		pipe.In = os.Stdin
 	}
 
-	a.out.Printf("%s\n", a.out.Bold("quorum "+Version))
+	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 	res, err := pipe.Run(ctx, o)
 	rep.status.Clear()
 
@@ -379,5 +379,3 @@ func modelDesc(model, effort string) string {
 		return "codex default"
 	}
 }
-
-func cmdContext() context.Context { return context.Background() }

@@ -1,10 +1,11 @@
-package main
+package cli
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -264,7 +265,7 @@ func TestDashboardShowsWhatIsRunningAndQueued(t *testing.T) {
 	}
 	// watch looks up exactly what is on screen, so the drawn keys have to be
 	// reported back or the lookup asks about the wrong pull requests.
-	if len(shown) != 2 || !contains(shown, "acme/api#1") || !contains(shown, "acme/api#2") {
+	if len(shown) != 2 || !slices.Contains(shown, "acme/api#1") || !slices.Contains(shown, "acme/api#2") {
 		t.Errorf("dashboard reported %v as drawn", shown)
 	}
 }

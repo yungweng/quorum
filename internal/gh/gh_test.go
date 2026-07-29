@@ -143,9 +143,9 @@ func TestSearchParsesResult(t *testing.T) {
 	bin, _ := fakeGH(t, `cat <<'JSON'
 [{"author":{"id":"U_1","is_bot":false,"login":"theitger","type":"User"},
   "isDraft":false,"number":2017,
-  "repository":{"name":"project-phoenix","nameWithOwner":"moto-nrw/project-phoenix"},
+  "repository":{"name":"toaster-api","nameWithOwner":"crumbtray/toaster-api"},
   "title":"Zeiterfassungs-Export","updatedAt":"2026-07-26T21:43:16Z",
-  "url":"https://github.com/moto-nrw/project-phoenix/pull/2017"}]
+  "url":"https://github.com/crumbtray/toaster-api/pull/2017"}]
 JSON`)
 	prs, err := testClient(bin).SearchReviewRequested(context.Background(), nil)
 	if err != nil {
@@ -155,7 +155,7 @@ JSON`)
 		t.Fatalf("got %d pull requests", len(prs))
 	}
 	p := prs[0]
-	if p.Key() != "moto-nrw/project-phoenix#2017" {
+	if p.Key() != "crumbtray/toaster-api#2017" {
 		t.Errorf("Key = %q", p.Key())
 	}
 	if p.Author.Login != "theitger" || p.Author.IsBot {
@@ -178,14 +178,14 @@ const timelinePage = `[
 
 const timelinePage2 = `[
   {"event":"review_requested","created_at":"2026-07-24T10:00:00Z",
-   "requested_team":{"slug":"moto-vorstand"}},
+   "requested_team":{"slug":"bread-council"}},
   {"event":"closed","created_at":"2026-07-25T10:00:00Z"}
 ]`
 
 func TestLatestReviewRequestPicksNewestForMeOrMyTeam(t *testing.T) {
 	bin, _ := fakeGH(t, "cat <<'JSON'\n"+timelinePage+"\nJSON")
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"moto-nrw/project-phoenix", 2017, "yungweng", []string{"moto-vorstand"})
+		"crumbtray/toaster-api", 2017, "yungweng", []string{"bread-council"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestLatestReviewRequestPicksNewestForMeOrMyTeam(t *testing.T) {
 func TestLatestReviewRequestReadsConcatenatedPages(t *testing.T) {
 	bin, _ := fakeGH(t, "cat <<'JSON'\n"+timelinePage+"\n"+timelinePage2+"\nJSON")
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"moto-nrw/project-phoenix", 2017, "yungweng", []string{"moto-vorstand"})
+		"crumbtray/toaster-api", 2017, "yungweng", []string{"bread-council"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestLatestReviewRequestReadsConcatenatedPages(t *testing.T) {
 func TestLatestReviewRequestNoneIsNotAnError(t *testing.T) {
 	bin, _ := fakeGH(t, "cat <<'JSON'\n"+timelinePage+"\nJSON")
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"moto-nrw/project-phoenix", 2017, "nobody", nil)
+		"crumbtray/toaster-api", 2017, "nobody", nil)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -226,7 +226,7 @@ func TestLatestReviewRequestNoneIsNotAnError(t *testing.T) {
 func TestLatestReviewRequestReportsFailure(t *testing.T) {
 	bin, _ := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"moto-nrw/project-phoenix", 2014, "yungweng", nil)
+		"crumbtray/toaster-api", 2014, "yungweng", nil)
 	if err == nil {
 		t.Fatal("a failed timeline call looked like an empty timeline")
 	}
@@ -239,9 +239,9 @@ func TestLatestReviewRequestReportsFailure(t *testing.T) {
 }
 
 func TestTeamSlugsFor(t *testing.T) {
-	teams := []string{"moto-nrw/moto-vorstand", "Inference-GmbH/dev-admins"}
-	got := TeamSlugsFor("moto-nrw", teams)
-	if len(got) != 1 || got[0] != "moto-vorstand" {
+	teams := []string{"crumbtray/bread-council", "Crumb-GmbH/dev-admins"}
+	got := TeamSlugsFor("crumbtray", teams)
+	if len(got) != 1 || got[0] != "bread-council" {
 		t.Errorf("got %v", got)
 	}
 	if len(TeamSlugsFor("unrelated", teams)) != 0 {
@@ -267,15 +267,15 @@ cat <<'JSON'
   "p2":{"pullRequest":{"state":"CLOSED"}}
 }}
 JSON`)
-	keys := []string{"moto-nrw/project-phoenix#2035", "moto-nrw/PyrePortal#392", "acme/api#7"}
+	keys := []string{"crumbtray/toaster-api#2035", "crumbtray/bagel-bot#392", "acme/api#7"}
 	got, err := testClient(bin).PRStates(context.Background(), keys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"moto-nrw/project-phoenix#2035": StateMerged,
-		"moto-nrw/PyrePortal#392":       StateOpen,
-		"acme/api#7":                    StateClosed,
+		"crumbtray/toaster-api#2035": StateMerged,
+		"crumbtray/bagel-bot#392":    StateOpen,
+		"acme/api#7":                 StateClosed,
 	}
 	for k, v := range want {
 		if got[k] != v {

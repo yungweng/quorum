@@ -1,6 +1,7 @@
-package main
+package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -419,6 +420,23 @@ func TestCollectLeavesTheRememberedSizeCorrect(t *testing.T) {
 	freed, _ := mustCollect(t, a, false)
 	if got, want := a.cacheSize(), int64(100+len(staleClaim)); got != want {
 		t.Fatalf("remembered cache size is %d after freeing %d bytes, want %d", got, freed, want)
+	}
+}
+
+func TestCollectReportsRemovalErrors(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	removeErr := errors.New("permission denied")
+	a.removeAll = func(string) error { return removeErr }
+
+	freed, removed, err := a.collect(false)
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("collection error is %v, want %v", err, removeErr)
+	}
+	assertCollected(t, freed, removed, 0, 0)
+	if !exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree was removed despite the reported failure")
 	}
 }
 

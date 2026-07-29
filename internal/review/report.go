@@ -65,13 +65,3 @@ func writeFindings(path string, f Findings) error {
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
-
-// ReadFindings loads a findings.json written by an earlier run.
-func ReadFindings(path string) (Findings, error) {
-	var f Findings
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return f, err
-	}
-	return f, json.Unmarshal(data, &f)
-}
