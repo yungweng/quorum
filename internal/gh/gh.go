@@ -187,12 +187,6 @@ func (c *Client) Teams(ctx context.Context) ([]string, error) {
 	return teams, nil
 }
 
-// AuthStatus reports whether gh can talk to GitHub as somebody.
-func (c *Client) AuthStatus(ctx context.Context) error {
-	_, err := c.run(ctx, "auth", "status")
-	return err
-}
-
 // SearchReviewRequested returns open pull requests that ask the authenticated
 // user for a review. scope holds extra qualifiers such as --owner=acme.
 func (c *Client) SearchReviewRequested(ctx context.Context, scope []string) ([]PR, error) {

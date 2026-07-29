@@ -18,7 +18,6 @@ type P struct {
 	StateDir   string
 	StateFile  string
 	Log        string
-	LockDir    string
 	RunningDir string
 	RunLogDir  string
 	CloneDir   string
@@ -67,7 +66,6 @@ func Resolve() P {
 		StateDir:   stateDir,
 		StateFile:  filepath.Join(stateDir, "state.json"),
 		Log:        filepath.Join(stateDir, "quorum.log"),
-		LockDir:    filepath.Join(stateDir, "lock"),
 		RunningDir: filepath.Join(stateDir, "running"),
 		RunLogDir:  filepath.Join(stateDir, "runs"),
 		CloneDir:   env("QUORUM_CLONE_DIR", filepath.Join(cacheRoot, "repos")),
