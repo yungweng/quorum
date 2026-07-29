@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -241,31 +241,6 @@ func (a *app) orphanCount() int {
 		if rec.Status == state.Running && !live[key] {
 			n++
 		}
-	}
-	return n
-}
-
-// clearOrphans turns interrupted reviews into failures so the next poll can
-// pick them up again instead of leaving them stuck as running.
-func (a *app) clearOrphans() int {
-	file, err := state.Read(a.p.StateFile)
-	if err != nil {
-		return 0
-	}
-	live := map[string]bool{}
-	for _, m := range runner.Live(a.p.RunningDir) {
-		live[m.Key] = true
-	}
-	n := 0
-	for key, rec := range file.PRs {
-		if rec.Status != state.Running || live[key] {
-			continue
-		}
-		a.record(key, func(r *state.Record) {
-			r.Mark(state.Failed, "the review process stopped before it finished")
-			r.Fails++
-		})
-		n++
 	}
 	return n
 }

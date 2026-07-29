@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"bufio"
@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/config"
@@ -558,3 +559,6 @@ func effortOptions(field func(*config.Config) *string) []option {
 	}
 	return out
 }
+
+// secs turns a configured interval in seconds into a duration.
+func secs(n int) time.Duration { return time.Duration(n) * time.Second }
