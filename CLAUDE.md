@@ -71,6 +71,12 @@ layer.
   descendant. Codex spawns MCP servers and toolchains below itself. Do not
   replace `internal/proc` with a plain `exec.CommandContext`; its kill only
   reaches the direct child.
+- **The dashboard may only read small files.** It repaints every three seconds,
+  so what it reads per frame has to stay cheap. Fix loops report themselves
+  through `progress.json`, which is rewritten whole on every phase change;
+  reviewers report through `output/events.log`. Neither the Codex logs nor the
+  run's message files are ever parsed for progress: `fix-round-1.log` passes a
+  megabyte within minutes.
 - **`gh pr checks` is not trustworthy right after a push.** It briefly still
   answers for the previous head, so a red commit reads as green. Never read a
   check result before GitHub reports the pushed sha as the PR head.

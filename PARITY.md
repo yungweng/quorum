@@ -110,6 +110,21 @@ Each of these is a place where the port does something different on purpose.
     collection share a cache-root lock, so dependency eviction cannot pass its
     liveness check while a new run is publishing its claim.
 
+11. **The dashboard shows fix loops, not only reviews.** prbot's status could
+    only show what prbot itself had started, so babysit was invisible: it was a
+    different binary that recorded nothing. Every run now publishes a small
+    `progress.json` into its run directory, and the dashboard reads the run
+    cache alongside the state file. That covers both kinds at once, because a
+    run started from a terminal leaves the same trace as one the agent started.
+    The file is deliberately separate from the Codex logs next to it, which
+    pass a megabyte within minutes: `quorum watch` repaints every three seconds
+    and cannot parse those. Liveness is the run claim from item 9, not the
+    recorded pid, so a killed run leaves the screen when the kernel drops its
+    lock. A run the agent started also has a state record; the record is
+    matched to it by the pid in its marker, which names the very process the
+    pipeline runs in, so an unrelated review of a pull request somebody happens
+    to be babysitting is not hidden along with it.
+
 ## What the merge removed rather than ported
 
 - **stdout scraping.** `prbot/internal/runner/runner.go:214` grepped the review's

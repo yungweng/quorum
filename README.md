@@ -203,9 +203,15 @@ your review and handles them on its own.
 ```text
 quorum 1.0.0                             agent loaded, every 5m, last poll 2m ago
 
-RUNNING  1 of 2
+REVIEWING  1 of 2
   ● project-phoenix #2016      alle Kalender auf den Kit-Picker umstellen
     6m, 4/6 reviewers done
+
+BABYSITTING  2
+  ● project-phoenix #2018      Mandantentrennung im Export-Job
+    1h04m   round 3/12   CI ✗ fix 2/3   review ✓   CI fix 2 ● 4m   5 commits   log ↗
+  ● project-phoenix #2019      flakigen Login-Test reparieren
+    22m   round 1/12   CI ✓   review 0B 2C   fixing ● 18m   1 commit   log ↗
 
 QUEUED  1
   ○ project-phoenix #2014      Jahrgangsstufenwechsel mit reversiblen Abgängen
@@ -216,10 +222,26 @@ RECENT
   ✗ project-phoenix #1993      yesterday  failed after 2 attempt(s)
 ```
 
-RUNNING and QUEUED stay on screen when they are empty. A section that
-disappears when it has nothing in it cannot be told apart from a section that
-does not exist, which is the wrong answer to "is anything being reviewed right
-now".
+REVIEWING, BABYSITTING and QUEUED stay on screen when they are empty. A section
+that disappears when it has nothing in it cannot be told apart from a section
+that does not exist, which is the wrong answer to "is anything being reviewed
+right now".
+
+BABYSITTING lists every fix loop in flight, whether the agent started it or you
+ran `quorum babysit` in a terminal. A fix loop can sit in one place for an hour,
+so the line answers "is it getting anywhere" rather than "is it running": how
+long it has been going, where it is in the loop, what the checks last said, what
+the newest round found, and what it is doing now and since when. Only Blockers
+and Critical appear, because those are the two that keep the loop going.
+
+It has no slot count next to it. Babysit does not take a review slot, so
+`MAX_CONCURRENT` is not a budget it spends.
+
+Runs are found in the run cache rather than in the state file: a fix loop
+started from a terminal records nothing, so its claimed run directory is the
+only place it exists. That claim is also what says it is still going, which
+means a run whose process was killed drops off the screen by itself when the
+kernel releases the lock.
 
 `quorum watch` adds one thing the single-shot dashboard leaves out: it asks
 GitHub every 30 seconds how the pull requests on screen ended, and crosses out

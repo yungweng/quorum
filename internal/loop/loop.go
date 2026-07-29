@@ -190,6 +190,10 @@ type run struct {
 	ciFixTotal      int
 	disputeAccepted bool
 	disputeText     string
+
+	// prog is what this run publishes about itself for a watcher to read. It
+	// is the run's own copy; publish writes it out.
+	prog Progress
 }
 
 // prepare resolves the PR, checks the preconditions and sets up the worktree.
@@ -277,6 +281,21 @@ func (r *run) prepare() error {
 	r.gcOldRuns()
 	unlockCache()
 
+	// Published before the worktree and its dependencies are prepared, which on
+	// a cold cache is minutes: a run has to appear on the dashboard when it
+	// starts, not when it gets around to reviewing something.
+	r.prog = Progress{
+		PID:        os.Getpid(),
+		Repo:       r.o.Repo,
+		Number:     pr.Number,
+		Title:      pr.Title,
+		Branch:     r.branch,
+		StartedAt:  time.Now(),
+		MaxIter:    r.o.MaxIter,
+		MaxCIFixes: r.o.MaxCIFixes,
+	}
+	r.enter(PhaseStarting)
+
 	if err := r.p.Git.WorktreeAdd(r.ctx, r.o.RepoRoot, r.worktree, headSHA); err != nil {
 		return err
 	}
@@ -309,6 +328,7 @@ func (r *run) execute() (*Result, error) {
 	res := &Result{PR: r.pr, RunDir: r.root}
 
 	r.rep.Step("CI")
+	r.enter(PhaseCI)
 	// The first review only needs the pushed head, so it starts now and runs
 	// while the initial CI wait happens.
 	r.startReview(1)
@@ -320,6 +340,8 @@ func (r *run) execute() (*Result, error) {
 	for iteration := 1; iteration <= r.o.MaxIter; iteration++ {
 		res.Rounds = iteration
 		r.rep.Step(fmt.Sprintf("Review round %d/%d", iteration, r.o.MaxIter))
+		r.prog.Round = iteration
+		r.enter(PhaseReview)
 
 		findings, comment, err := r.finishReview(iteration)
 		if err != nil {
@@ -338,12 +360,17 @@ func (r *run) execute() (*Result, error) {
 		}
 
 		r.rep.RoundResult(iteration, findings, findings.Blocking() == 0)
+		r.prog.Reviewed = true
+		r.prog.Blockers = findings.Blockers
+		r.prog.Critical = findings.Critical
+		r.publish()
 		if findings.Blocking() == 0 {
 			res.Converged = true
 			break
 		}
 
 		r.rep.Step(fmt.Sprintf("Fix round %d/%d", iteration, r.o.MaxIter))
+		r.enter(PhaseFix)
 		preFixSHA := currentSHA
 		tag := fmt.Sprintf("fix-round-%d", iteration)
 
@@ -539,6 +566,8 @@ func (r *run) recordRound(label, preSHA string) {
 		return
 	}
 	r.roundLog = append(r.roundLog, RoundEntry{Label: label, Commits: commits})
+	r.prog.Commits += len(splitLines(commits))
+	r.publish()
 	f, err := os.OpenFile(filepath.Join(r.logDir, "rounds.log"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err == nil {

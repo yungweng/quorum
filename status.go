@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -39,21 +40,56 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		w.Printf("%s\n", w.Red("state file unreadable: "+err.Error()))
 	}
 	live := map[string]runner.Marker{}
-	for _, m := range runner.Live(a.p.RunningDir) {
+	liveMarkers := runner.Live(a.p.RunningDir)
+	for _, m := range liveMarkers {
 		live[m.Key] = m
+	}
+
+	// Fix loops are found in the run cache rather than in the state file. One
+	// the agent started is in both, and one you started in a terminal is only
+	// here. An agent babysit keeps its scheduler slot; a terminal babysit never
+	// takes one and never records anything.
+	babysits := loop.LiveRuns(a.p.BabysitRuns)
+	babysitPID := map[int]bool{}
+	for _, p := range babysits {
+		babysitPID[p.PID] = true
 	}
 
 	a.header(w)
 
 	var running, queued, recent []state.Entry
+	seen := map[string]bool{}
 	for _, e := range file.Entries() {
+		seen[e.Key] = true
+		if m, ok := live[e.Key]; ok && !babysitPID[m.PID] && e.Status != state.Running {
+			// A direct run claims its slot before it updates an existing state
+			// record. While that preparation runs, the live claim is the more
+			// current source of truth.
+			running = append(running, e)
+			continue
+		}
 		switch e.Status {
 		case state.Running:
+			// A fix loop the agent started has a record here as well, and its
+			// own section says far more about it. The marker names the very
+			// process the pipeline runs in, so matching on the pid removes
+			// that record without also hiding an unrelated review of a pull
+			// request somebody happens to be babysitting.
+			if m, ok := live[e.Key]; ok && babysitPID[m.PID] {
+				continue
+			}
 			running = append(running, e)
 		case state.Pending, state.Deferred:
 			queued = append(queued, e)
 		default:
 			recent = append(recent, e)
+		}
+	}
+	for _, m := range liveMarkers {
+		if !seen[m.Key] && !babysitPID[m.PID] {
+			// A direct run also claims its slot before it creates a state
+			// record. Keep it visible during PR lookup and clone preparation.
+			running = append(running, state.Entry{Key: m.Key})
 		}
 	}
 	// Oldest request first in the queue, matching the order they will start in.
@@ -62,15 +98,24 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		recent = recent[:recentCount]
 	}
 
-	a.sectionRunning(w, running, live, ends)
+	a.sectionReviewing(w, running, len(live), live, ends)
+	a.sectionBabysitting(w, babysits, ends)
 	a.sectionQueued(w, queued, ends)
 	a.sectionRecent(w, recent, ends)
 	a.sectionSystem(w)
 
-	shown := make([]string, 0, len(running)+len(queued)+len(recent))
+	shown := make([]string, 0, len(running)+len(queued)+len(recent)+len(babysits))
+	shownSet := make(map[string]bool, cap(shown))
 	for _, group := range [][]state.Entry{running, queued, recent} {
 		for _, e := range group {
 			shown = append(shown, e.Key)
+			shownSet[e.Key] = true
+		}
+	}
+	for _, p := range babysits {
+		if key := p.Key(); !shownSet[key] {
+			shown = append(shown, key)
+			shownSet[key] = true
 		}
 	}
 	return shown
@@ -105,10 +150,10 @@ func (a *app) agentLine() string {
 
 // A section that disappears when it is empty cannot be told apart from a
 // section that does not exist, which is the wrong answer to "is anything being
-// reviewed right now". Both stages of the pipeline therefore keep their
-// heading and say so in words.
-func (a *app) sectionRunning(w *ui.Writer, running []state.Entry, live map[string]runner.Marker, ends map[string]string) {
-	w.Section("running", len(running), a.cfg.MaxConcurrent)
+// reviewed right now". Every stage of the pipeline therefore keeps its heading
+// and says so in words.
+func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, slotsUsed int, live map[string]runner.Marker, ends map[string]string) {
+	w.Section("reviewing", slotsUsed, a.cfg.MaxConcurrent)
 	if len(running) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing under review right now"))
 		return
@@ -138,6 +183,143 @@ func (a *app) sectionRunning(w *ui.Writer, running []state.Entry, live map[strin
 		}
 		w.Printf("    %s\n", detail)
 	}
+}
+
+// sectionBabysitting shows the fix loops in flight, whichever way they were
+// started. It carries no slot total because babysit has no independent
+// concurrency budget. An agent-started loop's scheduler slot is reflected in
+// the reviewing total instead.
+func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress, ends map[string]string) {
+	w.Section("babysitting", len(runs), 0)
+	if len(runs) == 0 {
+		w.Printf("  %s\n", w.Dim("no fix loop running"))
+		return
+	}
+	now := time.Now()
+	for _, p := range runs {
+		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
+		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
+		w.Printf("    %s\n", babysitTrack(w, p, now))
+	}
+}
+
+// babysitTrack is the line under a fix loop: where it is in its loop, what it
+// is doing now, and for how long.
+//
+// A run can sit in one phase for an hour, so the question the line has to
+// answer is not "is it running" but "is it getting anywhere". Segments are
+// added in that order of usefulness and stop at the terminal's width: a line
+// that wraps pushes the rest of the frame off the bottom of the screen, which
+// costs more than the commit count is worth.
+func babysitTrack(w *ui.Writer, p loop.Progress, now time.Time) string {
+	// Indent and separator have to match what the caller prints, or the budget
+	// is measured against the wrong line.
+	const indent = 4
+	const gap = "   "
+
+	var plain, styled []string
+	add := func(text, style string) {
+		plain = append(plain, text)
+		styled = append(styled, style)
+	}
+
+	if !p.StartedAt.IsZero() {
+		add(ui.Duration(now.Sub(p.StartedAt)), w.Dim(ui.Duration(now.Sub(p.StartedAt))))
+	}
+	if p.MaxIter > 0 {
+		round := fmt.Sprintf("round %d/%d", max(p.Round, 1), p.MaxIter)
+		add(round, w.Dim(round))
+	}
+	if text, style := ciSegment(w, p); text != "" {
+		add(text, style)
+	}
+	if text, style := reviewSegment(w, p); text != "" {
+		add(text, style)
+	}
+	if text, style := phaseSegment(w, p, now); text != "" {
+		add(text, style)
+	}
+	if p.Commits > 0 {
+		commits := fmt.Sprintf("%d commits", p.Commits)
+		if p.Commits == 1 {
+			commits = "1 commit"
+		}
+		add(commits, w.Dim(commits))
+	}
+	if p.RunDir != "" {
+		add("log ↗", w.Link(w.Blue("log ↗"), "file://"+p.LogDir()))
+	}
+
+	room, used := w.Width-indent, 0
+	var out []string
+	for i, text := range plain {
+		need := utf8.RuneCountInString(text)
+		if len(out) > 0 {
+			need += len(gap)
+		}
+		if used+need > room {
+			break
+		}
+		used += need
+		out = append(out, styled[i])
+	}
+	return strings.Join(out, gap)
+}
+
+// ciSegment reports the last check state. While the pipeline is still waiting
+// for the first answer it says nothing: the phase segment already says that,
+// and printing "CI unknown" next to "waiting for CI" is noise.
+func ciSegment(w *ui.Writer, p loop.Progress) (string, string) {
+	switch p.CI {
+	case loop.CIGreen:
+		return "CI ✓", w.Green("CI ✓")
+	case loop.CIRed:
+		text := fmt.Sprintf("CI ✗ fix %d/%d", p.CIFix, p.MaxCIFixes)
+		return text, w.Red(text)
+	case loop.CINone:
+		return "CI none", w.Dim("CI none")
+	}
+	return "", ""
+}
+
+// reviewSegment reports the newest round result. Only Blockers and Critical
+// appear: they are the two that keep the loop going, and a line that also
+// carried suggestions would suggest those hold it up too.
+func reviewSegment(w *ui.Writer, p loop.Progress) (string, string) {
+	if !p.Reviewed {
+		return "", ""
+	}
+	if p.Blockers+p.Critical == 0 {
+		return "review ✓", w.Green("review ✓")
+	}
+	text := fmt.Sprintf("review %dB %dC", p.Blockers, p.Critical)
+	if p.Blockers > 0 {
+		return text, w.Red(text)
+	}
+	return text, w.Yellow(text)
+}
+
+// phaseSegment says what the run is doing now and since when.
+func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string) {
+	var what string
+	switch p.Phase {
+	case loop.PhaseStarting:
+		what = "preparing"
+	case loop.PhaseCI:
+		what = "waiting for CI"
+	case loop.PhaseReview:
+		what = "reviewing"
+	case loop.PhaseFix:
+		what = "fixing"
+	case loop.PhaseCIFix:
+		what = fmt.Sprintf("CI fix %d", p.CIFix)
+	default:
+		return "", ""
+	}
+	if !p.Since.IsZero() {
+		what += " ● " + ui.Duration(now.Sub(p.Since))
+	}
+	return what, w.Cyan(what)
 }
 
 func (a *app) sectionQueued(w *ui.Writer, queued []state.Entry, ends map[string]string) {
@@ -223,7 +405,11 @@ func labelOf(e state.Entry) string {
 // request and crossed out once that pull request has been merged: the work
 // landed, so the line is history rather than something to look at.
 func prLabel(w *ui.Writer, e state.Entry, end string) string {
-	styled := w.Bold(labelOf(e))
+	return styledPRLabel(w, e, labelOf(e), end)
+}
+
+func styledPRLabel(w *ui.Writer, e state.Entry, label, end string) string {
+	styled := w.Bold(label)
 	if end == gh.StateMerged {
 		styled = w.Strike(styled)
 	}
@@ -239,6 +425,18 @@ func labelPad(e state.Entry) string {
 		return strings.Repeat(" ", n)
 	}
 	return ""
+}
+
+func truncateLabel(e state.Entry, width int) string {
+	label := labelOf(e)
+	if utf8.RuneCountInString(label) <= width {
+		return label
+	}
+	suffix := fmt.Sprintf(" #%d", e.Number())
+	if suffixWidth := utf8.RuneCountInString(suffix); suffixWidth < width {
+		return ui.Truncate(e.Name(), width-suffixWidth) + suffix
+	}
+	return ui.Truncate(label, width)
 }
 
 // endWord names how a pull request ended, in plain text.
@@ -269,17 +467,29 @@ func endSuffix(w *ui.Writer, end string) string {
 // prLine prints "  ● project-phoenix #2017  the title", with the repository and
 // number linking to the pull request.
 func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
+	endWidth := 0
+	if word := endWord(end); word != "" {
+		endWidth = 2 + utf8.RuneCountInString(word)
+	}
 	if e.Title == "" {
 		// Records written before titles were stored have nothing to show, and
 		// padding to an empty column just leaves trailing whitespace.
-		w.Printf("  %s %s%s\n", mark, prLabel(w, e, end), endSuffix(w, end))
+		label := truncateLabel(e, max(w.Width-4-endWidth, 1))
+		w.Printf("  %s %s%s\n", mark, styledPRLabel(w, e, label, end), endSuffix(w, end))
 		return
 	}
-	titleRoom := max(w.Width-labelWidth-8-len(endWord(end)), 12)
+	available := max(w.Width-6-endWidth, 1)
+	labelRoom := max(labelWidth, utf8.RuneCountInString(labelOf(e)))
+	titleRoom := available - labelRoom
+	if titleRoom < 12 {
+		labelRoom = max(available-12, 1)
+		titleRoom = max(available-labelRoom, 0)
+	}
+	label := truncateLabel(e, labelRoom)
 	w.Printf("  %s %s%s  %s%s\n",
 		mark,
-		prLabel(w, e, end),
-		labelPad(e),
+		styledPRLabel(w, e, label, end),
+		strings.Repeat(" ", max(labelRoom-utf8.RuneCountInString(label), 0)),
 		ui.Truncate(e.Title, titleRoom),
 		endSuffix(w, end))
 }
