@@ -142,6 +142,8 @@ func (r *run) killReview() {
 func (r *run) ensureCIGreen() error {
 	for attempt := 0; ; {
 		r.rep.Info(fmt.Sprintf("waiting for CI on PR #%d...", r.pr.Number))
+		r.prog.CI = CIWaiting
+		r.publish()
 		state, err := r.watchCI()
 		if err != nil {
 			return err
@@ -149,9 +151,13 @@ func (r *run) ensureCIGreen() error {
 		switch state {
 		case gh.ChecksPass:
 			r.rep.CIGreen()
+			r.prog.CI = CIGreen
+			r.publish()
 			return nil
 		case gh.ChecksNone:
 			r.rep.Warn("no CI checks reported on this PR; continuing")
+			r.prog.CI = CINone
+			r.publish()
 			return nil
 		}
 
@@ -161,6 +167,9 @@ func (r *run) ensureCIGreen() error {
 			return fmt.Errorf("%w (%d attempts): %s", ErrCIRed, r.o.MaxCIFixes, r.pr.URL)
 		}
 		r.rep.CIRed(attempt, r.o.MaxCIFixes)
+		r.prog.CI = CIRed
+		r.prog.CIFix = attempt
+		r.publish()
 
 		// The fix moves the head sha, so any review of the outgoing head is
 		// about to describe code that no longer exists.
@@ -177,6 +186,7 @@ func (r *run) ensureCIGreen() error {
 			return err
 		}
 		tag := fmt.Sprintf("ci-fix-%d", attempt)
+		r.enter(PhaseCIFix)
 		if err := r.codexCall(tag, ciFixPrompt(r.pr.Number, string(failsJSON))); err != nil {
 			return err
 		}

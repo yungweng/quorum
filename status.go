@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -43,12 +44,29 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		live[m.Key] = m
 	}
 
+	// Fix loops are found in the run cache rather than in the state file. One
+	// the agent started is in both, and one you started in a terminal is only
+	// here: babysit never takes a review slot and never records anything.
+	babysits := loop.LiveRuns(a.p.BabysitRuns)
+	babysitPID := map[int]bool{}
+	for _, p := range babysits {
+		babysitPID[p.PID] = true
+	}
+
 	a.header(w)
 
 	var running, queued, recent []state.Entry
 	for _, e := range file.Entries() {
 		switch e.Status {
 		case state.Running:
+			// A fix loop the agent started has a record here as well, and its
+			// own section says far more about it. The marker names the very
+			// process the pipeline runs in, so matching on the pid removes
+			// that record without also hiding an unrelated review of a pull
+			// request somebody happens to be babysitting.
+			if m, ok := live[e.Key]; ok && babysitPID[m.PID] {
+				continue
+			}
 			running = append(running, e)
 		case state.Pending, state.Deferred:
 			queued = append(queued, e)
@@ -62,7 +80,8 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		recent = recent[:recentCount]
 	}
 
-	a.sectionRunning(w, running, live, ends)
+	a.sectionReviewing(w, running, live, ends)
+	a.sectionBabysitting(w, babysits)
 	a.sectionQueued(w, queued, ends)
 	a.sectionRecent(w, recent, ends)
 	a.sectionSystem(w)
@@ -105,10 +124,10 @@ func (a *app) agentLine() string {
 
 // A section that disappears when it is empty cannot be told apart from a
 // section that does not exist, which is the wrong answer to "is anything being
-// reviewed right now". Both stages of the pipeline therefore keep their
-// heading and say so in words.
-func (a *app) sectionRunning(w *ui.Writer, running []state.Entry, live map[string]runner.Marker, ends map[string]string) {
-	w.Section("running", len(running), a.cfg.MaxConcurrent)
+// reviewed right now". Every stage of the pipeline therefore keeps its heading
+// and says so in words.
+func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, live map[string]runner.Marker, ends map[string]string) {
+	w.Section("reviewing", len(running), a.cfg.MaxConcurrent)
 	if len(running) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing under review right now"))
 		return
@@ -138,6 +157,142 @@ func (a *app) sectionRunning(w *ui.Writer, running []state.Entry, live map[strin
 		}
 		w.Printf("    %s\n", detail)
 	}
+}
+
+// sectionBabysitting shows the fix loops in flight, whichever way they were
+// started. It carries no slot count: babysit does not take a review slot, so
+// "2 of 6" would be a budget that does not exist.
+func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress) {
+	w.Section("babysitting", len(runs), 0)
+	if len(runs) == 0 {
+		w.Printf("  %s\n", w.Dim("no fix loop running"))
+		return
+	}
+	now := time.Now()
+	for _, p := range runs {
+		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
+		a.prLine(w, w.Magenta("●"), e, "")
+		w.Printf("    %s\n", babysitTrack(w, p, now))
+	}
+}
+
+// babysitTrack is the line under a fix loop: where it is in its loop, what it
+// is doing now, and for how long.
+//
+// A run can sit in one phase for an hour, so the question the line has to
+// answer is not "is it running" but "is it getting anywhere". Segments are
+// added in that order of usefulness and stop at the terminal's width: a line
+// that wraps pushes the rest of the frame off the bottom of the screen, which
+// costs more than the commit count is worth.
+func babysitTrack(w *ui.Writer, p loop.Progress, now time.Time) string {
+	// Indent and separator have to match what the caller prints, or the budget
+	// is measured against the wrong line.
+	const indent = 4
+	const gap = "   "
+
+	var plain, styled []string
+	add := func(text, style string) {
+		plain = append(plain, text)
+		styled = append(styled, style)
+	}
+
+	if !p.StartedAt.IsZero() {
+		add(ui.Duration(now.Sub(p.StartedAt)), w.Dim(ui.Duration(now.Sub(p.StartedAt))))
+	}
+	if p.MaxIter > 0 {
+		round := fmt.Sprintf("round %d/%d", max(p.Round, 1), p.MaxIter)
+		add(round, w.Dim(round))
+	}
+	if text, style := ciSegment(w, p); text != "" {
+		add(text, style)
+	}
+	if text, style := reviewSegment(w, p); text != "" {
+		add(text, style)
+	}
+	if text, style := phaseSegment(w, p, now); text != "" {
+		add(text, style)
+	}
+	if p.Commits > 0 {
+		commits := fmt.Sprintf("%d commits", p.Commits)
+		if p.Commits == 1 {
+			commits = "1 commit"
+		}
+		add(commits, w.Dim(commits))
+	}
+	if p.RunDir != "" {
+		add("log ↗", w.Link(w.Blue("log ↗"), "file://"+p.LogDir()))
+	}
+
+	room, used := w.Width-indent, 0
+	var out []string
+	for i, text := range plain {
+		need := utf8.RuneCountInString(text)
+		if len(out) > 0 {
+			need += len(gap)
+		}
+		if used+need > room {
+			break
+		}
+		used += need
+		out = append(out, styled[i])
+	}
+	return strings.Join(out, gap)
+}
+
+// ciSegment reports the last check state. While the pipeline is still waiting
+// for the first answer it says nothing: the phase segment already says that,
+// and printing "CI unknown" next to "waiting for CI" is noise.
+func ciSegment(w *ui.Writer, p loop.Progress) (string, string) {
+	switch p.CI {
+	case loop.CIGreen:
+		return "CI ✓", w.Green("CI ✓")
+	case loop.CIRed:
+		text := fmt.Sprintf("CI ✗ fix %d/%d", p.CIFix, p.MaxCIFixes)
+		return text, w.Red(text)
+	case loop.CINone:
+		return "CI none", w.Dim("CI none")
+	}
+	return "", ""
+}
+
+// reviewSegment reports the newest round result. Only Blockers and Critical
+// appear: they are the two that keep the loop going, and a line that also
+// carried suggestions would suggest those hold it up too.
+func reviewSegment(w *ui.Writer, p loop.Progress) (string, string) {
+	if !p.Reviewed {
+		return "", ""
+	}
+	if p.Blockers+p.Critical == 0 {
+		return "review ✓", w.Green("review ✓")
+	}
+	text := fmt.Sprintf("review %dB %dC", p.Blockers, p.Critical)
+	if p.Blockers > 0 {
+		return text, w.Red(text)
+	}
+	return text, w.Yellow(text)
+}
+
+// phaseSegment says what the run is doing now and since when.
+func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string) {
+	var what string
+	switch p.Phase {
+	case loop.PhaseStarting:
+		what = "preparing"
+	case loop.PhaseCI:
+		what = "waiting for CI"
+	case loop.PhaseReview:
+		what = "reviewing"
+	case loop.PhaseFix:
+		what = "fixing"
+	case loop.PhaseCIFix:
+		what = fmt.Sprintf("CI fix %d", p.CIFix)
+	default:
+		return "", ""
+	}
+	if !p.Since.IsZero() {
+		what += " ● " + ui.Duration(now.Sub(p.Since))
+	}
+	return what, w.Cyan(what)
 }
 
 func (a *app) sectionQueued(w *ui.Writer, queued []state.Entry, ends map[string]string) {
