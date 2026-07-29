@@ -40,7 +40,8 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		w.Printf("%s\n", w.Red("state file unreadable: "+err.Error()))
 	}
 	live := map[string]runner.Marker{}
-	for _, m := range runner.Live(a.p.RunningDir) {
+	liveMarkers := runner.Live(a.p.RunningDir)
+	for _, m := range liveMarkers {
 		live[m.Key] = m
 	}
 
@@ -57,7 +58,16 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	a.header(w)
 
 	var running, queued, recent []state.Entry
+	seen := map[string]bool{}
 	for _, e := range file.Entries() {
+		seen[e.Key] = true
+		if m, ok := live[e.Key]; ok && !babysitPID[m.PID] && e.Status != state.Running {
+			// A direct run claims its slot before it updates an existing state
+			// record. While that preparation runs, the live claim is the more
+			// current source of truth.
+			running = append(running, e)
+			continue
+		}
 		switch e.Status {
 		case state.Running:
 			// A fix loop the agent started has a record here as well, and its
@@ -73,6 +83,13 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 			queued = append(queued, e)
 		default:
 			recent = append(recent, e)
+		}
+	}
+	for _, m := range liveMarkers {
+		if !seen[m.Key] && !babysitPID[m.PID] {
+			// A direct run also claims its slot before it creates a state
+			// record. Keep it visible during PR lookup and clone preparation.
+			running = append(running, state.Entry{Key: m.Key})
 		}
 	}
 	// Oldest request first in the queue, matching the order they will start in.
@@ -388,7 +405,11 @@ func labelOf(e state.Entry) string {
 // request and crossed out once that pull request has been merged: the work
 // landed, so the line is history rather than something to look at.
 func prLabel(w *ui.Writer, e state.Entry, end string) string {
-	styled := w.Bold(labelOf(e))
+	return styledPRLabel(w, e, labelOf(e), end)
+}
+
+func styledPRLabel(w *ui.Writer, e state.Entry, label, end string) string {
+	styled := w.Bold(label)
 	if end == gh.StateMerged {
 		styled = w.Strike(styled)
 	}
@@ -404,6 +425,18 @@ func labelPad(e state.Entry) string {
 		return strings.Repeat(" ", n)
 	}
 	return ""
+}
+
+func truncateLabel(e state.Entry, width int) string {
+	label := labelOf(e)
+	if utf8.RuneCountInString(label) <= width {
+		return label
+	}
+	suffix := fmt.Sprintf(" #%d", e.Number())
+	if suffixWidth := utf8.RuneCountInString(suffix); suffixWidth < width {
+		return ui.Truncate(e.Name(), width-suffixWidth) + suffix
+	}
+	return ui.Truncate(label, width)
 }
 
 // endWord names how a pull request ended, in plain text.
@@ -434,17 +467,29 @@ func endSuffix(w *ui.Writer, end string) string {
 // prLine prints "  ● project-phoenix #2017  the title", with the repository and
 // number linking to the pull request.
 func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
+	endWidth := 0
+	if word := endWord(end); word != "" {
+		endWidth = 2 + utf8.RuneCountInString(word)
+	}
 	if e.Title == "" {
 		// Records written before titles were stored have nothing to show, and
 		// padding to an empty column just leaves trailing whitespace.
-		w.Printf("  %s %s%s\n", mark, prLabel(w, e, end), endSuffix(w, end))
+		label := truncateLabel(e, max(w.Width-4-endWidth, 1))
+		w.Printf("  %s %s%s\n", mark, styledPRLabel(w, e, label, end), endSuffix(w, end))
 		return
 	}
-	titleRoom := max(w.Width-labelWidth-8-len(endWord(end)), 12)
+	available := max(w.Width-6-endWidth, 1)
+	labelRoom := max(labelWidth, utf8.RuneCountInString(labelOf(e)))
+	titleRoom := available - labelRoom
+	if titleRoom < 12 {
+		labelRoom = max(available-12, 1)
+		titleRoom = max(available-labelRoom, 0)
+	}
+	label := truncateLabel(e, labelRoom)
 	w.Printf("  %s %s%s  %s%s\n",
 		mark,
-		prLabel(w, e, end),
-		labelPad(e),
+		styledPRLabel(w, e, label, end),
+		strings.Repeat(" ", max(labelRoom-utf8.RuneCountInString(label), 0)),
 		ui.Truncate(e.Title, titleRoom),
 		endSuffix(w, end))
 }

@@ -183,6 +183,43 @@ func TestDashboardDoesNotShowAnAgentBabysitTwice(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsADirectRunBeforeItsStateUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stale bool
+	}{
+		{name: "without a record"},
+		{name: "with a stale record", stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testApp(t)
+			if tc.stale {
+				record(t, a, "acme/api#42", func(r *state.Record) {
+					r.Title = "an earlier review"
+					r.Mark(state.OK, "")
+				})
+			}
+			marker(t, a, "acme/api#42", os.Getpid())
+
+			screen, shown := render(t, a, nil)
+			if strings.Contains(screen, "nothing under review right now") {
+				t.Errorf("a claimed direct review was reported as idle:\n%s", screen)
+			}
+			for _, want := range []string{"REVIEWING  1 of 6", "api #42", "starting up"} {
+				if !strings.Contains(screen, want) {
+					t.Errorf("preparing direct review is missing %q:\n%s", want, screen)
+				}
+			}
+			if strings.Count(screen, "api #42") != 1 {
+				t.Errorf("the direct review was not deduplicated:\n%s", screen)
+			}
+			if len(shown) != 1 || shown[0] != "acme/api#42" {
+				t.Errorf("shown = %v, want the direct review key", shown)
+			}
+		})
+	}
+}
+
 // Matching on the pull request alone would hide a genuine review whenever
 // somebody happens to babysit the same one from a terminal. The marker names
 // the process the pipeline runs in, which is what tells the two apart.
@@ -303,7 +340,8 @@ func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 // a line that wraps pushes the rest of the frame off the bottom.
 func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	a := testApp(t)
-	record(t, a, "acme/api#1", func(r *state.Record) {
+	longKey := "acme/" + strings.Repeat("r", 100) + "#1"
+	record(t, a, longKey, func(r *state.Record) {
 		r.Title = strings.Repeat("a very long german pull request title ", 6)
 		r.Mark(state.Running, "")
 	})
@@ -326,7 +364,7 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	for _, width := range []int{80, 100} {
 		var b strings.Builder
 		w := &ui.Writer{Out: &b, Width: width}
-		a.dashboard(w, map[string]string{"acme/api#1": gh.StateClosed, "acme/api#2": gh.StateMerged})
+		a.dashboard(w, map[string]string{longKey: gh.StateClosed, "acme/api#2": gh.StateMerged})
 		for _, line := range strings.Split(b.String(), "\n") {
 			if len([]rune(line)) > width {
 				t.Errorf("line is %d cells wide, terminal is %d: %q", len([]rune(line)), width, line)
