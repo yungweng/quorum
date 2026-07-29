@@ -188,15 +188,15 @@ func widenPath() {
 	}
 	// npm puts globally installed tools into its own prefix, which is often
 	// somewhere non-standard. Asking npm costs a subprocess, so skip it only
-	// when the shell's existing PATH already resolves every required tool.
-	allRequired := true
-	for _, name := range []string{"gh", "git", "codex"} {
+	// when the shell's existing PATH already resolves every supported tool.
+	allResolved := true
+	for _, name := range []string{"gh", "git", "codex", "direnv"} {
 		if _, err := exec.LookPath(name); err != nil {
-			allRequired = false
+			allResolved = false
 			break
 		}
 	}
-	if !allRequired {
+	if !allResolved {
 		if npm, err := exec.LookPath("npm"); err == nil {
 			if out, err := exec.Command(npm, "prefix", "-g").Output(); err == nil {
 				if prefix := strings.TrimSpace(string(out)); prefix != "" {
