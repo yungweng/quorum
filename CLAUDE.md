@@ -10,21 +10,29 @@ One Go binary that reviews pull requests with a panel of Codex reviewers
 (`quorum`, `quorum install`).
 
 It is a port of three separate tools: `pr-codex-review` 1.6.0, `babysit` 0.6.2
-(both Bash) and `prbot` 0.5.1 (Go). Read [PARITY.md](PARITY.md) before changing
-behaviour: it lists every safety stop that carried over, with a reference to the
-line in the original that motivated it, and every deliberate deviation.
+(both Bash) and `prbot` 0.5.1 (Go). The safety stops that carried over are the
+constraints listed below, and each has a test. [docs/parity.md](docs/parity.md)
+is the migration ledger from that port: outdated, kept for reference only.
+
+User-facing documentation is [README.md](README.md) and
+[docs/reference.md](docs/reference.md).
 
 ## Layout
 
 ```text
-main.go              command dispatch, tool resolution, PATH widening
-flags.go             the argument parser (options and positionals may interleave)
-review_cmd.go        `quorum review` + its terminal reporter
-babysit_cmd.go       `quorum babysit` + its terminal reporter
-poll.go              the agent's poll cycle
-status.go            the dashboard
-commands.go          run, logs, gc
-doctor.go setup.go configui.go agent.go
+main.go              the entry point: var Version, and one call into internal/cli
+
+internal/cli/        the command line
+  app.go             the app struct, command dispatch, tool resolution, PATH widening
+  flags.go           the argument parser (options and positionals may interleave)
+  repo.go            resolving a PR argument and the repository it belongs to
+  review_cmd.go      `quorum review` + its terminal reporter
+  babysit_cmd.go     `quorum babysit` + its terminal reporter
+  poll.go            the agent's poll cycle, and orphan recovery
+  status.go          the dashboard, and the merge-state tracker `watch` runs
+  run.go             run, logs, watch
+  gc.go              the cache collector and everything that measures the cache
+  doctor.go setup.go configui.go agent.go
 
 internal/review/     the reviewer panel: worktree, fan-out, aggregation, findings
 internal/loop/       the review-fix pipeline: CI, fix sessions, gates
@@ -38,10 +46,16 @@ internal/config/ internal/state/ internal/paths/ internal/ui/ internal/logbook/
 internal/runner/     what the agent does per pull request
 ```
 
-The dependency direction is one way: `runner` uses `loop` and `review`, `loop`
-uses `review`, and `review` uses `codex`, `deps`, `envexec`, `gh`, `git`. Keep
-it that way; a cycle here usually means a piece of policy ended up in the wrong
-layer.
+The dependency direction is one way: `cli` uses everything, `runner` uses `loop`
+and `review`, `loop` uses `review`, and `review` uses `codex`, `deps`,
+`envexec`, `gh`, `git`. Keep it that way; a cycle here usually means a piece of
+policy ended up in the wrong layer.
+
+`Version` lives in `main.go` rather than in `internal/cli` and is passed to
+`cli.Run`. Both the Homebrew formula (`-ldflags "-X main.Version=..."`) and the
+release job in `ci.yml` (which greps the literal `var Version = "X.Y.Z"` line
+out of `main.go`) depend on that. Moving it breaks release and version
+reporting without breaking the build.
 
 ## Constraints
 
@@ -80,8 +94,9 @@ layer.
 - **`gh pr checks` is not trustworthy right after a push.** It briefly still
   answers for the previous head, so a red commit reads as green. Never read a
   check result before GitHub reports the pushed sha as the PR head.
-- **Help text, option parsing and the README describe the same flags.** When you
-  touch one, update all three.
+- **Help text, option parsing and `docs/reference.md` describe the same flags.**
+  When you touch one, update all three. The README shows only the flags worth an
+  example; the full table lives in the reference.
 
 ## Checks before committing
 
@@ -95,9 +110,14 @@ go run . --help && go run . review --help && go run . babysit --help
 ## Testing what has no test
 
 The end-to-end path spends real Codex tokens, so it is not in CI. When you
-change `internal/review` or `internal/loop`, run the ladder in the last section
-of PARITY.md against a PR you do not mind, starting with
-`quorum review <pr> --dry-run -n 2`.
+change `internal/review` or `internal/loop`, run this against a PR you do not
+mind, in order:
+
+1. `quorum review <pr> --dry-run -n 2` for the reviewer fan-out, the dependency
+   cache, aggregation and validation, without posting.
+2. `quorum review <pr> -n 2` for posting and `findings.json`.
+3. `quorum babysit <pr> --max-iter 1` for the fix session, session recovery, the
+   push barrier and the fix-log comment.
 
 ## Releases
 

@@ -1,5 +1,17 @@
 # Parity with the three tools quorum replaces
 
+> **Outdated, kept for reference.**
+>
+> This is the migration ledger from the port, written when `pr-codex-review`,
+> `babysit` and `prbot` had just been merged into one binary. The "Was" column
+> cites line numbers in those three retired tools, so it is only fully readable
+> with their source in hand.
+>
+> It is no longer maintained and may not match current behaviour. The safety
+> stops it lists are enforced by tests in the packages named beside them, and
+> those tests are the current source of truth. `CLAUDE.md` carries the
+> constraints that still bind.
+
 quorum is a port of `pr-codex-review` 1.6.0, `babysit` 0.6.2 and `prbot` 0.5.1.
 The two shell tools were 2175 lines of Bash whose safety behaviour was spread
 across the code and their CLAUDE.md files. This is the list that behaviour was
@@ -142,8 +154,8 @@ The port compiles, passes its tests and its own linter, but the end-to-end path
 that actually spends Codex tokens has not been run. Worth doing first, in this
 order, on a PR you do not mind:
 
-1. `quorum review <pr> --dry-run -n 2` — reviewer fan-out, dependency cache,
+1. `quorum review <pr> --dry-run -n 2`: reviewer fan-out, dependency cache,
    aggregation and validation, without posting.
-2. `quorum review <pr> -n 2` — posting and `findings.json`.
-3. `quorum babysit <pr> --max-iter 1` — the fix session, session recovery, the
+2. `quorum review <pr> -n 2`: posting and `findings.json`.
+3. `quorum babysit <pr> --max-iter 1`: the fix session, session recovery, the
    push barrier and the fix-log comment.
