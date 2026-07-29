@@ -310,6 +310,11 @@ type Progress struct {
 // ReadProgress counts finished reviewers of a run in flight, from the events
 // log the run writes as it goes. A run directory that is not there yet simply
 // reports nothing.
+//
+// The run opens the log with a "start" line when it launches the reviewers, so
+// a zero count means the reviewers are running and none has finished yet,
+// rather than the run still preparing its worktree. Only reported outcomes are
+// counted; any other line is ignored.
 func ReadProgress(runDir string, requested int) (Progress, bool) {
 	if runDir == "" {
 		return Progress{}, false

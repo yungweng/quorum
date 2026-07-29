@@ -437,6 +437,12 @@ func (r *Runner) prepareDeps(ctx context.Context, o Options, run runPaths, env e
 // runReviewers runs the reviewer passes, at most Concurrency at a time.
 func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env envexec.Env, opts codex.Options, baseRef string, rep Reporter) error {
 	started := time.Now()
+	// Opens the event log before the first reviewer finishes, so a watcher can
+	// tell "the reviewers are running and none has finished" apart from "the
+	// worktree and its dependencies are still being prepared". Without it every
+	// run looks like it is starting up until the first reviewer returns, which
+	// on a cold dependency cache is several minutes in.
+	appendEvent(run.output, "start")
 	sem := make(chan struct{}, o.Concurrency)
 	var wg sync.WaitGroup
 
@@ -745,7 +751,10 @@ func fmtDuration(d time.Duration) string {
 //
 // The log is how a separate process watches a review in flight: the daemon's
 // dashboard counts these lines to show "4/6 reviewers done" for a run it did
-// not start and cannot call back into. Callers hold the reviewer mutex, so the
+// not start and cannot call back into. Its existence is itself the signal that
+// the reviewers have started, which is why runReviewers writes a "start" line
+// before any of them can finish. Outcome lines are appended under the reviewer
+// mutex and the start line is written before the reviewers exist, so the
 // appends are already serialised.
 func appendEvent(outputDir, line string) {
 	f, err := os.OpenFile(filepath.Join(outputDir, "events.log"),
