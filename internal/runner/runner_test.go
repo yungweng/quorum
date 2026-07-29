@@ -100,6 +100,26 @@ func TestReadProgress(t *testing.T) {
 	}
 }
 
+// A run that has launched its reviewers reports zero of them done, which is
+// what tells a watcher the run is past preparing its worktree.
+func TestReadProgressStarted(t *testing.T) {
+	runDir := t.TempDir()
+	out := filepath.Join(runDir, "output")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "events.log"), []byte("start\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := ReadProgress(runDir, 6)
+	if !ok {
+		t.Fatal("a started run reported no progress")
+	}
+	if p.Done != 0 || p.Failed != 0 || p.Requested != 6 {
+		t.Errorf("progress = %+v", p)
+	}
+}
+
 func TestSummaryLine(t *testing.T) {
 	if got := summaryLine(review.Findings{}); got != "nothing found" {
 		t.Errorf("empty findings rendered as %q", got)
