@@ -125,7 +125,7 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 		CI: loop.CIGreen, Reviewed: true, Blockers: 1, Critical: 2, Commits: 5,
 	})
 
-	screen, _ := render(t, a, nil)
+	screen, shown := render(t, a, map[string]string{"acme/api#42": gh.StateMerged})
 	if strings.Contains(screen, "no fix loop running") {
 		t.Errorf("a running fix loop was reported as idle:\n%s", screen)
 	}
@@ -146,6 +146,12 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	// so a count next to the heading would be a budget that does not exist.
 	if strings.Contains(screen, "BABYSITTING  1 of") {
 		t.Errorf("the fix loop was counted against the review slots:\n%s", screen)
+	}
+	if got := lineWith(t, screen, "api #42"); !strings.Contains(got, "merged") {
+		t.Errorf("the merged fix loop was not labelled: %q", got)
+	}
+	if len(shown) != 1 || shown[0] != "acme/api#42" {
+		t.Errorf("shown = %v, want the fix loop key for end-state tracking", shown)
 	}
 }
 
@@ -171,6 +177,9 @@ func TestDashboardDoesNotShowAnAgentBabysitTwice(t *testing.T) {
 	}
 	if !strings.Contains(screen, "waiting for CI") {
 		t.Errorf("the agent's fix loop is missing from BABYSITTING:\n%s", screen)
+	}
+	if !strings.Contains(screen, "REVIEWING  1 of 6") {
+		t.Errorf("the agent's fix loop is missing from the scheduler capacity count:\n%s", screen)
 	}
 }
 

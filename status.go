@@ -46,7 +46,8 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 
 	// Fix loops are found in the run cache rather than in the state file. One
 	// the agent started is in both, and one you started in a terminal is only
-	// here: babysit never takes a review slot and never records anything.
+	// here. An agent babysit keeps its scheduler slot; a terminal babysit never
+	// takes one and never records anything.
 	babysits := loop.LiveRuns(a.p.BabysitRuns)
 	babysitPID := map[int]bool{}
 	for _, p := range babysits {
@@ -80,16 +81,24 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		recent = recent[:recentCount]
 	}
 
-	a.sectionReviewing(w, running, live, ends)
-	a.sectionBabysitting(w, babysits)
+	a.sectionReviewing(w, running, len(live), live, ends)
+	a.sectionBabysitting(w, babysits, ends)
 	a.sectionQueued(w, queued, ends)
 	a.sectionRecent(w, recent, ends)
 	a.sectionSystem(w)
 
-	shown := make([]string, 0, len(running)+len(queued)+len(recent))
+	shown := make([]string, 0, len(running)+len(queued)+len(recent)+len(babysits))
+	shownSet := make(map[string]bool, cap(shown))
 	for _, group := range [][]state.Entry{running, queued, recent} {
 		for _, e := range group {
 			shown = append(shown, e.Key)
+			shownSet[e.Key] = true
+		}
+	}
+	for _, p := range babysits {
+		if key := p.Key(); !shownSet[key] {
+			shown = append(shown, key)
+			shownSet[key] = true
 		}
 	}
 	return shown
@@ -126,8 +135,8 @@ func (a *app) agentLine() string {
 // section that does not exist, which is the wrong answer to "is anything being
 // reviewed right now". Every stage of the pipeline therefore keeps its heading
 // and says so in words.
-func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, live map[string]runner.Marker, ends map[string]string) {
-	w.Section("reviewing", len(running), a.cfg.MaxConcurrent)
+func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, slotsUsed int, live map[string]runner.Marker, ends map[string]string) {
+	w.Section("reviewing", slotsUsed, a.cfg.MaxConcurrent)
 	if len(running) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing under review right now"))
 		return
@@ -160,9 +169,10 @@ func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, live map[str
 }
 
 // sectionBabysitting shows the fix loops in flight, whichever way they were
-// started. It carries no slot count: babysit does not take a review slot, so
-// "2 of 6" would be a budget that does not exist.
-func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress) {
+// started. It carries no slot total because babysit has no independent
+// concurrency budget. An agent-started loop's scheduler slot is reflected in
+// the reviewing total instead.
+func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress, ends map[string]string) {
 	w.Section("babysitting", len(runs), 0)
 	if len(runs) == 0 {
 		w.Printf("  %s\n", w.Dim("no fix loop running"))
@@ -171,7 +181,7 @@ func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress) {
 	now := time.Now()
 	for _, p := range runs {
 		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
-		a.prLine(w, w.Magenta("●"), e, "")
+		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
 		w.Printf("    %s\n", babysitTrack(w, p, now))
 	}
 }

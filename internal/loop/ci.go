@@ -143,7 +143,7 @@ func (r *run) ensureCIGreen() error {
 	for attempt := 0; ; {
 		r.rep.Info(fmt.Sprintf("waiting for CI on PR #%d...", r.pr.Number))
 		r.prog.CI = CIWaiting
-		r.publish()
+		r.enter(PhaseCI)
 		state, err := r.watchCI()
 		if err != nil {
 			return err
