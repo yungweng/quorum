@@ -24,6 +24,8 @@ import (
 // recentCount is how many finished reviews the dashboard shows.
 const recentCount = 8
 
+const agentTTL = 30 * time.Second
+
 func (a *app) cmdStatus(args []string) int {
 	_ = args
 	a.dashboard(a.out, nil)
@@ -141,7 +143,10 @@ func (a *app) header(w *ui.Writer) {
 
 // agentLine describes the launchd agent and when it last actually did work.
 func (a *app) agentLine() string {
-	if !a.agentLoaded() {
+	if time.Since(a.agentAt) > agentTTL {
+		a.agentOn, a.agentAt = a.agentLoaded(), time.Now()
+	}
+	if !a.agentOn {
 		return "agent not installed, run: quorum install"
 	}
 	every := fmt.Sprintf("every %s", ui.Duration(time.Duration(a.cfg.PollInterval)*time.Second))
@@ -522,13 +527,9 @@ func (a *app) sectionSystem(w *ui.Writer) {
 		w.Printf("  %s %s\n", w.Dim(ui.Pad("load", 10)), text)
 	}
 
-	size := a.cacheSize()
-	cache := ui.Bytes(size)
+	cache := "no budget set"
 	if limit := a.budgetBytes(); limit > 0 {
-		cache += " of " + ui.Bytes(limit)
-		if size > limit {
-			cache = w.Yellow(cache) + w.Dim("  run: quorum gc")
-		}
+		cache = ui.Bytes(limit) + " budget"
 	}
 	w.Printf("  %s %s\n", w.Dim(ui.Pad("cache", 10)), cache)
 	fmt.Fprintln(w.Out)

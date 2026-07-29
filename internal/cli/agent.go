@@ -69,9 +69,8 @@ func (a *app) cmdInstall(args []string) int {
 	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
 		return a.die("%v", err)
 	}
-	// The PATH resolved here is baked into the job, which is what makes the
-	// agent find gh, git and codex outside a login shell.
-	widenPath()
+	// findTools widened PATH above. Bake it into the job so the agent can find
+	// gh, git, codex and optional direnv outside a login shell.
 	plist := fmt.Sprintf(plistTemplate,
 		paths.PlistLabel, self, a.cfg.PollInterval,
 		filepath.Join(a.p.StateDir, "launchd.out.log"),
