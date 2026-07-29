@@ -50,6 +50,8 @@ type app struct {
 	// walking the dependency trees, which `quorum watch` must not do per frame.
 	cacheBytes int64
 	cacheAt    time.Time
+
+	removeAll func(string) error // replaced by gc tests that need deterministic failures
 }
 
 // Run dispatches one command line and returns the process exit code. version

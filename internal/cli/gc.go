@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -253,15 +254,19 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	}
 
 	runs := a.runDirs()
-	drop := func(path string, size int64) bool {
+	removeAll := os.RemoveAll
+	if a.removeAll != nil {
+		removeAll = a.removeAll
+	}
+	drop := func(path string, size int64) error {
 		if !dry {
-			if err := os.RemoveAll(path); err != nil {
-				return false
+			if err := removeAll(path); err != nil {
+				return fmt.Errorf("remove %s: %w", path, err)
 			}
 		}
 		total -= size
 		freed += size
-		return true
+		return nil
 	}
 
 	for _, r := range runs {
@@ -271,7 +276,9 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		if r.live {
 			continue
 		}
-		drop(filepath.Join(r.path, "worktree"), r.worktree)
+		if err := drop(filepath.Join(r.path, "worktree"), r.worktree); err != nil {
+			return freed, removed, err
+		}
 	}
 	// Only the output is still there to free: the round above ends by returning,
 	// so reaching this point means it dropped every collectable worktree.
@@ -282,9 +289,10 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		if r.live {
 			continue
 		}
-		if drop(r.path, r.output) {
-			removed++
+		if err := drop(r.path, r.output); err != nil {
+			return freed, removed, err
 		}
+		removed++
 	}
 	// A run that is still going owns its worktree, and through the symlinks in
 	// that worktree it owns shared trees this cannot tell apart from the rest.
@@ -295,7 +303,9 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		if total <= limit {
 			break
 		}
-		drop(t.Path, dirSize(t.Path))
+		if err := drop(t.Path, dirSize(t.Path)); err != nil {
+			return freed, removed, err
+		}
 	}
 	return freed, removed, nil
 }
