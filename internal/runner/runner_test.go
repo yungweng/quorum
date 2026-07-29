@@ -12,7 +12,7 @@ import (
 // arbitrary chunks, which is how a pipe delivers it.
 
 func TestSafeName(t *testing.T) {
-	if got := SafeName("moto-nrw/project-phoenix#2017"); got != "moto-nrw-project-phoenix-2017" {
+	if got := SafeName("crumbtray/toaster-api#2017"); got != "crumbtray-toaster-api-2017" {
 		t.Errorf("got %q", got)
 	}
 }

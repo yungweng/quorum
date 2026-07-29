@@ -56,7 +56,7 @@ DISPUTED FINDINGS:
 // that stalls on questions nobody will answer, or a session inventing product
 // decisions while a human sits waiting.
 func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
-	auto := standingRules("feature/calendar", true)
+	auto := standingRules("feature/crumb-tray", true)
 	if !strings.Contains(auto, "No human is available during this run") {
 		t.Error("autonomous rules do not tell the session to decide itself")
 	}
@@ -64,7 +64,7 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 		t.Error("autonomous rules still invite the session to ask questions")
 	}
 
-	interactive := standingRules("feature/calendar", false)
+	interactive := standingRules("feature/crumb-tray", false)
 	if !strings.Contains(interactive, MarkerQuestions) {
 		t.Error("interactive rules do not describe the questions marker")
 	}
@@ -73,8 +73,8 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 // The push command is spelled out because a bare `git push` fails on the
 // detached checkout the pipeline works in.
 func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
-	rules := standingRules("feature/calendar", true)
-	want := "git push origin HEAD:refs/heads/feature/calendar"
+	rules := standingRules("feature/crumb-tray", true)
+	want := "git push origin HEAD:refs/heads/feature/crumb-tray"
 	if !strings.Contains(rules, want) {
 		t.Errorf("the standing rules do not contain %q", want)
 	}
@@ -107,9 +107,9 @@ func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 }
 
 func TestPRContextIncludesExtraUserContext(t *testing.T) {
-	got := prContext(7, "Add the kit picker", "feature/kit", "main",
-		"https://github.com/acme/api/pull/7", "Body text.", "Focus on the calendar")
-	for _, want := range []string{"PR #7", "feature/kit", "Body text.", "Focus on the calendar"} {
+	got := prContext(7, "Add the browning dial", "feature/browning", "main",
+		"https://github.com/acme/api/pull/7", "Body text.", "Focus on the crumb tray")
+	for _, want := range []string{"PR #7", "feature/browning", "Body text.", "Focus on the crumb tray"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("context is missing %q", want)
 		}
