@@ -128,50 +128,44 @@ refuses dirty or diverged checkouts and fork PRs;
 your review and handles them on its own.
 
 ```text
-quorum 1.0.3                                            agent loaded, every 5m, last poll 2m ago
+quorum 1.1.0                                        agent loaded, every 5m, last poll 2m ago
 
-  1/2 review   ·   1 fix   ·   1 queued   ·   3.4 load                                         ⠋
-------------------------------------------------------------------------------------------------
+  1/2 review   ·   1 fix   ·   1 queued   ·   3.4 load                                     ⠋
+────────────────────────────────────────────────────────────────────────────────────────────
 
-REVIEWING                                                                                  1 / 2
+ACTIVE  1 / 2
   ● toaster-api #2016           stop emailing every user at 3am about crumbs
-    agent · 6m, 4/6 reviewers done
+      review · agent · 6m · 4/6 reviewers done
   ◆ payments #103               harden artifact health screening
-    manual · 2m, 0/6 reviewers done
-
-BABYSITTING                                                                                    1
+      review · manual · 2m · 0/6 reviewers done
   ● toaster-api #2018           make the crumb tray endpoint idempotent
-    1h04m   round 3/12   CI ✗ fix 2/3   review ✓   CI fix 2 ● 4m   5 commits   log ↗
-
-QUEUED                                                                                         1
+      1h04m   round 3/12   CI ✗ fix 2/3   review ✓   CI fix 2 ● 4m   5 commits   log ↗
   ○ toaster-api #2014           allow browning levels above 11
-    waiting for a free slot
+      queued · waiting for a free slot
 
-SYSTEM
-  scope      every repo that asks you
-  budget     2 at a time, 6 reviewers each, up to 12 Codex processes
-  cache      5.0 GB budget
+HISTORY
+  ✓ 21:02  payments #98               2B 1C 3S  comment ↗
+  ✓ 19:42  toaster-api #2002          fix, 2 rounds · nothing found
+  ✓ 18:42  toaster-api #2002          0B 1C 0S  comment ↗
+  ✗ 29 Jul toaster-api #1993          failed, reviewer-2 timed out after 45m
 
-RECENT
-  ✓ toaster-api #2002          12h ago    0 blockers, 1 critical, 0 suggestions  comment ↗
-  ✗ toaster-api #1993          yesterday  failed after 2 attempt(s)
+every repo that asks you · 2 at a time, 6 reviewers each · 5.0 GB cache
 ```
 
 The status bar under the version answers "what is this machine doing" before
-any section has to be read. From about 112 columns the sections move into two
-side by side columns, with REVIEWING and QUEUED on the left and BABYSITTING and
-SYSTEM on the right; below that they stack as above. RECENT keeps the full
-width either way.
+anything else has to be read.
 
-REVIEWING lists both agent reviews and `quorum review` commands running in a
-terminal. The label and symbol show which started each run. Its count covers
-agent slots only; a manual review does not spend one.
+ACTIVE is everything in flight: reviews the agent started, reviews you started
+in a terminal, fix loops, and what is waiting for a slot. The symbol and the
+label under each line say which is which. Its count covers agent slots only, so
+a review or a fix loop you ran yourself does not spend one. On an idle machine
+the whole section is one line saying so.
 
-BABYSITTING lists every fix loop in flight, whether the agent started it or you
-ran `quorum babysit` in a terminal. A fix loop can sit in one place for an hour,
-so the line answers "is it getting anywhere" rather than "is it running". It
-carries no slot count: a loop the agent started already spends its slot under
-REVIEWING, and one you ran yourself spends none.
+HISTORY is one line per finished run, newest first, however it was started.
+Note the two entries for `toaster-api #2002`: a review and then a fix loop, as
+two runs rather than one overwriting the other. `HISTORY=20` in the config sets
+how many are listed. The log behind it is described in
+[the reference](docs/reference.md#the-history-log).
 
 `quorum watch` redraws the same screen as it changes and marks pull requests
 that have since been merged or closed.

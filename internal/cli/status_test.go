@@ -12,6 +12,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/logbook"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/paths"
@@ -29,6 +30,7 @@ func testApp(t *testing.T) *app {
 	p := paths.P{
 		StateDir:    dir,
 		StateFile:   filepath.Join(dir, "state.json"),
+		HistoryFile: filepath.Join(dir, "history.jsonl"),
 		Log:         filepath.Join(dir, "log"),
 		RunningDir:  filepath.Join(dir, "running"),
 		ManualDir:   filepath.Join(dir, "manual-reviews"),
@@ -36,7 +38,7 @@ func testApp(t *testing.T) *app {
 		BabysitRuns: filepath.Join(dir, "babysit"),
 		DepsCache:   filepath.Join(dir, "deps"),
 	}
-	cfg := config.Config{MaxConcurrent: 6, Reviewers: 6, PollInterval: 120}
+	cfg := config.Config{MaxConcurrent: 6, Reviewers: 6, PollInterval: 120, History: 20}
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}
 }
 
@@ -134,7 +136,7 @@ func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
 	}, "start\nok 1 30 1\n")
 
 	screen, shown := render(t, a, nil)
-	if got := sectionBadge(t, screen, "REVIEWING"); got != "0 / 6" {
+	if got := sectionBadge(t, screen, "ACTIVE"); got != "0 / 6" {
 		t.Errorf("a manual review took an agent slot: heading says %q", got)
 	}
 	for _, want := range []string{
@@ -170,11 +172,7 @@ func TestDashboardKeepsThePipelineVisibleWhenIdle(t *testing.T) {
 	})
 
 	screen, _ := render(t, a, nil)
-	for _, want := range []string{
-		"REVIEWING", "nothing under review right now",
-		"BABYSITTING", "no fix loop running",
-		"QUEUED", "nothing waiting",
-	} {
+	for _, want := range []string{"ACTIVE", "nothing running", "HISTORY"} {
 		if !strings.Contains(screen, want) {
 			t.Errorf("idle dashboard is missing %q:\n%s", want, screen)
 		}
@@ -199,7 +197,7 @@ func TestDashboardDoesNotMeasureCache(t *testing.T) {
 	if !a.cacheAt.IsZero() {
 		t.Fatal("dashboard measured the cache")
 	}
-	if !strings.Contains(screen, "4.0 GB budget") {
+	if !strings.Contains(screen, "4.0 GB cache") {
 		t.Fatalf("dashboard is missing the cache budget:\n%s", screen)
 	}
 }
@@ -237,8 +235,8 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	}
 	// It must not be counted against the review budget: babysit takes no slot,
 	// so a count next to the heading would be a budget that does not exist.
-	if got := sectionBadge(t, screen, "BABYSITTING"); strings.Contains(got, "/") {
-		t.Errorf("the fix loop was counted against the review slots: heading says %q", got)
+	if got := sectionBadge(t, screen, "ACTIVE"); got != "0 / 6" {
+		t.Errorf("a terminal fix loop was counted against the review slots: heading says %q", got)
 	}
 	if got := lineWith(t, screen, "api #42"); !strings.Contains(got, "merged") {
 		t.Errorf("the merged fix loop was not labelled: %q", got)
@@ -265,13 +263,13 @@ func TestDashboardDoesNotShowAnAgentBabysitTwice(t *testing.T) {
 	})
 
 	screen, _ := render(t, a, nil)
-	if !strings.Contains(screen, "nothing under review right now") {
+	if strings.Count(screen, "api #42") != 1 {
 		t.Errorf("the agent's fix loop was drawn as a review as well:\n%s", screen)
 	}
 	if !strings.Contains(screen, "waiting for CI") {
-		t.Errorf("the agent's fix loop is missing from BABYSITTING:\n%s", screen)
+		t.Errorf("the agent's fix loop is missing from ACTIVE:\n%s", screen)
 	}
-	if got := sectionBadge(t, screen, "REVIEWING"); got != "1 / 6" {
+	if got := sectionBadge(t, screen, "ACTIVE"); got != "1 / 6" {
 		t.Errorf("the agent's fix loop is missing from the scheduler capacity count: heading says %q", got)
 	}
 }
@@ -298,7 +296,7 @@ func TestDashboardShowsADirectRunBeforeItsStateUpdate(t *testing.T) {
 			if strings.Contains(screen, "nothing under review right now") {
 				t.Errorf("a claimed direct review was reported as idle:\n%s", screen)
 			}
-			if got := sectionBadge(t, screen, "REVIEWING"); got != "1 / 6" {
+			if got := sectionBadge(t, screen, "ACTIVE"); got != "1 / 6" {
 				t.Errorf("preparing direct review is not counted: heading says %q", got)
 			}
 			for _, want := range []string{"api #42", "agent", "starting up"} {
@@ -434,35 +432,129 @@ func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 
 // Every line has to fit the terminal: watch paints a fixed number of rows, and
 // a line that wraps pushes the rest of the frame off the bottom.
-// A wide terminal puts what is running beside what the machine is set up to
-// do, instead of below it. A narrow one must still get every section.
-func TestDashboardUsesTwoColumnsOnlyWhenThereIsRoom(t *testing.T) {
+// The point of the history log: runs are listed one by one, so reviewing the
+// same pull request twice leaves two lines instead of the second overwriting
+// the first, and a run started in a terminal appears at all.
+func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{Key: "acme/api#42", Kind: history.KindReview, Source: history.SourceAgent,
+			Outcome: history.OK, Reviewed: true, Critical: 2, EndedAt: now.Add(-2 * time.Hour)},
+		{Key: "acme/api#42", Kind: history.KindBabysit, Source: history.SourceManual,
+			Outcome: history.Converged, Reviewed: true, Rounds: 3, EndedAt: now.Add(-time.Hour)},
+		{Key: "acme/web#7", Kind: history.KindReview, Source: history.SourceManual,
+			Outcome: history.Failed, Reason: "reviewer-2 timed out", EndedAt: now.Add(-time.Minute)},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, shown := render(t, a, nil)
+	if got := strings.Count(screen, "api #42"); got != 2 {
+		t.Errorf("two runs on one pull request produced %d lines:\n%s", got, screen)
+	}
+	// Newest first.
+	if strings.Index(screen, "web #7") > strings.Index(screen, "api #42") {
+		t.Errorf("the history is not newest first:\n%s", screen)
+	}
+	for _, want := range []string{"fix, 3 rounds", "0B 2C 0S", "reviewer-2 timed out"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("history is missing %q:\n%s", want, screen)
+		}
+	}
+	if !slices.Contains(shown, "acme/web#7") {
+		t.Errorf("shown = %v, want the logged runs for end-state tracking", shown)
+	}
+}
+
+func TestDashboardHonoursTheConfiguredHistorySize(t *testing.T) {
+	a := testApp(t)
+	a.cfg.History = 3
+	for i := range 10 {
+		if err := history.Append(a.p.HistoryFile, history.Run{
+			Key: fmt.Sprintf("acme/api#%d", i), Kind: history.KindReview,
+			Outcome: history.OK, Reviewed: true, EndedAt: time.Now().Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	screen, _ := render(t, a, nil)
+	if got := strings.Count(screen, "api #"); got != 3 {
+		t.Errorf("HISTORY=3 listed %d runs:\n%s", got, screen)
+	}
+	// The newest three, not the oldest.
+	if !strings.Contains(screen, "api #9") || strings.Contains(screen, "api #0") {
+		t.Errorf("the wrong end of the log was listed:\n%s", screen)
+	}
+}
+
+// Upgrading to a build that keeps a log must not show an empty screen for
+// everything the agent did before it existed.
+func TestDashboardFallsBackToTheStateFileWhileTheLogIsEmpty(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "an older result"
+		r.Critical = 1
+		r.Mark(state.OK, "")
+	})
+
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(screen, "api #42") {
+		t.Errorf("the state file's results vanished with an empty log:\n%s", screen)
+	}
+
+	// The first logged run takes over.
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/web#7", Kind: history.KindReview, Outcome: history.OK,
+		Reviewed: true, EndedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	screen, _ = render(t, a, nil)
+	if !strings.Contains(screen, "web #7") {
+		t.Errorf("the logged run is missing:\n%s", screen)
+	}
+	if strings.Contains(screen, "api #42") {
+		t.Errorf("the fallback was still used once the log had an entry:\n%s", screen)
+	}
+}
+
+func TestDashboardSaysSoWhenNothingHasFinished(t *testing.T) {
+	screen, _ := render(t, testApp(t), nil)
+	if !strings.Contains(screen, "nothing has finished yet") {
+		t.Errorf("an empty history does not say so:\n%s", screen)
+	}
+}
+
+// An idle machine is what this screen shows almost all of the time, so the
+// idle state has to be compact rather than four headings saying "nothing".
+func TestAnIdleDashboardStaysCompact(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = 5
 
-	draw := func(width int) string {
-		var b strings.Builder
-		a.dashboard(&ui.Writer{Out: &b, Width: width}, nil)
-		return b.String()
-	}
+	var b strings.Builder
+	a.dashboard(&ui.Writer{Out: &b, Width: 120}, nil)
+	screen := b.String()
 
-	wide := draw(twoColumnMin)
-	if !strings.Contains(lineWith(t, wide, "REVIEWING"), "BABYSITTING") {
-		t.Errorf("reviewing and babysitting did not share a row:\n%s", wide)
+	// It still says in words that nothing is running: a section that vanishes
+	// cannot be told apart from a feature that is not there.
+	if !strings.Contains(lineWith(t, screen, "ACTIVE"), "nothing running") {
+		t.Errorf("the idle state is not stated on the ACTIVE line:\n%s", screen)
 	}
-	if !strings.Contains(lineWith(t, wide, "QUEUED"), "SYSTEM") {
-		t.Errorf("queued and system did not share a row:\n%s", wide)
-	}
-
-	narrow := draw(twoColumnMin - 1)
-	if strings.Contains(lineWith(t, narrow, "REVIEWING"), "BABYSITTING") {
-		t.Errorf("a narrow terminal was given two columns:\n%s", narrow)
-	}
-	// Stacking must not lose a section on the way.
-	for _, want := range []string{"REVIEWING", "BABYSITTING", "QUEUED", "SYSTEM", "5.0 GB budget"} {
-		if !strings.Contains(narrow, want) {
-			t.Errorf("stacked dashboard is missing %q:\n%s", want, narrow)
+	// And it says it once, not once per pipeline stage.
+	for _, gone := range []string{"REVIEWING", "BABYSITTING", "QUEUED", "SYSTEM"} {
+		if strings.Contains(screen, gone) {
+			t.Errorf("%s still has a heading of its own:\n%s", gone, screen)
 		}
+	}
+	if n := strings.Count(strings.TrimSpace(screen), "\n") + 1; n > 12 {
+		t.Errorf("an idle dashboard is %d lines:\n%s", n, screen)
+	}
+	// The settings did not disappear with the section that held them.
+	if !strings.Contains(screen, "5.0 GB cache") {
+		t.Errorf("the footer is missing the cache budget:\n%s", screen)
 	}
 }
 

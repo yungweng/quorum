@@ -12,9 +12,10 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
+	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/runner"
@@ -22,22 +23,7 @@ import (
 	"github.com/yungweng/quorum/internal/ui"
 )
 
-// recentCount is how many finished reviews the dashboard shows.
-const recentCount = 8
-
 const agentTTL = 30 * time.Second
-
-// twoColumnMin is the narrowest terminal that gets a two column dashboard.
-//
-// Below it each column has under fifty columns to work with, which is not
-// enough for a repository, a number and enough of a title to recognise the
-// pull request, so the sections stack instead and each gets the full width.
-const twoColumnMin = 112
-
-// columnGap is what separates the two columns. It is a drawn line rather than
-// whitespace because two ragged columns of text with only a gap between them
-// read as one confused column.
-const columnGap = " │ "
 
 func (a *app) cmdStatus(args []string) int {
 	_ = args
@@ -124,47 +110,36 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	}
 	// Oldest request first in the queue, matching the order they will start in.
 	sort.SliceStable(queued, func(i, j int) bool { return queued[i].SeenReqAt < queued[j].SeenReqAt })
-	if len(recent) > recentCount {
-		recent = recent[:recentCount]
-	}
 
-	a.statusbar(w, len(live), len(babysits), len(queued), len(running)+len(manualReviews)+len(babysits) > 0)
+	a.statusbar(w, len(live), len(babysits), len(queued))
 
-	// Wide terminals get two columns of sections, which is the difference
-	// between a dashboard and a list: what is running and what is waiting stay
-	// on one screen next to the machine's own state instead of below it.
-	// Recent stays full width, because its lines carry a title, a count and a
-	// link and are the ones that suffer first from being squeezed.
-	if w.Cols() >= twoColumnMin {
-		colWidth := (w.Cols() - ui.Cells(columnGap)) / 2
-		left := w.Block(colWidth, func(b *ui.Writer) {
-			a.sectionReviewing(b, running, manualReviews, len(live), live, ends)
-			a.sectionQueued(b, queued, ends)
-		})
-		right := w.Block(colWidth, func(b *ui.Writer) {
-			a.sectionBabysitting(b, babysits, ends)
-			a.sectionSystem(b)
-		})
-		fmt.Fprintln(w.Out)
-		w.Printf("%s", ui.Columns(w.Dim(columnGap), colWidth, left, right))
-	} else {
-		a.sectionReviewing(w, running, manualReviews, len(live), live, ends)
-		a.sectionBabysitting(w, babysits, ends)
-		a.sectionQueued(w, queued, ends)
-		a.sectionSystem(w)
-	}
-	a.sectionRecent(w, recent, ends)
-	fmt.Fprintln(w.Out)
+	// What is running gets as much room as it needs and no more, and the log of
+	// finished runs gets the rest.
+	//
+	// The four fixed sections this replaced spent ten lines saying "nothing"
+	// four times over, which is what an idle machine looks like almost all of
+	// the time, while the runs that had actually happened were squeezed in
+	// underneath. The counts that used to justify those headings are on the
+	// status bar, so nothing is lost by collapsing them.
+	a.sectionActive(w, running, manualReviews, babysits, queued, live, ends)
+	past := a.sectionHistory(w, recent, ends)
+	a.footer(w)
 
-	shown := make([]string, 0, len(running)+len(manualReviews)+len(queued)+len(recent)+len(babysits))
+	shown := make([]string, 0, len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
 	shownSet := make(map[string]bool, cap(shown))
-	for _, group := range [][]state.Entry{running, queued, recent} {
+	for _, group := range [][]state.Entry{running, queued} {
 		for _, e := range group {
 			if shownSet[e.Key] {
 				continue
 			}
 			shown = append(shown, e.Key)
 			shownSet[e.Key] = true
+		}
+	}
+	for _, key := range past {
+		if !shownSet[key] {
+			shown = append(shown, key)
+			shownSet[key] = true
 		}
 	}
 	for _, run := range manualReviews {
@@ -202,7 +177,7 @@ func (a *app) header(w *ui.Writer) {
 // statusbar answers "what is this machine doing right now" in one line, before
 // any section has to be read. Everything on it is live state; the settings that
 // produced it live in the system section.
-func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int, busy bool) {
+func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int) {
 	slots := fmt.Sprintf("%d/%d", reviewing, a.cfg.MaxConcurrent)
 	if reviewing > 0 {
 		slots = w.Cyan(slots)
@@ -227,7 +202,7 @@ func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int, busy bool) 
 	// idle dashboard renders byte for byte the same frame every pass, which is
 	// what lets watch skip the repaint entirely. Piped output gets none of it:
 	// a spinner frozen at one frame in a log file is just a stray character.
-	if busy && w.Color {
+	if reviewing+fixing > 0 && w.Color {
 		if gap := w.Cols() - ui.Cells(line) - 1; gap > 1 {
 			line += strings.Repeat(" ", gap) + w.Cyan(ui.Spinner(a.tick))
 		}
@@ -263,39 +238,42 @@ func (a *app) agentLine() string {
 	return fmt.Sprintf("agent loaded, %s, last poll %s", every, ui.Ago(at))
 }
 
-// A section that disappears when it is empty cannot be told apart from a
-// section that does not exist, which is the wrong answer to "is anything being
-// reviewed right now". Every stage of the pipeline therefore keeps its heading
-// and says so in words.
-func (a *app) sectionReviewing(
+// sectionActive is everything in flight: reviews the agent started, reviews
+// started in a terminal, fix loops, and what is waiting for a slot.
+//
+// An idle machine gets one line rather than a heading. The section still says
+// in words that nothing is running, which is what keeps "nothing is happening"
+// distinguishable from "this feature is not here", but it does not spend four
+// headings and ten lines to say it: the counts behind those headings are on
+// the status bar directly above.
+func (a *app) sectionActive(
 	w *ui.Writer,
 	running []state.Entry,
 	manual []review.LiveRun,
-	slotsUsed int,
+	babysits []loop.Progress,
+	queued []state.Entry,
 	live map[string]runner.Marker,
 	ends map[string]string,
 ) {
-	w.Section("reviewing", slotsUsed, a.cfg.MaxConcurrent)
-	if len(running) == 0 && len(manual) == 0 {
-		w.Printf("  %s\n", w.Dim("nothing under review right now"))
+	if len(running)+len(manual)+len(babysits)+len(queued) == 0 {
+		fmt.Fprintln(w.Out)
+		w.Printf("%s %s\n", w.Bold("ACTIVE"), w.Dim("    nothing running"))
 		return
 	}
+	w.Section("active", len(live), a.cfg.MaxConcurrent)
+
 	for _, e := range running {
 		_, alive := live[e.Key]
 		a.prLine(w, w.Cyan("●"), e, ends[e.Key])
-		detail := ""
 		if !alive {
-			detail = w.Red("process gone, will be retried")
-		} else {
-			since := ""
-			if t := e.Started(); !t.IsZero() {
-				since = ui.Duration(time.Since(t))
-			}
-			progress := reviewProgress(e.RunDir, a.cfg.Reviewers)
-			detail = w.Cyan("agent") +
-				w.Dim(" · "+strings.TrimPrefix(since+", ", ", ")+progress)
+			w.Printf("      %s\n", w.Red("process gone, will be retried"))
+			continue
 		}
-		w.Printf("    %s\n", detail)
+		since := ""
+		if t := e.Started(); !t.IsZero() {
+			since = ui.Duration(time.Since(t)) + " · "
+		}
+		w.Printf("      %s\n", w.Dim("review · agent · "+since+reviewProgress(e.RunDir, a.cfg.Reviewers)))
 	}
 	for _, run := range manual {
 		entry := state.Entry{
@@ -307,9 +285,25 @@ func (a *app) sectionReviewing(
 			},
 		}
 		a.prLine(w, w.Magenta("◆"), entry, ends[entry.Key])
-		since := ui.Duration(time.Since(run.StartedAt))
-		progress := reviewProgress(run.RunDir, run.Reviewers)
-		w.Printf("    %s%s\n", w.Magenta("manual"), w.Dim(" · "+since+", "+progress))
+		w.Printf("      %s\n", w.Dim("review · manual · "+ui.Duration(time.Since(run.StartedAt))+
+			" · "+reviewProgress(run.RunDir, run.Reviewers)))
+	}
+	now := time.Now()
+	for _, p := range babysits {
+		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
+		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
+		w.Printf("      %s\n", babysitTrack(w, p, now))
+	}
+	for _, e := range queued {
+		a.prLine(w, w.Dim("○"), e, ends[e.Key])
+		reason := e.Reason
+		if reason == "" {
+			reason = "waiting"
+		}
+		if e.Status == state.Deferred {
+			reason = "held back: " + reason
+		}
+		w.Printf("      %s\n", w.Dim("queued · "+reason))
 	}
 }
 
@@ -327,24 +321,6 @@ func reviewProgress(runDir string, requested int) string {
 	return progress
 }
 
-// sectionBabysitting shows the fix loops in flight, whichever way they were
-// started. It carries no slot total because babysit has no independent
-// concurrency budget. An agent-started loop's scheduler slot is reflected in
-// the reviewing total instead.
-func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress, ends map[string]string) {
-	w.Section("babysitting", len(runs), 0)
-	if len(runs) == 0 {
-		w.Printf("  %s\n", w.Dim("no fix loop running"))
-		return
-	}
-	now := time.Now()
-	for _, p := range runs {
-		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
-		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
-		w.Printf("    %s\n", babysitTrack(w, p, now))
-	}
-}
-
 // babysitTrack is the line under a fix loop: where it is in its loop, what it
 // is doing now, and for how long.
 //
@@ -356,7 +332,7 @@ func (a *app) sectionBabysitting(w *ui.Writer, runs []loop.Progress, ends map[st
 func babysitTrack(w *ui.Writer, p loop.Progress, now time.Time) string {
 	// Indent and separator have to match what the caller prints, or the budget
 	// is measured against the wrong line.
-	const indent = 4
+	const indent = 6
 	const gap = "   "
 
 	var plain, styled []string
@@ -392,10 +368,10 @@ func babysitTrack(w *ui.Writer, p loop.Progress, now time.Time) string {
 		add("log ↗", w.Link(w.Blue("log ↗"), "file://"+p.LogDir()))
 	}
 
-	room, used := w.Width-indent, 0
+	room, used := w.Cols()-indent, 0
 	var out []string
 	for i, text := range plain {
-		need := utf8.RuneCountInString(text)
+		need := ui.Cells(text)
 		if len(out) > 0 {
 			need += len(gap)
 		}
@@ -464,62 +440,210 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 	return what, w.Cyan(what)
 }
 
-func (a *app) sectionQueued(w *ui.Writer, queued []state.Entry, ends map[string]string) {
-	w.Section("queued", len(queued), 0)
-	if len(queued) == 0 {
-		w.Printf("  %s\n", w.Dim("nothing waiting"))
-		return
+// sectionHistory lists finished runs, newest first, and returns the pull
+// requests it drew so watch knows whose merge state is worth looking up.
+//
+// The log is one entry per run, which is the difference that makes this
+// section worth reading: the state file keeps one record per pull request, so
+// four reviews of the same one used to collapse into a single line showing
+// only the last, and a review started in a terminal never reached it at all.
+//
+// fallback is what the state file still holds. It is used only while the log
+// is empty, so upgrading to a build that keeps a log does not start on a blank
+// screen; the first logged run takes over from it.
+func (a *app) sectionHistory(w *ui.Writer, fallback []state.Entry, ends map[string]string) []string {
+	limit := a.cfg.History
+	if limit <= 0 {
+		limit = config.Default().History
 	}
-	for _, e := range queued {
-		a.prLine(w, w.Dim("○"), e, ends[e.Key])
-		reason := e.Reason
-		if reason == "" {
-			reason = "waiting"
-		}
-		if e.Status == state.Deferred {
-			reason = "held back: " + reason
-		}
-		w.Printf("    %s\n", w.Dim(reason))
+	runs := history.Read(a.p.HistoryFile, limit)
+
+	w.Section("history", 0, 0)
+	if len(runs) == 0 && len(fallback) == 0 {
+		w.Printf("  %s\n", w.Dim("nothing has finished yet"))
+		return nil
 	}
+	if len(runs) == 0 {
+		return a.historyFromState(w, fallback, limit, ends)
+	}
+
+	keys := make([]string, 0, len(runs))
+	now := time.Now()
+	for _, run := range runs {
+		keys = append(keys, run.Key)
+		w.Printf("  %s %s %s%s %s%s\n",
+			historyMark(w, run),
+			w.Dim(ui.Pad(historyWhen(now, run.EndedAt), 6)),
+			runLabel(w, run, ends[run.Key]),
+			runLabelPad(run),
+			historyDetail(w, run),
+			endSuffix(w, ends[run.Key]))
+	}
+	return keys
 }
 
-func (a *app) sectionRecent(w *ui.Writer, recent []state.Entry, ends map[string]string) {
-	if len(recent) == 0 {
-		return
+// historyFromState draws the state file's finished records in the same shape.
+func (a *app) historyFromState(w *ui.Writer, recent []state.Entry, limit int, ends map[string]string) []string {
+	if len(recent) > limit {
+		recent = recent[:limit]
 	}
-	w.Section("recent", 0, 0)
+	now := time.Now()
+	keys := make([]string, 0, len(recent))
 	for _, e := range recent {
-		var mark, detail string
+		keys = append(keys, e.Key)
+		var symbol, detail string
 		switch e.Status {
 		case state.OK:
-			mark = w.Green("✓")
-			detail = findingsText(w, e)
+			symbol, detail = w.Green(w.SymOK()), findingsText(w, e)
 		case state.Failed:
-			mark = w.Red("✗")
+			symbol = w.Red(w.SymFail())
 			detail = w.Red(fmt.Sprintf("failed after %d attempt(s)", e.Fails))
 			if e.Reason != "" {
 				detail += w.Dim(", " + ui.Truncate(e.Reason, 40))
 			}
 		case state.GaveUp:
-			mark = w.Red("✗")
+			symbol = w.Red(w.SymFail())
 			detail = w.Red("gave up") + w.Dim(", retry: quorum run "+e.Key)
 		default:
-			mark = w.Dim("–")
-			detail = w.Dim("skipped: " + e.Reason)
+			symbol, detail = w.Dim("–"), w.Dim("skipped: "+e.Reason)
 		}
-		// One line each: what came back matters more here than the title.
-		w.Printf("  %s %s%s %s %s%s\n",
-			mark,
-			prLabel(w, e, ends[e.Key]),
-			labelPad(e),
-			w.Dim(ui.Pad(ui.Ago(e.Time()), 10)),
-			detail,
-			endSuffix(w, ends[e.Key]))
+		w.Printf("  %s %s %s%s %s%s\n",
+			mark(w, symbol), w.Dim(ui.Pad(historyWhen(now, e.Time()), 6)),
+			prLabel(w, e, ends[e.Key]), labelPad(e), detail, endSuffix(w, ends[e.Key]))
+	}
+	return keys
+}
+
+// historyWhen is the clock time for a run from today and the date for an older
+// one. A log is read as a sequence, and "3h ago" next to "4h ago" says less
+// about the order of two runs than the times they finished at.
+func historyWhen(now, t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	if y, m, d := now.Date(); func() bool { ty, tm, td := t.Date(); return ty == y && tm == m && td == d }() {
+		return t.Format("15:04")
+	}
+	return t.Format("2 Jan")
+}
+
+func historyMark(w *ui.Writer, run history.Run) string {
+	switch run.Outcome {
+	case history.OK, history.Converged:
+		return mark(w, w.Green(w.SymOK()))
+	case history.Failed, history.GaveUp:
+		return mark(w, w.Red(w.SymFail()))
+	default:
+		return mark(w, w.Dim("–"))
 	}
 }
 
-// findingsText is the one line summary of a finished review, with the posted
-// comment behind a link.
+// mark pads an outcome symbol to one column width.
+//
+// With a terminal every symbol is a single cell and this does nothing. Without
+// one they degrade to "ok:" and "FAIL:", which are three and five cells, and an
+// unpadded mark shifts every column after it on the failing lines only, which
+// is the state a piped log is read in.
+func mark(w *ui.Writer, symbol string) string {
+	return ui.Pad(symbol, max(ui.Cells(w.SymOK()), ui.Cells(w.SymFail())))
+}
+
+// historyDetail is what the run produced, which is the column the eye lands in.
+func historyDetail(w *ui.Writer, run history.Run) string {
+	var text string
+	switch {
+	case run.Outcome == history.Skipped:
+		return w.Dim("skipped: " + run.Reason)
+	case run.Outcome == history.GaveUp:
+		return w.Red("gave up") + w.Dim(", retry: quorum run "+run.Key)
+	case run.Outcome == history.Failed:
+		text = w.Red("failed")
+		if run.Reason != "" {
+			text += w.Dim(", " + ui.Truncate(run.Reason, 44))
+		}
+		return prefixKind(w, run) + text
+	case !run.Reviewed:
+		return prefixKind(w, run) + w.Dim("finished")
+	}
+
+	// Compact counts, because this is a log: a column of "0 blockers, 1
+	// critical, 0 suggestions" is three quarters punctuation, and the same
+	// shorthand already labels a fix loop's review round on the line above.
+	counts := fmt.Sprintf("%dB %dC %dS", run.Blockers, run.Critical, run.Suggestions)
+	if run.Blockers == 0 && run.Critical == 0 && run.Suggestions == 0 && run.Questions == 0 {
+		counts = "nothing found"
+	}
+	switch {
+	case run.Blockers > 0:
+		counts = w.Red(counts)
+	case run.Critical > 0:
+		counts = w.Yellow(counts)
+	}
+	text = prefixKind(w, run) + counts
+	if run.CommentURL != "" {
+		return text + "  " + w.Link(w.Blue("comment ↗"), run.CommentURL)
+	}
+	return text
+}
+
+// prefixKind marks a fix loop. A review says nothing, because that is what
+// almost every line is and a tag on all of them is a column of noise.
+func prefixKind(w *ui.Writer, run history.Run) string {
+	if run.Kind != history.KindBabysit {
+		return ""
+	}
+	if run.Rounds == 1 {
+		return w.Dim("fix, 1 round · ")
+	}
+	if run.Rounds > 1 {
+		return w.Dim(fmt.Sprintf("fix, %d rounds · ", run.Rounds))
+	}
+	return w.Dim("fix · ")
+}
+
+// footer is the configuration the numbers above were produced under, on one
+// dim line. It used to be a section of its own, which gave four settings that
+// change once a month the same weight as the work in flight.
+func (a *app) footer(w *ui.Writer) {
+	scope := "every repo that asks you"
+	if len(a.cfg.Orgs) > 0 || len(a.cfg.Repos) > 0 {
+		scope = strings.Join(append(append([]string{}, a.cfg.Orgs...), a.cfg.Repos...), " ")
+	}
+	parts := []string{
+		scope,
+		fmt.Sprintf("%d at a time, %d reviewers each", a.cfg.MaxConcurrent, a.cfg.Reviewers),
+	}
+	if a.cfg.LoadLimit > 0 {
+		parts = append(parts, fmt.Sprintf("held back above load %.0f", a.cfg.LoadLimit))
+	}
+	if limit := a.budgetBytes(); limit > 0 {
+		parts = append(parts, ui.Bytes(limit)+" cache")
+	}
+	fmt.Fprintln(w.Out)
+	w.Printf("%s\n", w.Dim(ui.Truncate(strings.Join(parts, " · "), w.Cols())))
+}
+
+// runLabel renders the "insura #103" column for a logged run, linked to the
+// pull request and struck through once it has been merged.
+func runLabel(w *ui.Writer, run history.Run, end string) string {
+	label := fmt.Sprintf("%s #%d", run.Name(), run.Number())
+	styled := w.Bold(label)
+	if end == gh.StateMerged {
+		styled = w.Strike(styled)
+	}
+	return w.Link(styled, run.URL())
+}
+
+func runLabelPad(run history.Run) string {
+	label := fmt.Sprintf("%s #%d", run.Name(), run.Number())
+	if n := labelWidth - ui.Cells(label); n > 0 {
+		return strings.Repeat(" ", n)
+	}
+	return ""
+}
+
+// findingsText is the one line summary of a finished review from the state
+// file, with the posted comment behind a link.
 func findingsText(w *ui.Writer, e state.Entry) string {
 	counts := fmt.Sprintf("%d blockers, %d critical, %d suggestions", e.Blockers, e.Critical, e.Suggestions)
 	if e.Blockers == 0 && e.Critical == 0 && e.Suggestions == 0 && e.Questions == 0 {
@@ -563,7 +687,7 @@ func styledPRLabel(w *ui.Writer, e state.Entry, label, end string) string {
 // trailing off across empty space, and because padding inside the styling
 // would be counted in escape bytes rather than in visible cells.
 func labelPad(e state.Entry) string {
-	if n := labelWidth - utf8.RuneCountInString(labelOf(e)); n > 0 {
+	if n := labelWidth - ui.Cells(labelOf(e)); n > 0 {
 		return strings.Repeat(" ", n)
 	}
 	return ""
@@ -571,11 +695,11 @@ func labelPad(e state.Entry) string {
 
 func truncateLabel(e state.Entry, width int) string {
 	label := labelOf(e)
-	if utf8.RuneCountInString(label) <= width {
+	if ui.Cells(label) <= width {
 		return label
 	}
 	suffix := fmt.Sprintf(" #%d", e.Number())
-	if suffixWidth := utf8.RuneCountInString(suffix); suffixWidth < width {
+	if suffixWidth := ui.Cells(suffix); suffixWidth < width {
 		return ui.Truncate(e.Name(), width-suffixWidth) + suffix
 	}
 	return ui.Truncate(label, width)
@@ -611,17 +735,17 @@ func endSuffix(w *ui.Writer, end string) string {
 func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
 	endWidth := 0
 	if word := endWord(end); word != "" {
-		endWidth = 2 + utf8.RuneCountInString(word)
+		endWidth = 2 + ui.Cells(word)
 	}
 	if e.Title == "" {
 		// Records written before titles were stored have nothing to show, and
 		// padding to an empty column just leaves trailing whitespace.
-		label := truncateLabel(e, max(w.Width-4-endWidth, 1))
+		label := truncateLabel(e, max(w.Cols()-4-endWidth, 1))
 		w.Printf("  %s %s%s\n", mark, styledPRLabel(w, e, label, end), endSuffix(w, end))
 		return
 	}
-	available := max(w.Width-6-endWidth, 1)
-	labelRoom := max(labelWidth, utf8.RuneCountInString(labelOf(e)))
+	available := max(w.Cols()-6-endWidth, 1)
+	labelRoom := max(labelWidth, ui.Cells(labelOf(e)))
 	titleRoom := available - labelRoom
 	if titleRoom < 12 {
 		labelRoom = max(available-12, 1)
@@ -631,66 +755,9 @@ func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
 	w.Printf("  %s %s%s  %s%s\n",
 		mark,
 		styledPRLabel(w, e, label, end),
-		strings.Repeat(" ", max(labelRoom-utf8.RuneCountInString(label), 0)),
+		strings.Repeat(" ", max(labelRoom-ui.Cells(label), 0)),
 		ui.Truncate(e.Title, titleRoom),
 		endSuffix(w, end))
-}
-
-// sectionSystem is the settings the numbers above were produced under. The
-// live values themselves are on the status bar, so nothing appears twice.
-func (a *app) sectionSystem(w *ui.Writer) {
-	w.Section("system", 0, 0)
-
-	// Values are wrapped rather than truncated: a held back review explained
-	// by a load limit that got cut off mid sentence is worse than two lines.
-	row := func(label string, value string) {
-		const indent = 2
-		room := max(w.Cols()-indent-labelWidthSystem-1, 12)
-		lines := wrap(value, room)
-		w.Printf("  %s %s\n", w.Dim(ui.Pad(label, labelWidthSystem)), lines[0])
-		for _, line := range lines[1:] {
-			w.Printf("  %s %s\n", strings.Repeat(" ", labelWidthSystem), w.Dim(line))
-		}
-	}
-
-	scope := "every repo that asks you"
-	if len(a.cfg.Orgs) > 0 || len(a.cfg.Repos) > 0 {
-		scope = strings.Join(append(append([]string{}, a.cfg.Orgs...), a.cfg.Repos...), " ")
-	}
-	row("scope", scope)
-	row("budget", fmt.Sprintf("%d at a time, %d reviewers each, up to %d Codex processes",
-		a.cfg.MaxConcurrent, a.cfg.Reviewers, a.cfg.Codex()))
-	if a.cfg.LoadLimit > 0 {
-		row("load limit", fmt.Sprintf("%.0f, above it reviews are held back", a.cfg.LoadLimit))
-	}
-	cache := "no budget set"
-	if limit := a.budgetBytes(); limit > 0 {
-		cache = ui.Bytes(limit) + " budget"
-	}
-	row("cache", cache)
-}
-
-// labelWidthSystem is the label column of the system section.
-const labelWidthSystem = 10
-
-// wrap breaks s onto lines of at most n columns, at spaces. A word longer than
-// the line is left whole rather than cut, because the words this wraps are
-// repository names and cutting one makes it unrecognisable.
-func wrap(s string, n int) []string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return []string{""}
-	}
-	lines := []string{words[0]}
-	for _, word := range words[1:] {
-		last := len(lines) - 1
-		if ui.Cells(lines[last])+1+ui.Cells(word) <= n {
-			lines[last] += " " + word
-			continue
-		}
-		lines = append(lines, word)
-	}
-	return lines
 }
 
 // lastPoll reads the heartbeat the poll writes when it finishes.
