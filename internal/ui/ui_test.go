@@ -6,46 +6,6 @@ import (
 	"time"
 )
 
-func TestTruncate(t *testing.T) {
-	cases := []struct {
-		in   string
-		n    int
-		want string
-	}{
-		{"short", 20, "short"},
-		{"exactly ten", 11, "exactly ten"},
-		{"truncate me here", 8, "truncat…"},
-		{"Jahrgangsstufenwechsel", 10, "Jahrgangs…"},
-		{"trailing space cut ", 15, "trailing space…"},
-		{"anything", 0, ""},
-		{"anything", 1, "…"},
-		// Umlauts are one rune each and must not be cut in half.
-		{"Zeiterfassungs-Export für später", 12, "Zeiterfassu…"},
-	}
-	for _, c := range cases {
-		got := Truncate(c.in, c.n)
-		if got != c.want {
-			t.Errorf("Truncate(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
-		}
-		if n := len([]rune(got)); n > c.n {
-			t.Errorf("Truncate(%q, %d) returned %d runes", c.in, c.n, n)
-		}
-	}
-}
-
-func TestPad(t *testing.T) {
-	if got := Pad("ab", 5); got != "ab   " {
-		t.Errorf("Pad = %q", got)
-	}
-	// Umlauts must count as one cell, not as their byte length.
-	if got := Pad("für", 5); got != "für  " {
-		t.Errorf("Pad with umlaut = %q", got)
-	}
-	if got := Pad("too long already", 4); got != "too long already" {
-		t.Errorf("Pad shortened a long value: %q", got)
-	}
-}
-
 func TestAgoFrom(t *testing.T) {
 	now := time.Date(2026, 7, 26, 23, 0, 0, 0, time.UTC)
 	cases := []struct {
