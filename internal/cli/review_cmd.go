@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
 )
@@ -123,15 +124,18 @@ func (a *app) cmdReview(argv []string) int {
 	}
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 
+	started := time.Now()
 	res, err := runner.Run(ctx, o)
 	if err != nil {
 		rep.clear()
+		a.logRun(rep.historyRun(repo, started, history.Failed, err.Error(), nil))
 		if notify {
 			a.out.Notify("quorum: review failed", reviewTarget(rep.number, number)+" stopped")
 		}
 		return a.reviewExit(err)
 	}
 	number = res.Findings.PR
+	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
 	if notify {
 		body := fmt.Sprintf("PR #%d: %d blockers, %d critical.",
 			number, res.Findings.Blockers, res.Findings.Critical)
@@ -143,6 +147,42 @@ func (a *app) cmdReview(argv []string) int {
 		a.out.Notify("quorum: review complete", body)
 	}
 	return exitOK
+}
+
+// historyRun describes this run for the history log. A run that never got as
+// far as resolving its pull request has nothing to identify it by, and an
+// entry that names no pull request is worse than no entry, so it reports one
+// with an empty key and logRun drops it.
+func (t *termReporter) historyRun(repo string, started time.Time, outcome, reason string, res *review.Result) history.Run {
+	t.mu.Lock()
+	number, title := t.number, t.title
+	if t.repo != "" {
+		repo = t.repo
+	}
+	t.mu.Unlock()
+	if number == 0 || repo == "" {
+		return history.Run{}
+	}
+	run := history.Run{
+		Key:       fmt.Sprintf("%s#%d", repo, number),
+		Title:     title,
+		Kind:      history.KindReview,
+		Source:    history.SourceManual,
+		Outcome:   outcome,
+		Reason:    reason,
+		StartedAt: started,
+		EndedAt:   time.Now(),
+	}
+	if res != nil {
+		run.Reviewed = true
+		run.Blockers = res.Findings.Blockers
+		run.Critical = res.Findings.Critical
+		run.Suggestions = res.Findings.Suggestions
+		run.Questions = res.Findings.Questions
+		run.CommentURL = res.CommentURL
+		run.RunDir = res.RunDir
+	}
+	return run
 }
 
 // reviewExit maps a failure onto the exit code pr-codex-review used, so
@@ -216,6 +256,8 @@ type termReporter struct {
 	notify bool
 	number int
 	runs   int
+	title  string
+	repo   string
 
 	mu       sync.Mutex
 	tick     int
@@ -226,6 +268,8 @@ func (t *termReporter) Header(h review.RunHeader) {
 	t.mu.Lock()
 	t.number = h.Number
 	t.runs = h.Runs
+	t.title = h.Title
+	t.repo = h.Repo
 	t.reviewer = map[int]*reviewerState{}
 	t.mu.Unlock()
 

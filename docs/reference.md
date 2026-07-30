@@ -167,6 +167,7 @@ CACHE_BUDGET_GB=5        # runs and dependency trees together, 0 disables
 
 MAX_RETRIES=3
 POLL_INTERVAL=300        # re-run `quorum install` after changing this
+HISTORY=20               # finished runs listed by status and watch
 
 # Safety. Fork and bot PRs run foreign code locally through direnv.
 SKIP_DRAFTS=1
@@ -211,6 +212,27 @@ shared dependency cache removed.
 - `NICE` lowers the priority of the whole review process tree.
 - `LOAD_LIMIT` is off by default. Turned on, it holds new reviews back while the
   machine is busy; they start on a later poll.
+- `HISTORY` is how many finished runs the dashboard lists. It counts runs, not
+  pull requests, so four reviews of the same one take four lines.
+
+## The history log
+
+`status` and `watch` list what has finished under HISTORY, read from
+`~/.local/state/quorum/history.jsonl`. One line of JSON per run, oldest first,
+trimmed to the newest 500.
+
+It exists because neither of the other stores can answer "what has quorum
+done". The state file keeps one record per pull request, so a second review of
+the same one overwrites the first, and only the agent writes to it, so a
+`quorum review` or `quorum babysit` started in a terminal never appears. The
+run cache does keep every run, but its directory names flatten the slash in a
+repository name into a hyphen, which cannot be parsed back, and it is collected
+once `CACHE_BUDGET_GB` is reached.
+
+Every finished run appends one entry: the agent's through the same state write
+that records the outcome, and a terminal run when its command returns. A skip
+is recorded only when the decision is new, because the poll re-applies it on
+every pass. Deleting the file loses the list and nothing else.
 
 ## findings.json
 
@@ -244,6 +266,7 @@ every run with `POST=0`. The four counts come from the bullets under the
 ```text
 ~/.config/quorum/config                        configuration
 ~/.local/state/quorum/state.json               every PR the agent has seen
+~/.local/state/quorum/history.jsonl            every run that has finished
 ~/.local/state/quorum/quorum.log               what it did and why it skipped things
 ~/.local/state/quorum/running/                 one marker per review in flight
 ~/.local/state/quorum/runs/                    one log per agent run

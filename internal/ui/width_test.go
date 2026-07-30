@@ -1,6 +1,9 @@
 package ui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCellsCountsColumnsNotRunes(t *testing.T) {
 	cases := []struct {
@@ -106,5 +109,22 @@ func TestPaddedTitlesAlignWhateverTheScript(t *testing.T) {
 		if got := Cells(Pad(Truncate(title, 20), 20)); got != 20 {
 			t.Errorf("title %q occupies %d columns, want 20", title, got)
 		}
+	}
+}
+
+func TestRuleFillsTheBlockWidth(t *testing.T) {
+	var b strings.Builder
+	w := &Writer{Out: &b, Color: true, Width: 80}
+	w.Rule()
+	if got := Cells(strings.TrimRight(b.String(), "\n")); got != 80 {
+		t.Errorf("rule on an 80 column terminal is %d columns", got)
+	}
+	// A very wide terminal is capped, so the rule matches the content beside it
+	// instead of running to the screen edge.
+	b.Reset()
+	wide := &Writer{Out: &b, Color: true, Width: 400}
+	wide.Rule()
+	if got := Cells(strings.TrimRight(b.String(), "\n")); got != MaxWidth {
+		t.Errorf("rule on a 400 column terminal is %d columns, want %d", got, MaxWidth)
 	}
 }

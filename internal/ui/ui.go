@@ -128,25 +128,24 @@ func (w *Writer) Println(s string) {
 	fmt.Fprintln(w.Out, w.indent+s)
 }
 
-// Section prints a heading with a blank line before it, and pushes its count
-// out to the right edge of the block so that every section's figure lines up
-// in one column instead of trailing its own title at a different offset.
+// Section prints a heading with a blank line before it, and its count beside
+// it.
+//
+// The count sits next to the title rather than out at the right edge. Pushed
+// to the edge it lines up with the counts of other sections, which is worth
+// something in a grid of them and nothing at all in a single column: on a wide
+// terminal it leaves a hundred columns of nothing between a word and a number
+// that belong together.
 func (w *Writer) Section(title string, count int, total int) {
 	fmt.Fprintln(w.Out)
-	head := strings.ToUpper(title)
-	badge := ""
+	head := w.Bold(strings.ToUpper(title))
 	switch {
 	case total > 0:
-		badge = fmt.Sprintf("%d / %d", count, total)
+		head += w.Dim(fmt.Sprintf("  %d / %d", count, total))
 	case count > 0:
-		badge = strconv.Itoa(count)
+		head += w.Dim("  " + strconv.Itoa(count))
 	}
-	if badge == "" {
-		fmt.Fprintln(w.Out, w.Bold(head))
-		return
-	}
-	gap := max(w.Cols()-Cells(head)-Cells(badge), 2)
-	fmt.Fprintln(w.Out, w.Bold(head)+strings.Repeat(" ", gap)+w.Dim(badge))
+	fmt.Fprintln(w.Out, head)
 }
 
 // Ago renders how long ago t was, in the shortest form that stays unambiguous.
