@@ -240,6 +240,14 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		}
 		return 0, 0, err
 	}
+	// Measuring a cold cache can take minutes. Do that read-only work before
+	// taking the startup lock so a run is not held up when the cache already
+	// fits its budget.
+	a.setCacheSize(a.measureCache())
+	if a.cacheBytes <= limit {
+		return 0, 0, nil
+	}
+
 	// Run startup takes the same lock while publishing its claim. Once this
 	// holds it, no run can appear between the liveness check and dependency
 	// eviction, and any run that claimed first is visible below.
@@ -249,7 +257,8 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	}
 	defer unlock()
 
-	// Measured, not the remembered value: this is about to delete things.
+	// Another collector may have changed the cache before this acquired the
+	// lock. Measure again rather than deleting against the stale total above.
 	a.setCacheSize(a.measureCache())
 	total := a.cacheBytes
 	if total <= limit {

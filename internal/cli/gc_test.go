@@ -440,6 +440,39 @@ func TestCollectReportsRemovalErrors(t *testing.T) {
 	}
 }
 
+// A cold cache scan can be much slower than starting a run. When no collection
+// is needed, the scan must not hold the lock that run startup needs.
+func TestCollectDoesNotLockRunStartupBelowBudget(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(1000)
+	staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
+
+	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, _, err := a.collect(false)
+		done <- err
+	}()
+	<-started
+
+	select {
+	case err := <-done:
+		unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		unlock()
+		<-done
+		t.Fatal("collection waited for the run-startup lock despite being below budget")
+	}
+}
+
 // Run startup and collection share the dependency-root lock. A startup that
 // gets there first can publish its claim before collection checks liveness, so
 // the collector cannot delete a tree the new run is about to link.
