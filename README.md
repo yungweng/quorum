@@ -38,8 +38,14 @@ brew install --cask codex     # Homebrew formulas cannot depend on a cask
 From a checkout, which needs Go 1.25 or newer:
 
 ```bash
-go build -o ~/.local/bin/quorum .
+make dev
 ```
+
+This writes `~/.local/bin/quorum` with a version such as
+`1.1.0-dev+3d85e2a.dirty`. The commit identifies the checkout; `dirty` means the
+build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
+`PATH`, every new terminal uses this build. Check with `which quorum` and
+`quorum --version`.
 
 Requires `gh` (authenticated), `git` and `codex`. `direnv` is optional and only
 needed for projects that have an `.envrc`.
