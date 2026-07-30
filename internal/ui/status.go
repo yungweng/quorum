@@ -94,6 +94,70 @@ func (s *Status) Clear() {
 // Spinner returns the current frame of the braille spinner for tick.
 func Spinner(tick int) string { return spinFrames[tick%len(spinFrames)] }
 
+// Bar draws a proportional progress bar n columns wide.
+//
+// The filled and empty halves use different characters rather than only
+// different colours, so the bar still reads as a bar where colour is off.
+func (w *Writer) Bar(done, total, n int) string {
+	if total <= 0 || n <= 0 {
+		return ""
+	}
+	filled := done * n / total
+	filled = min(max(filled, 0), n)
+	return w.Cyan(strings.Repeat("█", filled)) + w.Dim(strings.Repeat("░", n-filled))
+}
+
+// Panel is a block of lines redrawn in place, the multi line counterpart of
+// Status. It is what lets a review show one line per reviewer that updates as
+// they finish, instead of collapsing six parallel processes into one counter.
+//
+// Without a terminal it draws nothing at all, exactly like Status, so a piped
+// run leaves no cursor movement in the log and reports through its permanent
+// output instead.
+type Panel struct {
+	w     *Writer
+	lines int
+}
+
+func (w *Writer) Panel() *Panel { return &Panel{w: w} }
+
+// Draw replaces the panel's previous content with lines.
+//
+// Movement is relative to where the cursor is, so a panel near the bottom of
+// the screen survives the terminal scrolling under it. Each line erases its own
+// tail, and one erase at the end removes rows a previous, taller frame left
+// behind.
+func (p *Panel) Draw(lines []string) {
+	if !p.w.Color {
+		return
+	}
+	var b strings.Builder
+	if p.lines > 0 {
+		fmt.Fprintf(&b, "\x1b[%dF", p.lines)
+	}
+	for _, line := range lines {
+		b.WriteString("\r")
+		b.WriteString(line)
+		b.WriteString("\x1b[K\n")
+	}
+	b.WriteString("\x1b[J")
+	fmt.Fprint(p.w.Out, b.String())
+	p.lines = len(lines)
+}
+
+// Freeze stops redrawing and leaves the last frame on the screen, which is how
+// the finished reviewer list stays in the scrollback.
+func (p *Panel) Freeze() { p.lines = 0 }
+
+// Clear removes the panel entirely.
+func (p *Panel) Clear() {
+	if !p.w.Color || p.lines == 0 {
+		return
+	}
+	fmt.Fprintf(p.w.Out, "\x1b[%dF\x1b[J", p.lines)
+	p.lines = 0
+}
+
 // Notify sends an OSC 777 terminal notification.
 //
 // Writing the escape sequence directly is what avoids making a terminal's own

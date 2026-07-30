@@ -488,6 +488,7 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 			}
 			defer logFile.Close()
 
+			rep.ReviewerStarted(idx)
 			begin := time.Now()
 			err = opts.Review(ctx, env, o.ReviewTimeout, baseRef, out, logFile)
 			elapsed := time.Since(begin)

@@ -44,6 +44,8 @@ func (l *logReporter) Warn(s string) { l.printf("warning: %s", s) }
 // events log instead.
 func (l *logReporter) Progress(_, _, _ int, _ time.Duration) {}
 
+func (l *logReporter) ReviewerStarted(idx int) { l.printf("reviewer-%d started", idx) }
+
 func (l *logReporter) ReviewerDone(idx int, elapsed time.Duration, rank, total int) {
 	l.printf("reviewer-%d done in %s [%d/%d]", idx, elapsed.Round(time.Second), rank, total)
 }
