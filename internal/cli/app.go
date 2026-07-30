@@ -56,22 +56,30 @@ type app struct {
 	agentOn bool
 	agentAt time.Time
 
+	// tick advances once per watch frame and drives the one animation on the
+	// dashboard. It only moves while work is in flight, so an idle dashboard
+	// still renders an identical frame and is never repainted.
+	tick int
+
 	removeAll func(string) error // replaced by gc tests that need deterministic failures
 }
 
 // Run dispatches one command line and returns the process exit code. version
 // is what package main was built with.
 func Run(version string, args []string) int {
-	a := newApp(version)
+	return newApp(version).run(args)
+}
 
-	cmd := ""
-	if len(args) > 0 {
-		cmd = args[0]
-		args = args[1:]
+func (a *app) run(args []string) int {
+	if len(args) == 0 {
+		a.usage()
+		return exitOK
 	}
+	cmd := args[0]
+	args = args[1:]
 
 	switch cmd {
-	case "", "status":
+	case "status":
 		return a.cmdStatus(args)
 	case "review":
 		return a.cmdReview(args)
@@ -230,27 +238,41 @@ func (a *app) newGH(bin string) *gh.Client {
 func (a *app) newGit(bin string) git.G { return git.New(bin) }
 
 func (a *app) usage() {
-	fmt.Printf(`quorum %s - a panel of Codex reviewers for your pull requests
+	a.out.Printf(`%s
+A panel of Codex reviewers for your pull requests.
 
-  quorum review <pr>     review one PR now and post the comment
-  quorum babysit [pr]    review, fix, wait for CI, repeat until it is clean
+%s
+  quorum <command> [options]
 
-  quorum                 what is running, queued and finished
-  quorum watch           the same, redrawn as it changes
-  quorum run <pr>        hand one PR to the agent right now
-  quorum logs [-n N]     follow the log, --no-follow to print the tail and stop
-  quorum doctor [--fix]  check the setup and report what to do about it
+%s
+  quorum watch           follow running, queued and finished work
+  quorum review [pr]     review a PR and post the comment
+  quorum babysit [pr]    review, fix and wait for CI until the PR is clean
+
+  [pr] defaults to the pull request for the current branch.
+
+%s
+  quorum status          show one dashboard snapshot
+  quorum run <pr>        hand one PR to the agent now
+  quorum logs [-n N]     follow the log; use --no-follow to print and stop
+  quorum poll            run one poll cycle now
+
+%s
+  quorum doctor [--fix]  check the setup and fix what it can
   quorum setup           configure scope, limits and notifications
   quorum install         install the launchd agent (polls every %ds)
-  quorum uninstall       remove the agent, keep config and state
-  quorum poll            run one poll cycle by hand
+  quorum uninstall       remove the agent but keep config and state
+  quorum config          change settings; use --path for the file location
   quorum gc              trim the cache to its budget
-  quorum config          change any setting, or --path for the file location
   quorum version         print the version
 
-Requires: gh (authenticated), git, codex. direnv is optional.
+Run quorum <command> --help for command options.
+
+Requires: gh (authenticated), git and codex. direnv is optional.
 Config: %s
-`, a.version, a.cfg.PollInterval, a.p.Config)
+`, a.out.Bold("quorum "+a.version), a.out.Bold("Usage:"),
+		a.out.Bold("Main commands:"), a.out.Bold("Agent:"), a.out.Bold("Setup:"),
+		a.cfg.PollInterval, a.p.Config)
 }
 
 // die prints to stderr and returns the exit code, so callers can `return a.die(...)`.

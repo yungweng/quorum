@@ -16,6 +16,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/loop"
+	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -25,6 +26,18 @@ import (
 const recentCount = 8
 
 const agentTTL = 30 * time.Second
+
+// twoColumnMin is the narrowest terminal that gets a two column dashboard.
+//
+// Below it each column has under fifty columns to work with, which is not
+// enough for a repository, a number and enough of a title to recognise the
+// pull request, so the sections stack instead and each gets the full width.
+const twoColumnMin = 112
+
+// columnGap is what separates the two columns. It is a drawn line rather than
+// whitespace because two ragged columns of text with only a gap between them
+// read as one confused column.
+const columnGap = " │ "
 
 func (a *app) cmdStatus(args []string) int {
 	_ = args
@@ -60,6 +73,11 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	for _, p := range babysits {
 		babysitPID[p.PID] = true
 	}
+	manualReviews := review.LiveRuns(a.p.ManualDir)
+	manualKeys := make(map[string]bool, len(manualReviews))
+	for _, run := range manualReviews {
+		manualKeys[run.Key()] = true
+	}
 
 	a.header(w)
 
@@ -72,6 +90,12 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 			// record. While that preparation runs, the live claim is the more
 			// current source of truth.
 			running = append(running, e)
+			continue
+		}
+		if manualKeys[e.Key] && e.Status != state.Running {
+			// A manual review supersedes an older result or queue entry while
+			// it runs. A concurrent agent review remains visible as its own
+			// line so the two sources cannot be confused.
 			continue
 		}
 		switch e.Status {
@@ -104,18 +128,50 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		recent = recent[:recentCount]
 	}
 
-	a.sectionReviewing(w, running, len(live), live, ends)
-	a.sectionBabysitting(w, babysits, ends)
-	a.sectionQueued(w, queued, ends)
-	a.sectionRecent(w, recent, ends)
-	a.sectionSystem(w)
+	a.statusbar(w, len(live), len(babysits), len(queued), len(running)+len(manualReviews)+len(babysits) > 0)
 
-	shown := make([]string, 0, len(running)+len(queued)+len(recent)+len(babysits))
+	// Wide terminals get two columns of sections, which is the difference
+	// between a dashboard and a list: what is running and what is waiting stay
+	// on one screen next to the machine's own state instead of below it.
+	// Recent stays full width, because its lines carry a title, a count and a
+	// link and are the ones that suffer first from being squeezed.
+	if w.Cols() >= twoColumnMin {
+		colWidth := (w.Cols() - ui.Cells(columnGap)) / 2
+		left := w.Block(colWidth, func(b *ui.Writer) {
+			a.sectionReviewing(b, running, manualReviews, len(live), live, ends)
+			a.sectionQueued(b, queued, ends)
+		})
+		right := w.Block(colWidth, func(b *ui.Writer) {
+			a.sectionBabysitting(b, babysits, ends)
+			a.sectionSystem(b)
+		})
+		fmt.Fprintln(w.Out)
+		w.Printf("%s", ui.Columns(w.Dim(columnGap), colWidth, left, right))
+	} else {
+		a.sectionReviewing(w, running, manualReviews, len(live), live, ends)
+		a.sectionBabysitting(w, babysits, ends)
+		a.sectionQueued(w, queued, ends)
+		a.sectionSystem(w)
+	}
+	a.sectionRecent(w, recent, ends)
+	fmt.Fprintln(w.Out)
+
+	shown := make([]string, 0, len(running)+len(manualReviews)+len(queued)+len(recent)+len(babysits))
 	shownSet := make(map[string]bool, cap(shown))
 	for _, group := range [][]state.Entry{running, queued, recent} {
 		for _, e := range group {
+			if shownSet[e.Key] {
+				continue
+			}
 			shown = append(shown, e.Key)
 			shownSet[e.Key] = true
+		}
+	}
+	for _, run := range manualReviews {
+		key := run.Key()
+		if !shownSet[key] {
+			shown = append(shown, key)
+			shownSet[key] = true
 		}
 	}
 	for _, p := range babysits {
@@ -130,15 +186,65 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 func (a *app) header(w *ui.Writer) {
 	left := "quorum " + a.version
 	right := a.agentLine()
-	gap := w.Width - len(left) - len(right) - 1
+	gap := w.Cols() - ui.Cells(left) - ui.Cells(right)
 	if gap < 2 {
 		w.Printf("%s\n%s\n", w.Bold(left), w.Dim(right))
-		return
+	} else {
+		w.Printf("%s%s%s\n", w.Bold(left), strings.Repeat(" ", gap), w.Dim(right))
 	}
-	w.Printf("%s%s%s\n", w.Bold(left), strings.Repeat(" ", gap), w.Dim(right))
+	// A config the parser choked on changes what every number below means, so
+	// it sits above them rather than in the system section.
 	if a.configErr != nil {
 		w.Printf("%s\n", w.Yellow("config: "+a.configErr.Error()))
 	}
+}
+
+// statusbar answers "what is this machine doing right now" in one line, before
+// any section has to be read. Everything on it is live state; the settings that
+// produced it live in the system section.
+func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int, busy bool) {
+	slots := fmt.Sprintf("%d/%d", reviewing, a.cfg.MaxConcurrent)
+	if reviewing > 0 {
+		slots = w.Cyan(slots)
+	} else {
+		slots = w.Dim(slots)
+	}
+	parts := []string{
+		slots + " " + w.Dim("review"),
+		metric(w, fixing, "fix", w.Magenta),
+		metric(w, queued, "queued", w.Yellow),
+	}
+	if load, ok := runner.LoadAvg1(); ok {
+		text := fmt.Sprintf("%.1f", load)
+		if a.cfg.LoadLimit > 0 && load > a.cfg.LoadLimit {
+			text = w.Yellow(text)
+		}
+		parts = append(parts, text+" "+w.Dim("load"))
+	}
+
+	line := "  " + strings.Join(parts, w.Dim("   ·   "))
+	// One moving character, and only while there is something to move for. An
+	// idle dashboard renders byte for byte the same frame every pass, which is
+	// what lets watch skip the repaint entirely. Piped output gets none of it:
+	// a spinner frozen at one frame in a log file is just a stray character.
+	if busy && w.Color {
+		if gap := w.Cols() - ui.Cells(line) - 1; gap > 1 {
+			line += strings.Repeat(" ", gap) + w.Cyan(ui.Spinner(a.tick))
+		}
+	}
+	w.Printf("\n%s\n", line)
+	w.Rule()
+}
+
+// metric renders one "3 fix" pair, coloured only when the number is not zero.
+func metric(w *ui.Writer, n int, label string, style func(string) string) string {
+	count := strconv.Itoa(n)
+	if n > 0 {
+		count = style(count)
+	} else {
+		count = w.Dim(count)
+	}
+	return count + " " + w.Dim(label)
 }
 
 // agentLine describes the launchd agent and when it last actually did work.
@@ -161,9 +267,16 @@ func (a *app) agentLine() string {
 // section that does not exist, which is the wrong answer to "is anything being
 // reviewed right now". Every stage of the pipeline therefore keeps its heading
 // and says so in words.
-func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, slotsUsed int, live map[string]runner.Marker, ends map[string]string) {
+func (a *app) sectionReviewing(
+	w *ui.Writer,
+	running []state.Entry,
+	manual []review.LiveRun,
+	slotsUsed int,
+	live map[string]runner.Marker,
+	ends map[string]string,
+) {
 	w.Section("reviewing", slotsUsed, a.cfg.MaxConcurrent)
-	if len(running) == 0 {
+	if len(running) == 0 && len(manual) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing under review right now"))
 		return
 	}
@@ -178,20 +291,40 @@ func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, slotsUsed in
 			if t := e.Started(); !t.IsZero() {
 				since = ui.Duration(time.Since(t))
 			}
-			progress := "starting up"
-			if p, ok := runner.ReadProgress(e.RunDir, a.cfg.Reviewers); ok {
-				progress = fmt.Sprintf("%d/%d reviewers done", p.Done, p.Requested)
-				if p.Failed > 0 {
-					progress += fmt.Sprintf(", %d failed", p.Failed)
-				}
-				if p.Done+p.Failed >= p.Requested {
-					progress = "aggregating"
-				}
-			}
-			detail = w.Dim(strings.TrimPrefix(since+", ", ", ") + progress)
+			progress := reviewProgress(e.RunDir, a.cfg.Reviewers)
+			detail = w.Cyan("agent") +
+				w.Dim(" · "+strings.TrimPrefix(since+", ", ", ")+progress)
 		}
 		w.Printf("    %s\n", detail)
 	}
+	for _, run := range manual {
+		entry := state.Entry{
+			Key: run.Key(),
+			Record: state.Record{
+				Title:     run.Title,
+				StartedAt: run.StartedAt.Format(time.RFC3339),
+				RunDir:    run.RunDir,
+			},
+		}
+		a.prLine(w, w.Magenta("◆"), entry, ends[entry.Key])
+		since := ui.Duration(time.Since(run.StartedAt))
+		progress := reviewProgress(run.RunDir, run.Reviewers)
+		w.Printf("    %s%s\n", w.Magenta("manual"), w.Dim(" · "+since+", "+progress))
+	}
+}
+
+func reviewProgress(runDir string, requested int) string {
+	progress := "starting up"
+	if p, ok := runner.ReadProgress(runDir, requested); ok {
+		progress = fmt.Sprintf("%d/%d reviewers done", p.Done, p.Requested)
+		if p.Failed > 0 {
+			progress += fmt.Sprintf(", %d failed", p.Failed)
+		}
+		if p.Done+p.Failed >= p.Requested {
+			progress = "aggregating"
+		}
+	}
+	return progress
 }
 
 // sectionBabysitting shows the fix loops in flight, whichever way they were
@@ -503,36 +636,61 @@ func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
 		endSuffix(w, end))
 }
 
+// sectionSystem is the settings the numbers above were produced under. The
+// live values themselves are on the status bar, so nothing appears twice.
 func (a *app) sectionSystem(w *ui.Writer) {
 	w.Section("system", 0, 0)
+
+	// Values are wrapped rather than truncated: a held back review explained
+	// by a load limit that got cut off mid sentence is worse than two lines.
+	row := func(label string, value string) {
+		const indent = 2
+		room := max(w.Cols()-indent-labelWidthSystem-1, 12)
+		lines := wrap(value, room)
+		w.Printf("  %s %s\n", w.Dim(ui.Pad(label, labelWidthSystem)), lines[0])
+		for _, line := range lines[1:] {
+			w.Printf("  %s %s\n", strings.Repeat(" ", labelWidthSystem), w.Dim(line))
+		}
+	}
 
 	scope := "every repo that asks you"
 	if len(a.cfg.Orgs) > 0 || len(a.cfg.Repos) > 0 {
 		scope = strings.Join(append(append([]string{}, a.cfg.Orgs...), a.cfg.Repos...), " ")
 	}
-	w.Printf("  %s %s\n", w.Dim(ui.Pad("scope", 10)), scope)
-
-	budget := fmt.Sprintf("%d reviews at a time, %d reviewers each, so up to %d Codex processes",
-		a.cfg.MaxConcurrent, a.cfg.Reviewers, a.cfg.Codex())
-	w.Printf("  %s %s\n", w.Dim(ui.Pad("budget", 10)), budget)
-
-	if load, ok := runner.LoadAvg1(); ok {
-		text := fmt.Sprintf("%.1f", load)
-		if a.cfg.LoadLimit > 0 {
-			text += fmt.Sprintf(" of %.0f before reviews are held back", a.cfg.LoadLimit)
-			if load > a.cfg.LoadLimit {
-				text = w.Yellow(text)
-			}
-		}
-		w.Printf("  %s %s\n", w.Dim(ui.Pad("load", 10)), text)
+	row("scope", scope)
+	row("budget", fmt.Sprintf("%d at a time, %d reviewers each, up to %d Codex processes",
+		a.cfg.MaxConcurrent, a.cfg.Reviewers, a.cfg.Codex()))
+	if a.cfg.LoadLimit > 0 {
+		row("load limit", fmt.Sprintf("%.0f, above it reviews are held back", a.cfg.LoadLimit))
 	}
-
 	cache := "no budget set"
 	if limit := a.budgetBytes(); limit > 0 {
 		cache = ui.Bytes(limit) + " budget"
 	}
-	w.Printf("  %s %s\n", w.Dim(ui.Pad("cache", 10)), cache)
-	fmt.Fprintln(w.Out)
+	row("cache", cache)
+}
+
+// labelWidthSystem is the label column of the system section.
+const labelWidthSystem = 10
+
+// wrap breaks s onto lines of at most n columns, at spaces. A word longer than
+// the line is left whole rather than cut, because the words this wraps are
+// repository names and cutting one makes it unrecognisable.
+func wrap(s string, n int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	lines := []string{words[0]}
+	for _, word := range words[1:] {
+		last := len(lines) - 1
+		if ui.Cells(lines[last])+1+ui.Cells(word) <= n {
+			lines[last] += " " + word
+			continue
+		}
+		lines = append(lines, word)
+	}
+	return lines
 }
 
 // lastPoll reads the heartbeat the poll writes when it finishes.

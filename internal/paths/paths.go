@@ -19,6 +19,7 @@ type P struct {
 	StateFile  string
 	Log        string
 	RunningDir string
+	ManualDir  string
 	RunLogDir  string
 	CloneDir   string
 
@@ -67,6 +68,7 @@ func Resolve() P {
 		StateFile:  filepath.Join(stateDir, "state.json"),
 		Log:        filepath.Join(stateDir, "quorum.log"),
 		RunningDir: filepath.Join(stateDir, "running"),
+		ManualDir:  filepath.Join(stateDir, "manual-reviews"),
 		RunLogDir:  filepath.Join(stateDir, "runs"),
 		CloneDir:   env("QUORUM_CLONE_DIR", filepath.Join(cacheRoot, "repos")),
 
@@ -108,7 +110,7 @@ func exists(path string) bool {
 // skip it; poll, review and babysit cannot.
 func (p P) EnsureDirs() error {
 	for _, d := range []string{
-		p.StateDir, p.RunningDir, p.RunLogDir, p.CloneDir,
+		p.StateDir, p.RunningDir, p.ManualDir, p.RunLogDir, p.CloneDir,
 		p.ReviewRuns, p.BabysitRuns, p.DepsCache,
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {

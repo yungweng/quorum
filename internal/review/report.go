@@ -34,6 +34,11 @@ type Reporter interface {
 	Warn(string)
 	// Progress is called about once a second while reviewers run.
 	Progress(done, failed, running int, elapsed time.Duration)
+	// ReviewerStarted is called when a reviewer pass actually begins, which
+	// with a concurrency below the number of passes is not when the run does.
+	// Without it a live display cannot tell a reviewer that is working from
+	// one that is still queued behind the semaphore.
+	ReviewerStarted(idx int)
 	ReviewerDone(idx int, elapsed time.Duration, rank, total int)
 	ReviewerFailed(idx, exitCode int, elapsed time.Duration, logPath string)
 	Aggregating(reviewers, attempt int)
@@ -50,6 +55,7 @@ func (NopReporter) Header(RunHeader)                                   {}
 func (NopReporter) Info(string)                                        {}
 func (NopReporter) Warn(string)                                        {}
 func (NopReporter) Progress(_, _, _ int, _ time.Duration)              {}
+func (NopReporter) ReviewerStarted(int)                                {}
 func (NopReporter) ReviewerDone(_ int, _ time.Duration, _, _ int)      {}
 func (NopReporter) ReviewerFailed(_, _ int, _ time.Duration, _ string) {}
 func (NopReporter) Aggregating(_, _ int)                               {}

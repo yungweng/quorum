@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -49,6 +49,23 @@ func New(out *os.File) *Writer {
 		w.Height = height
 	}
 	return w
+}
+
+// MaxWidth caps how wide a block of output grows: two classic eighty column
+// blocks, which is the widest layout the dashboard actually builds.
+//
+// Terminals are routinely wider than this, and a rule or a right aligned field
+// that runs to the edge of a very wide screen reads as a mistake rather than a
+// decision. Everything that measures itself uses Cols rather than Width, so
+// rules, columns and right aligned fields all end at the same place.
+const MaxWidth = 160
+
+// Cols is the width layout is built against.
+func (w *Writer) Cols() int {
+	if w.Width < MaxWidth {
+		return w.Width
+	}
+	return MaxWidth
 }
 
 // To returns a copy of w that renders somewhere else while keeping the
@@ -111,43 +128,25 @@ func (w *Writer) Println(s string) {
 	fmt.Fprintln(w.Out, w.indent+s)
 }
 
-// Section prints a heading with a blank line before it.
+// Section prints a heading with a blank line before it, and pushes its count
+// out to the right edge of the block so that every section's figure lines up
+// in one column instead of trailing its own title at a different offset.
 func (w *Writer) Section(title string, count int, total int) {
 	fmt.Fprintln(w.Out)
 	head := strings.ToUpper(title)
+	badge := ""
 	switch {
 	case total > 0:
-		head = fmt.Sprintf("%s  %d of %d", head, count, total)
+		badge = fmt.Sprintf("%d / %d", count, total)
 	case count > 0:
-		head = fmt.Sprintf("%s  %d", head, count)
+		badge = strconv.Itoa(count)
 	}
-	fmt.Fprintln(w.Out, w.Bold(head))
-}
-
-// Truncate shortens s to at most n display cells, marking the cut with an
-// ellipsis. It counts runes, which is right for the titles quorum prints.
-func Truncate(s string, n int) string {
-	if n <= 0 {
-		return ""
+	if badge == "" {
+		fmt.Fprintln(w.Out, w.Bold(head))
+		return
 	}
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	if n == 1 {
-		return "…"
-	}
-	runes := []rune(s)
-	return strings.TrimRight(string(runes[:n-1]), " ") + "…"
-}
-
-// Pad right-pads s with spaces to n cells. A string already at or over the
-// width is returned untouched, so a long field pushes the line instead of
-// being silently cut.
-func Pad(s string, n int) string {
-	if d := n - utf8.RuneCountInString(s); d > 0 {
-		return s + strings.Repeat(" ", d)
-	}
-	return s
+	gap := max(w.Cols()-Cells(head)-Cells(badge), 2)
+	fmt.Fprintln(w.Out, w.Bold(head)+strings.Repeat(" ", gap)+w.Dim(badge))
 }
 
 // Ago renders how long ago t was, in the shortest form that stays unambiguous.

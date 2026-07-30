@@ -6,9 +6,9 @@ hand the findings to a fix session, wait for CI, review again, until the PR is
 clean.
 
 ```bash
-quorum review 1811     # one review, posted as a comment
+quorum watch           # follow running, queued and finished work
+quorum review          # review the PR of the current branch
 quorum babysit 1811    # review, fix, CI, repeat until it is clean
-quorum                 # what the agent is doing right now
 ```
 
 The name is the mechanism: no single reviewer decides anything. Six of them run
@@ -38,8 +38,14 @@ brew install --cask codex     # Homebrew formulas cannot depend on a cask
 From a checkout, which needs Go 1.25 or newer:
 
 ```bash
-go build -o ~/.local/bin/quorum .
+make dev
 ```
+
+This writes `~/.local/bin/quorum` with a version such as
+`1.1.0-dev+3d85e2a.dirty`. The commit identifies the checkout; `dirty` means the
+build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
+`PATH`, every new terminal uses this build. Check with `which quorum` and
+`quorum --version`.
 
 Requires `gh` (authenticated), `git` and `codex`. `direnv` is optional and only
 needed for projects that have an `.envrc`.
@@ -49,6 +55,7 @@ needed for projects that have an `.envrc`.
 Run it from inside the repository checkout:
 
 ```bash
+quorum review                         # the PR of the current branch
 quorum review 1811
 quorum review https://github.com/owner/repo/pull/1811
 quorum review 1811 -n 8 --effort low
@@ -121,26 +128,44 @@ refuses dirty or diverged checkouts and fork PRs;
 your review and handles them on its own.
 
 ```text
-quorum 1.0.3                             agent loaded, every 5m, last poll 2m ago
+quorum 1.0.3                                            agent loaded, every 5m, last poll 2m ago
 
-REVIEWING  1 of 2
-  ● toaster-api #2016          stop emailing every user at 3am about crumbs
-    6m, 4/6 reviewers done
+  1/2 review   ·   1 fix   ·   1 queued   ·   3.4 load                                         ⠋
+------------------------------------------------------------------------------------------------
 
-BABYSITTING  2
-  ● toaster-api #2018          make the crumb tray endpoint idempotent
+REVIEWING                                                                                  1 / 2
+  ● toaster-api #2016           stop emailing every user at 3am about crumbs
+    agent · 6m, 4/6 reviewers done
+  ◆ payments #103               harden artifact health screening
+    manual · 2m, 0/6 reviewers done
+
+BABYSITTING                                                                                    1
+  ● toaster-api #2018           make the crumb tray endpoint idempotent
     1h04m   round 3/12   CI ✗ fix 2/3   review ✓   CI fix 2 ● 4m   5 commits   log ↗
-  ● toaster-api #2019          unflake the sourdough integration test
-    22m   round 1/12   CI ✓   review 0B 2C   fixing ● 18m   1 commit   log ↗
 
-QUEUED  1
-  ○ toaster-api #2014          allow browning levels above 11
+QUEUED                                                                                         1
+  ○ toaster-api #2014           allow browning levels above 11
     waiting for a free slot
+
+SYSTEM
+  scope      every repo that asks you
+  budget     2 at a time, 6 reviewers each, up to 12 Codex processes
+  cache      5.0 GB budget
 
 RECENT
   ✓ toaster-api #2002          12h ago    0 blockers, 1 critical, 0 suggestions  comment ↗
   ✗ toaster-api #1993          yesterday  failed after 2 attempt(s)
 ```
+
+The status bar under the version answers "what is this machine doing" before
+any section has to be read. From about 112 columns the sections move into two
+side by side columns, with REVIEWING and QUEUED on the left and BABYSITTING and
+SYSTEM on the right; below that they stack as above. RECENT keeps the full
+width either way.
+
+REVIEWING lists both agent reviews and `quorum review` commands running in a
+terminal. The label and symbol show which started each run. Its count covers
+agent slots only; a manual review does not spend one.
 
 BABYSITTING lists every fix loop in flight, whether the agent started it or you
 ran `quorum babysit` in a terminal. A fix loop can sit in one place for an hour,
@@ -163,9 +188,9 @@ posting a single review.
 ### Commands
 
 ```text
-quorum                 what is running, queued and finished
-quorum status          the same, spelled out
-quorum watch           the same, redrawn as it changes
+quorum                 show the command overview
+quorum watch           follow running, queued and finished work
+quorum status          show one dashboard snapshot
 quorum run <pr>        hand one PR to the agent right now
 quorum logs [-n N]     follow the log, --no-follow to just print the tail
 quorum doctor [--fix]  check the setup and report what to do about it

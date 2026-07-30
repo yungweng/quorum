@@ -127,6 +127,13 @@ golangci-lint run ./...
 go run . --help && go run . review --help && go run . babysit --help
 ```
 
+## Test data
+
+Test fixtures must be fictional. Never copy real usernames, organisations,
+repositories, branches, pull request numbers, titles, URLs, IDs or payloads
+into tests. Use obvious placeholders such as `acme/api`, `example-user` and PR
+`42`. Go module import paths are code references, not fixtures.
+
 ## Testing what has no test
 
 The end-to-end path spends real Codex tokens, so it is not in CI. When you

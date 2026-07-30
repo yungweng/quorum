@@ -24,24 +24,35 @@ func (w *Writer) SymFail() string {
 	return "FAIL:"
 }
 
-// Rule prints a horizontal separator.
+// Rule prints a horizontal separator across the block width.
+//
+// It used to be sixty columns whatever the terminal did, which on a wide
+// screen stops halfway under content that keeps going and is the single most
+// obvious sign of output that was never fitted to its terminal.
 func (w *Writer) Rule() {
-	line := strings.Repeat("-", 60)
+	unit := "-"
 	if w.Color {
-		line = strings.Repeat("─", 60)
+		unit = "─"
 	}
-	fmt.Fprintln(w.Out, w.Dim(line))
+	fmt.Fprintln(w.Out, w.Dim(strings.Repeat(unit, max(w.Cols(), 1))))
 }
 
-// Row prints one aligned "label   value" line of a run header.
+// labelColumn is the width of the label column in a run header. It is wide
+// enough for the longest label any header uses, so review and babysit line
+// their values up at the same offset.
+const labelColumn = 11
+
+// Row prints one aligned "label   value" line of a run header. Labels are dim
+// and lowercase so the eye lands on the values, which are what change.
 func (w *Writer) Row(label, value string) {
-	fmt.Fprintf(w.Out, "  %-10s %s\n", label, value)
+	fmt.Fprintf(w.Out, "  %s %s\n", w.Dim(Pad(strings.ToLower(label), labelColumn)), value)
 }
 
-// Step prints a section heading with a blank line before it.
+// Step prints a section heading with a blank line before it, in the same voice
+// as Section so a babysit run and the dashboard read as one tool.
 func (w *Writer) Step(title string) {
 	fmt.Fprintln(w.Out)
-	fmt.Fprintln(w.Out, w.Bold("==> "+title))
+	fmt.Fprintln(w.Out, w.Bold(strings.ToUpper(title)))
 }
 
 // Status is the single transient line at the bottom of the output, redrawn in
@@ -78,6 +89,73 @@ func (s *Status) Clear() {
 	}
 	fmt.Fprint(s.w.Out, "\r\x1b[K")
 	s.shown = false
+}
+
+// Spinner returns the current frame of the braille spinner for tick.
+func Spinner(tick int) string { return spinFrames[tick%len(spinFrames)] }
+
+// Bar draws a proportional progress bar n columns wide.
+//
+// The filled and empty halves use different characters rather than only
+// different colours, so the bar still reads as a bar where colour is off.
+func (w *Writer) Bar(done, total, n int) string {
+	if total <= 0 || n <= 0 {
+		return ""
+	}
+	filled := done * n / total
+	filled = min(max(filled, 0), n)
+	return w.Cyan(strings.Repeat("█", filled)) + w.Dim(strings.Repeat("░", n-filled))
+}
+
+// Panel is a block of lines redrawn in place, the multi line counterpart of
+// Status. It is what lets a review show one line per reviewer that updates as
+// they finish, instead of collapsing six parallel processes into one counter.
+//
+// Without a terminal it draws nothing at all, exactly like Status, so a piped
+// run leaves no cursor movement in the log and reports through its permanent
+// output instead.
+type Panel struct {
+	w     *Writer
+	lines int
+}
+
+func (w *Writer) Panel() *Panel { return &Panel{w: w} }
+
+// Draw replaces the panel's previous content with lines.
+//
+// Movement is relative to where the cursor is, so a panel near the bottom of
+// the screen survives the terminal scrolling under it. Each line erases its own
+// tail, and one erase at the end removes rows a previous, taller frame left
+// behind.
+func (p *Panel) Draw(lines []string) {
+	if !p.w.Color {
+		return
+	}
+	var b strings.Builder
+	if p.lines > 0 {
+		fmt.Fprintf(&b, "\x1b[%dF", p.lines)
+	}
+	for _, line := range lines {
+		b.WriteString("\r")
+		b.WriteString(line)
+		b.WriteString("\x1b[K\n")
+	}
+	b.WriteString("\x1b[J")
+	fmt.Fprint(p.w.Out, b.String())
+	p.lines = len(lines)
+}
+
+// Freeze stops redrawing and leaves the last frame on the screen, which is how
+// the finished reviewer list stays in the scrollback.
+func (p *Panel) Freeze() { p.lines = 0 }
+
+// Clear removes the panel entirely.
+func (p *Panel) Clear() {
+	if !p.w.Color || p.lines == 0 {
+		return
+	}
+	fmt.Fprintf(p.w.Out, "\x1b[%dF\x1b[J", p.lines)
+	p.lines = 0
 }
 
 // Notify sends an OSC 777 terminal notification.

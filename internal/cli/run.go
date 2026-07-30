@@ -144,6 +144,16 @@ func (a *app) cmdLogs(args []string) int {
 	}
 }
 
+// watchInterval is how often the dashboard is rebuilt.
+//
+// One frame costs about twelve microseconds and a handful of small file reads,
+// so the interval is set by how quickly a change should show rather than by
+// what it costs: a second is short enough that elapsed times count up visibly
+// and a finished reviewer appears at once. It is not the agent's poll
+// interval, which decides how often GitHub is asked and is configured
+// separately. A pass that finds nothing changed paints nothing at all.
+const watchInterval = time.Second
+
 // cmdWatch redraws the dashboard until interrupted.
 func (a *app) cmdWatch(args []string) int {
 	_ = args
@@ -181,11 +191,12 @@ func (a *app) cmdWatch(args []string) int {
 			a.out.Paint(next)
 			painted = next
 		}
+		a.tick++
 
 		select {
 		case <-ctx.Done():
 			return 0
-		case <-time.After(3 * time.Second):
+		case <-time.After(watchInterval):
 		}
 	}
 }

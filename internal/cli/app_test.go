@@ -1,10 +1,47 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/paths"
+	"github.com/yungweng/quorum/internal/ui"
 )
+
+func TestNoCommandShowsPrimaryCommandHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	a := &app{
+		version: "1.2.3",
+		cfg:     config.Config{PollInterval: 300},
+		p:       paths.P{Config: "/tmp/quorum-config"},
+		out:     ui.New(os.Stdout).To(&stdout),
+		err:     ui.New(os.Stderr).To(&stderr),
+	}
+
+	if code := a.run(nil); code != exitOK {
+		t.Fatalf("run(nil) exit code = %d, want %d", code, exitOK)
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"Usage:\n  quorum <command> [options]",
+		"Main commands:",
+		"quorum watch",
+		"quorum review [pr]",
+		"quorum babysit [pr]",
+		"[pr] defaults to the pull request for the current branch.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("help is missing %q:\n%s", want, got)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("run(nil) wrote to stderr: %s", stderr.String())
+	}
+}
 
 func TestWidenPathDoesNotRunNPMWhenSupportedToolsArePresent(t *testing.T) {
 	dir := t.TempDir()
