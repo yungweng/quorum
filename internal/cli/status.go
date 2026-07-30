@@ -276,6 +276,12 @@ func (a *app) sectionActive(
 		w.Printf("      %s\n", w.Dim("review · agent · "+since+reviewProgress(e.RunDir, a.cfg.Reviewers)))
 	}
 	for _, run := range manual {
+		if run.Number == 0 {
+			branchLine(w, w.Magenta("◆"), run.Repo, run.Branch)
+			w.Printf("      %s\n", w.Dim("review · manual · "+ui.Duration(time.Since(run.StartedAt))+
+				" · "+reviewProgress(run.RunDir, run.Reviewers)))
+			continue
+		}
 		entry := state.Entry{
 			Key: run.Key(),
 			Record: state.Record{
@@ -290,6 +296,11 @@ func (a *app) sectionActive(
 	}
 	now := time.Now()
 	for _, p := range babysits {
+		if p.Number == 0 {
+			branchLine(w, w.Magenta("●"), p.Repo, p.Branch)
+			w.Printf("      %s\n", babysitTrack(w, p, now))
+			continue
+		}
 		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
 		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
 		w.Printf("      %s\n", babysitTrack(w, p, now))
@@ -305,6 +316,15 @@ func (a *app) sectionActive(
 		}
 		w.Printf("      %s\n", w.Dim("queued · "+reason))
 	}
+}
+
+func branchLine(w *ui.Writer, mark, repo, branch string) {
+	_, name, ok := strings.Cut(repo, "/")
+	if !ok {
+		name = repo
+	}
+	label := name + " " + branch
+	w.Printf("  %s %s\n", mark, w.Bold(ui.Truncate(label, max(w.Cols()-4, 1))))
 }
 
 func reviewProgress(runDir string, requested int) string {

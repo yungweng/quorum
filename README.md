@@ -7,7 +7,7 @@ clean.
 
 ```bash
 quorum watch           # follow running, queued and finished work
-quorum review          # review the PR of the current branch
+quorum review          # review the current branch, with or without a PR
 quorum babysit 1811    # review, fix, CI, repeat until it is clean
 ```
 
@@ -55,19 +55,25 @@ needed for projects that have an `.envrc`.
 Run it from inside the repository checkout:
 
 ```bash
-quorum review                         # the PR of the current branch
+quorum review                         # current branch; its PR when one exists
 quorum review 1811
 quorum review https://github.com/owner/repo/pull/1811
 quorum review 1811 -n 8 --effort low
-quorum review 1811 --dry-run       # write the comment, do not post it
+quorum review 1811 --dry-run       # write the report, do not post it
 ```
 
+If the current branch has no open PR, it reviews the pushed branch against the
+repository's default branch and writes the report to disk without posting it.
+The checkout must be clean and match `origin`; use `--base` to choose another
+base branch.
+
 It builds a detached worktree under `~/.cache/quorum/reviews/`, runs `direnv
-allow` unless the PR itself changed an `.envrc`, links in cached dependency
+allow` unless the target itself changed an `.envrc`, links in cached dependency
 trees and enters the environment once so the install hook runs one time per run
 rather than once per reviewer, then fans out `codex exec review`. The outputs
-are merged into one comment, checked for structure, and posted. Each run also
-writes a machine-readable `findings.json` beside the comment.
+are merged into one report and checked for structure. PR reviews post it;
+branch-only reviews keep it on disk. Each run also writes a machine-readable
+`findings.json` beside the report.
 
 A failed run keeps its worktree, so the expensive reviewer passes never have to
 run twice: `quorum review 1811 --resume-run <dir>` picks it up.
@@ -82,7 +88,7 @@ You implement, babysit iterates. It expects the first implementation to be
 committed and pushed.
 
 ```bash
-quorum babysit                  # the PR of the current branch
+quorum babysit                  # current branch; its PR when one exists
 quorum babysit 1811
 quorum babysit 1811 --effort high "Focus on the time-tracking module"
 ```
@@ -91,6 +97,11 @@ The loop: wait for CI, review, decide. Zero Blockers and Critical means done.
 Otherwise the review comment goes into a Codex session that checks each finding
 for whether it is real or intended, fixes the real ones, commits and pushes. The
 pipeline watches CI, posts a comment logging what was fixed, and reviews again.
+
+If the current branch has no open PR, `babysit` runs the same review-fix rounds
+on the clean, pushed branch. It still runs repository checks in each fix step
+and confirms every push on `origin`, but it skips PR CI and PR comments because
+neither exists yet.
 
 Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.

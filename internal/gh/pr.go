@@ -54,6 +54,44 @@ func (c *Client) ViewPR(ctx context.Context, dir string, number int) (FullPR, er
 	return pr, nil
 }
 
+// OpenPRNumbersForBranch returns the open pull requests whose head has the
+// given branch name. The caller decides whether zero, one or several matches
+// are valid for its workflow.
+func (c *Client) OpenPRNumbersForBranch(ctx context.Context, dir, branch string) ([]int, error) {
+	out, err := c.runIn(ctx, dir, "pr", "list", "--head", branch, "--state", "open",
+		"--limit", "2", "--json", "number")
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("gh pr list --head %s: %w", branch, err)
+	}
+	numbers := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if row.Number > 0 {
+			numbers = append(numbers, row.Number)
+		}
+	}
+	return numbers, nil
+}
+
+// DefaultBranch returns the repository's default branch for the checkout.
+func (c *Client) DefaultBranch(ctx context.Context, dir string) (string, error) {
+	out, err := c.runIn(ctx, dir, "repo", "view", "--json", "defaultBranchRef",
+		"-q", ".defaultBranchRef.name")
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("%w: gh repo view returned no default branch", ErrTransient)
+	}
+	return branch, nil
+}
+
 // CurrentRepo returns "owner/repo" for the checkout in dir.
 func (c *Client) CurrentRepo(ctx context.Context, dir string) (string, error) {
 	out, err := c.runIn(ctx, dir, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")

@@ -47,11 +47,13 @@ func (r *run) startReview(round int) {
 	opts := review.Options{
 		Repo:           r.o.Repo,
 		Number:         r.pr.Number,
+		Branch:         branchOnlyValue(r.target.BranchOnly, r.branch),
 		RepoRoot:       r.o.RepoRoot,
 		Runs:           r.o.Reviewers,
 		Model:          r.o.ReviewModel,
 		Effort:         r.o.ReviewEffort,
-		Post:           true,
+		BaseBranch:     r.pr.BaseRefName,
+		Post:           !r.target.BranchOnly,
 		UseDirenv:      r.o.UseDirenv,
 		RunsDir:        r.o.ReviewRunsDir,
 		SharedRunsDirs: []string{r.o.RunsDir},
@@ -64,6 +66,13 @@ func (r *run) startReview(round int) {
 		res, err := r.p.Review.Run(ctx, opts)
 		br.done <- bgResult{res, err}
 	}()
+}
+
+func branchOnlyValue(branchOnly bool, branch string) string {
+	if branchOnly {
+		return branch
+	}
+	return ""
 }
 
 // finishReview joins the running review and returns its findings plus the

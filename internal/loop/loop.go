@@ -24,6 +24,7 @@ import (
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/target"
 )
 
 // Failures the CLI maps onto the exit codes the shell version defined, so
@@ -106,6 +107,7 @@ type RoundEntry struct {
 // Result is what a finished pipeline run produced.
 type Result struct {
 	PR              gh.FullPR
+	BranchOnly      bool
 	Rounds          int
 	Converged       bool
 	DisputeAccepted bool
@@ -156,6 +158,7 @@ type run struct {
 	ctx context.Context
 	rep Reporter
 
+	target       target.Target
 	pr           gh.FullPR
 	branch       string
 	root         string
@@ -196,22 +199,25 @@ type run struct {
 	prog Progress
 }
 
-// prepare resolves the PR, checks the preconditions and sets up the worktree.
+// prepare resolves the PR or current pushed branch, checks the preconditions
+// and sets up the worktree.
 func (r *run) prepare() error {
-	pr, err := r.p.GH.ViewPR(r.ctx, r.o.RepoRoot, r.o.Number)
+	tgt, err := target.Resolve(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot, r.o.Number, "", "")
 	if err != nil {
 		return err
 	}
-	if pr.State != "OPEN" {
+	pr := tgt.PR
+	if !tgt.BranchOnly && pr.State != "OPEN" {
 		return fmt.Errorf("PR is %s, expected an open PR", pr.State)
 	}
 	// The pipeline fetches and pushes refs/heads/<branch> on origin. For a fork
 	// PR that branch lives in the fork, so a same-named origin branch would be
 	// reviewed and pushed instead: the wrong branch, silently.
-	if pr.IsCrossRepository {
+	if !tgt.BranchOnly && pr.IsCrossRepository {
 		return fmt.Errorf("PR #%d is a cross-repository (fork) PR; the pipeline can only work on branches in %s",
 			pr.Number, r.o.Repo)
 	}
+	r.target = tgt
 	r.pr = pr
 	r.branch = pr.HeadRefName
 
@@ -240,8 +246,12 @@ func (r *run) prepare() error {
 		return err
 	}
 	if headSHA != pr.HeadRefOid {
-		r.rep.Warn(fmt.Sprintf("origin/%s (%s) differs from GitHub metadata (%s); using origin/%s",
-			r.branch, headSHA, pr.HeadRefOid, r.branch))
+		source := "GitHub PR metadata"
+		if tgt.BranchOnly {
+			source = "the branch head resolved at startup"
+		}
+		r.rep.Warn(fmt.Sprintf("origin/%s (%s) differs from %s (%s); using origin/%s",
+			r.branch, headSHA, source, pr.HeadRefOid, r.branch))
 	}
 	if r.p.Git.HasLocalBranch(r.ctx, r.o.RepoRoot, r.branch) {
 		localSHA, err := r.p.Git.RevParse(r.ctx, r.o.RepoRoot, "refs/heads/"+r.branch)
@@ -255,8 +265,12 @@ func (r *run) prepare() error {
 	}
 
 	stamp := time.Now().Format("20060102-150405")
-	r.root = filepath.Join(r.o.RunsDir,
-		fmt.Sprintf("%s-pr-%d-%s", strings.ReplaceAll(r.o.Repo, "/", "-"), pr.Number, stamp))
+	targetName := fmt.Sprintf("pr-%d", pr.Number)
+	if tgt.BranchOnly {
+		targetName = "branch-" + safeRunPart(r.branch)
+	}
+	r.root = filepath.Join(r.o.RunsDir, fmt.Sprintf("%s-%s-%s",
+		strings.ReplaceAll(r.o.Repo, "/", "-"), targetName, stamp))
 	r.worktree = filepath.Join(r.root, "worktree")
 	r.logDir = filepath.Join(r.root, "logs")
 	r.msgDir = filepath.Join(r.root, "messages")
@@ -304,8 +318,12 @@ func (r *run) prepare() error {
 	r.codex = codex.Options{
 		Bin: r.o.CodexBin, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 	}
-	r.rules = standingRules(r.branch, !r.o.Interactive)
-	r.prCtx = prContext(pr.Number, pr.Title, r.branch, pr.BaseRefName, pr.URL, pr.Body, r.o.Context)
+	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly)
+	if tgt.BranchOnly {
+		r.prCtx = branchContext(r.branch, pr.BaseRefName, r.o.Context)
+	} else {
+		r.prCtx = prContext(pr.Number, pr.Title, r.branch, pr.BaseRefName, pr.URL, pr.Body, r.o.Context)
+	}
 
 	if r.o.UseDirenv {
 		if err := r.setupDirenv(); err != nil {
@@ -315,26 +333,41 @@ func (r *run) prepare() error {
 
 	r.rep.Header(Header{
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title,
-		Branch: r.branch, Base: pr.BaseRefName,
+		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		FixTimeout: r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
 	})
+	if tgt.BranchOnly {
+		r.rep.Warn("no open PR: GitHub PR checks and PR comments are skipped; fix steps still run repository tests")
+	}
 	return nil
+}
+
+func safeRunPart(s string) string {
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	s = strings.ReplaceAll(s, "..", "-")
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 // execute is the main loop.
 func (r *run) execute() (*Result, error) {
-	res := &Result{PR: r.pr, RunDir: r.root}
+	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, RunDir: r.root}
 
-	r.rep.Step("CI")
-	r.enter(PhaseCI)
-	// The first review only needs the pushed head, so it starts now and runs
-	// while the initial CI wait happens.
 	r.startReview(1)
-	if err := r.ensureCIGreen(); err != nil {
-		r.killReview()
-		return res, err
+	if !r.target.BranchOnly {
+		r.rep.Step("CI")
+		r.enter(PhaseCI)
+		// The first review only needs the pushed head, so it starts now and runs
+		// while the initial CI wait happens.
+		if err := r.ensureCIGreen(); err != nil {
+			r.killReview()
+			return res, err
+		}
 	}
 
 	for iteration := 1; iteration <= r.o.MaxIter; iteration++ {
@@ -374,7 +407,7 @@ func (r *run) execute() (*Result, error) {
 		preFixSHA := currentSHA
 		tag := fmt.Sprintf("fix-round-%d", iteration)
 
-		if err := r.codexCall(tag, fixRoundPrompt(r.pr.Number, comment)); err != nil {
+		if err := r.codexCall(tag, fixRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, comment)); err != nil {
 			return res, err
 		}
 		if err := r.questionGate(tag); err != nil {
@@ -392,7 +425,7 @@ func (r *run) execute() (*Result, error) {
 			if !hasMarker(r.lastMsg, MarkerDisputed) {
 				r.rep.Notify("Festgefahren", fmt.Sprintf("Fix-Runde %d hat nichts geaendert", iteration))
 				return res, fmt.Errorf("%w: round %d, a human is needed: %s",
-					ErrNoProgress, iteration, r.pr.URL)
+					ErrNoProgress, iteration, r.targetReference())
 			}
 			if err := r.disputeGate(tag, preFixSHA); err != nil {
 				return res, err
@@ -416,18 +449,34 @@ func (r *run) execute() (*Result, error) {
 		if iteration < r.o.MaxIter {
 			r.startReview(iteration + 1)
 		}
-		if err := r.ensureCIGreen(); err != nil {
-			r.killReview()
-			return res, err
+		if !r.target.BranchOnly {
+			if err := r.ensureCIGreen(); err != nil {
+				r.killReview()
+				return res, err
+			}
 		}
 	}
 
 	res.RoundLog = r.roundLog
 	if !res.Converged {
-		r.rep.Notify("Nicht konvergiert", fmt.Sprintf("PR #%d hat nach %d Runden weiter Findings", r.pr.Number, r.o.MaxIter))
+		r.rep.Notify("Nicht konvergiert", fmt.Sprintf("%s hat nach %d Runden weiter Findings", r.targetLabel(), r.o.MaxIter))
 		return res, fmt.Errorf("%w after %d review rounds", ErrNotConverged, r.o.MaxIter)
 	}
 	return res, nil
+}
+
+func (r *run) targetLabel() string {
+	if r.target.BranchOnly {
+		return "Branch " + r.branch
+	}
+	return fmt.Sprintf("PR #%d", r.pr.Number)
+}
+
+func (r *run) targetReference() string {
+	if r.target.BranchOnly || r.pr.URL == "" {
+		return r.branch
+	}
+	return r.pr.URL
 }
 
 // codexCall runs a step in the shared session, starting it on the first call.
@@ -539,16 +588,21 @@ func (r *run) pushBranch() error {
 
 	deadline := time.Now().Add(headSettleTimeout)
 	for {
-		remote, _ := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+		var remote string
+		if r.target.BranchOnly {
+			remote, _ = r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
+		} else {
+			remote, _ = r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+		}
 		if remote == pushedSHA {
 			return nil
 		}
 		if pushErr != nil {
-			return fmt.Errorf("git push failed and GitHub does not have %s:\n%s", pushedSHA, out)
+			return fmt.Errorf("git push failed and origin/%s does not have %s:\n%s", r.branch, pushedSHA, out)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("GitHub still reports PR head %s instead of the pushed %s after %s; is someone else pushing to %s?",
-				remote, pushedSHA, headSettleTimeout, r.branch)
+			return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
+				r.branch, remote, pushedSHA, headSettleTimeout)
 		}
 		r.rep.Info("waiting for GitHub to register the pushed head...")
 		select {
@@ -583,6 +637,9 @@ func (r *run) recordRound(label, preSHA string) {
 // well; the commit list is the fallback. The pipeline posts it rather than the
 // session, which is what keeps it a normal comment from the user.
 func (r *run) postFixComment(round int, preSHA string) {
+	if r.target.BranchOnly {
+		return
+	}
 	body := section(r.lastMsg, MarkerComment)
 	if body == "" {
 		if data, err := os.ReadFile(filepath.Join(r.msgDir, fmt.Sprintf("fix-round-%d.md", round))); err == nil {

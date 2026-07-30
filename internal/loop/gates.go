@@ -27,7 +27,7 @@ func (r *run) questionGate(tagBase string) error {
 			if n > maxQuestionBounces {
 				r.rep.Notify("Festgefahren", "Codex stellt weiter Fragen im autonomen Modus")
 				return fmt.Errorf("%w: Codex keeps asking questions although autonomous mode told it to decide itself; a human is needed: %s",
-					ErrGateAborted, r.pr.URL)
+					ErrGateAborted, r.targetReference())
 			}
 			r.rep.Info("autonomous mode: sending the questions back for Codex to decide itself")
 			if err := r.resume(fmt.Sprintf("%s-answers-%d", tagBase, n), bounceQuestionsPrompt); err != nil {
@@ -121,7 +121,7 @@ func (r *run) disputeGate(tagBase, preSHA string) error {
 		if !hasMarker(r.lastMsg, MarkerDisputed) {
 			r.rep.Notify("Festgefahren", "Dispute-Runde ohne Commits und ohne Dispute")
 			return fmt.Errorf("%w: Codex neither fixed nor still disputes the remaining findings; a human is needed: %s",
-				ErrNoProgress, r.pr.URL)
+				ErrNoProgress, r.targetReference())
 		}
 	}
 }
