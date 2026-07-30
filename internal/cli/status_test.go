@@ -16,6 +16,7 @@ import (
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/proc"
+	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -30,6 +31,7 @@ func testApp(t *testing.T) *app {
 		StateFile:   filepath.Join(dir, "state.json"),
 		Log:         filepath.Join(dir, "log"),
 		RunningDir:  filepath.Join(dir, "running"),
+		ManualDir:   filepath.Join(dir, "manual-reviews"),
 		ReviewRuns:  filepath.Join(dir, "runs"),
 		BabysitRuns: filepath.Join(dir, "babysit"),
 		DepsCache:   filepath.Join(dir, "deps"),
@@ -77,6 +79,36 @@ func babysit(t *testing.T, a *app, p loop.Progress) {
 	}
 }
 
+// manualReview fakes the small live file written by `quorum review`.
+func manualReview(t *testing.T, a *app, p review.LiveRun, events string) {
+	t.Helper()
+	dir := filepath.Join(a.p.ReviewRuns, fmt.Sprintf("run-%d", p.Number))
+	if err := os.MkdirAll(filepath.Join(dir, "output"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	release, err := proc.Claim(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	p.RunDir = dir
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(a.p.ManualDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.p.ManualDir, fmt.Sprintf("%d.json", p.PID)), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if events != "" {
+		if err := os.WriteFile(filepath.Join(dir, "output", "events.log"), []byte(events), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // marker fakes the claim the agent takes on a review slot.
 func marker(t *testing.T, a *app, key string, pid int) {
 	t.Helper()
@@ -87,6 +119,40 @@ func marker(t *testing.T, a *app, key string, pid int) {
 	t.Cleanup(m.Release)
 	if err := m.Adopt(pid); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "an earlier review"
+		r.Mark(state.OK, "")
+	})
+	manualReview(t, a, review.LiveRun{
+		PID: os.Getpid(), Repo: "acme/api", Number: 42, Title: "tenant scoping",
+		StartedAt: time.Now().Add(-2 * time.Minute), Reviewers: 2,
+	}, "start\nok 1 30 1\n")
+
+	screen, shown := render(t, a, nil)
+	for _, want := range []string{
+		"REVIEWING  0 of 6", "api #42", "tenant scoping",
+		"manual", "2m", "1/2 reviewers done",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("manual review is missing %q:\n%s", want, screen)
+		}
+	}
+	if strings.Contains(screen, "nothing under review right now") {
+		t.Errorf("a manual review was reported as idle:\n%s", screen)
+	}
+	if strings.Contains(screen, "an earlier review") {
+		t.Errorf("the superseded recent result remained visible:\n%s", screen)
+	}
+	if strings.Contains(screen, "agent ·") {
+		t.Errorf("the manual review was labelled as an agent run:\n%s", screen)
+	}
+	if len(shown) != 1 || shown[0] != "acme/api#42" {
+		t.Errorf("shown = %v, want one manual review key", shown)
 	}
 }
 
@@ -229,7 +295,7 @@ func TestDashboardShowsADirectRunBeforeItsStateUpdate(t *testing.T) {
 			if strings.Contains(screen, "nothing under review right now") {
 				t.Errorf("a claimed direct review was reported as idle:\n%s", screen)
 			}
-			for _, want := range []string{"REVIEWING  1 of 6", "api #42", "starting up"} {
+			for _, want := range []string{"REVIEWING  1 of 6", "api #42", "agent", "starting up"} {
 				if !strings.Contains(screen, want) {
 					t.Errorf("preparing direct review is missing %q:\n%s", want, screen)
 				}

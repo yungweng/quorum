@@ -16,6 +16,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/loop"
+	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -60,6 +61,11 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	for _, p := range babysits {
 		babysitPID[p.PID] = true
 	}
+	manualReviews := review.LiveRuns(a.p.ManualDir)
+	manualKeys := make(map[string]bool, len(manualReviews))
+	for _, run := range manualReviews {
+		manualKeys[run.Key()] = true
+	}
 
 	a.header(w)
 
@@ -72,6 +78,12 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 			// record. While that preparation runs, the live claim is the more
 			// current source of truth.
 			running = append(running, e)
+			continue
+		}
+		if manualKeys[e.Key] && e.Status != state.Running {
+			// A manual review supersedes an older result or queue entry while
+			// it runs. A concurrent agent review remains visible as its own
+			// line so the two sources cannot be confused.
 			continue
 		}
 		switch e.Status {
@@ -104,18 +116,28 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		recent = recent[:recentCount]
 	}
 
-	a.sectionReviewing(w, running, len(live), live, ends)
+	a.sectionReviewing(w, running, manualReviews, len(live), live, ends)
 	a.sectionBabysitting(w, babysits, ends)
 	a.sectionQueued(w, queued, ends)
 	a.sectionRecent(w, recent, ends)
 	a.sectionSystem(w)
 
-	shown := make([]string, 0, len(running)+len(queued)+len(recent)+len(babysits))
+	shown := make([]string, 0, len(running)+len(manualReviews)+len(queued)+len(recent)+len(babysits))
 	shownSet := make(map[string]bool, cap(shown))
 	for _, group := range [][]state.Entry{running, queued, recent} {
 		for _, e := range group {
+			if shownSet[e.Key] {
+				continue
+			}
 			shown = append(shown, e.Key)
 			shownSet[e.Key] = true
+		}
+	}
+	for _, run := range manualReviews {
+		key := run.Key()
+		if !shownSet[key] {
+			shown = append(shown, key)
+			shownSet[key] = true
 		}
 	}
 	for _, p := range babysits {
@@ -161,9 +183,16 @@ func (a *app) agentLine() string {
 // section that does not exist, which is the wrong answer to "is anything being
 // reviewed right now". Every stage of the pipeline therefore keeps its heading
 // and says so in words.
-func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, slotsUsed int, live map[string]runner.Marker, ends map[string]string) {
+func (a *app) sectionReviewing(
+	w *ui.Writer,
+	running []state.Entry,
+	manual []review.LiveRun,
+	slotsUsed int,
+	live map[string]runner.Marker,
+	ends map[string]string,
+) {
 	w.Section("reviewing", slotsUsed, a.cfg.MaxConcurrent)
-	if len(running) == 0 {
+	if len(running) == 0 && len(manual) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing under review right now"))
 		return
 	}
@@ -178,20 +207,40 @@ func (a *app) sectionReviewing(w *ui.Writer, running []state.Entry, slotsUsed in
 			if t := e.Started(); !t.IsZero() {
 				since = ui.Duration(time.Since(t))
 			}
-			progress := "starting up"
-			if p, ok := runner.ReadProgress(e.RunDir, a.cfg.Reviewers); ok {
-				progress = fmt.Sprintf("%d/%d reviewers done", p.Done, p.Requested)
-				if p.Failed > 0 {
-					progress += fmt.Sprintf(", %d failed", p.Failed)
-				}
-				if p.Done+p.Failed >= p.Requested {
-					progress = "aggregating"
-				}
-			}
-			detail = w.Dim(strings.TrimPrefix(since+", ", ", ") + progress)
+			progress := reviewProgress(e.RunDir, a.cfg.Reviewers)
+			detail = w.Cyan("agent") +
+				w.Dim(" · "+strings.TrimPrefix(since+", ", ", ")+progress)
 		}
 		w.Printf("    %s\n", detail)
 	}
+	for _, run := range manual {
+		entry := state.Entry{
+			Key: run.Key(),
+			Record: state.Record{
+				Title:     run.Title,
+				StartedAt: run.StartedAt.Format(time.RFC3339),
+				RunDir:    run.RunDir,
+			},
+		}
+		a.prLine(w, w.Magenta("◆"), entry, ends[entry.Key])
+		since := ui.Duration(time.Since(run.StartedAt))
+		progress := reviewProgress(run.RunDir, run.Reviewers)
+		w.Printf("    %s%s\n", w.Magenta("manual"), w.Dim(" · "+since+", "+progress))
+	}
+}
+
+func reviewProgress(runDir string, requested int) string {
+	progress := "starting up"
+	if p, ok := runner.ReadProgress(runDir, requested); ok {
+		progress = fmt.Sprintf("%d/%d reviewers done", p.Done, p.Requested)
+		if p.Failed > 0 {
+			progress += fmt.Sprintf(", %d failed", p.Failed)
+		}
+		if p.Done+p.Failed >= p.Requested {
+			progress = "aggregating"
+		}
+	}
+	return progress
 }
 
 // sectionBabysitting shows the fix loops in flight, whichever way they were

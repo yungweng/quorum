@@ -115,8 +115,12 @@ func (a *app) cmdReview(argv []string) int {
 	notify := a.cfg.Notify && !args.boolean("no-notify")
 	rep := &termReporter{out: a.out, notify: notify}
 	rep.status = a.out.Status()
+	live := review.TrackLive(rep, a.p.ManualDir)
+	defer live.Close()
 
-	runner := &review.Runner{GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: rep}
+	runner := &review.Runner{
+		GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: live,
+	}
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 
 	res, err := runner.Run(ctx, o)

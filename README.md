@@ -125,7 +125,9 @@ quorum 1.0.3                             agent loaded, every 5m, last poll 2m ag
 
 REVIEWING  1 of 2
   ● toaster-api #2016          stop emailing every user at 3am about crumbs
-    6m, 4/6 reviewers done
+    agent · 6m, 4/6 reviewers done
+  ◆ payments #103             harden artifact health screening
+    manual · 2m, 0/6 reviewers done
 
 BABYSITTING  2
   ● toaster-api #2018          make the crumb tray endpoint idempotent
@@ -141,6 +143,10 @@ RECENT
   ✓ toaster-api #2002          12h ago    0 blockers, 1 critical, 0 suggestions  comment ↗
   ✗ toaster-api #1993          yesterday  failed after 2 attempt(s)
 ```
+
+REVIEWING lists both agent reviews and `quorum review` commands running in a
+terminal. The label and symbol show which started each run. Its count covers
+agent slots only; a manual review does not spend one.
 
 BABYSITTING lists every fix loop in flight, whether the agent started it or you
 ran `quorum babysit` in a terminal. A fix loop can sit in one place for an hour,
