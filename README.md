@@ -121,8 +121,10 @@ Three situations that used to need a human are decided automatically. Pass
   accepted on first sight: the session must survive one forced re-check where it
   actively tries to reproduce each finding. **A dispute it upholds still appears
   on the PR as a review finding, so read the run summary before merging.**
-- **Changed `.envrc` files.** The diff is printed and `direnv allow` runs. With
-  the sandbox bypassed the session can execute anything anyway.
+- **Changed `.envrc` files.** A run stops before loading an `.envrc` changed by
+  the target unless you pass `--allow-envrc-change` after reading it. Changes
+  made during a fix round are printed before `direnv allow` runs; with the
+  sandbox bypassed the session can execute anything anyway.
 
 Every fix round ends with a comment on the PR describing what was fixed and what
 was left alone as intended. The session writes the text, in the language of the

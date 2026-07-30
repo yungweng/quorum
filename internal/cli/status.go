@@ -490,7 +490,9 @@ func (a *app) sectionHistory(w *ui.Writer, fallback []state.Entry, ends map[stri
 	keys := make([]string, 0, len(runs))
 	now := time.Now()
 	for _, run := range runs {
-		keys = append(keys, run.Key)
+		if run.Number() > 0 {
+			keys = append(keys, run.Key)
+		}
 		w.Printf("  %s %s %s%s %s%s\n",
 			historyMark(w, run),
 			w.Dim(ui.Pad(historyWhen(now, run.EndedAt), 6)),
@@ -646,7 +648,7 @@ func (a *app) footer(w *ui.Writer) {
 // runLabel renders the "insura #103" column for a logged run, linked to the
 // pull request and struck through once it has been merged.
 func runLabel(w *ui.Writer, run history.Run, end string) string {
-	label := fmt.Sprintf("%s #%d", run.Name(), run.Number())
+	label := runLabelText(run)
 	styled := w.Bold(label)
 	if end == gh.StateMerged {
 		styled = w.Strike(styled)
@@ -655,11 +657,18 @@ func runLabel(w *ui.Writer, run history.Run, end string) string {
 }
 
 func runLabelPad(run history.Run) string {
-	label := fmt.Sprintf("%s #%d", run.Name(), run.Number())
+	label := runLabelText(run)
 	if n := labelWidth - ui.Cells(label); n > 0 {
 		return strings.Repeat(" ", n)
 	}
 	return ""
+}
+
+func runLabelText(run history.Run) string {
+	if run.Branch != "" {
+		return fmt.Sprintf("%s %s", run.Name(), run.Branch)
+	}
+	return fmt.Sprintf("%s #%d", run.Name(), run.Number())
 }
 
 // findingsText is the one line summary of a finished review from the state

@@ -64,6 +64,7 @@ PR CI and PR comments.
 | `--verbose` | Stream the full output instead of the status line | off |
 | `--no-notify` | Disable terminal notifications | off |
 | `--no-direnv` | Skip direnv | off |
+| `--allow-envrc-change` | Allow `direnv allow` when the target changed `.envrc` | off |
 | `--keep-worktree` | Keep the worktree after success | off |
 | `-h`, `--help` | Show the help | |
 
@@ -111,6 +112,8 @@ posting or committing something misleading.
 
 ### quorum babysit
 
+- **The target changed an `.envrc`.** The run stops before loading it unless
+  you pass `--allow-envrc-change` after reading the diff yourself.
 - **Do not push to the target branch while a run is active.** A review refuses
   to use stale findings when the head moves under it, and the pipeline treats
   that as fatal.

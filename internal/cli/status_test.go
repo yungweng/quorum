@@ -469,6 +469,30 @@ func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
 	}
 }
 
+func TestDashboardRendersBranchHistoryWithoutTrackingItAsAPR(t *testing.T) {
+	a := testApp(t)
+	run := history.Run{
+		Key:      history.BranchKey("acme/api", "feature/crumb-tray"),
+		Branch:   "feature/crumb-tray",
+		Kind:     history.KindReview,
+		Source:   history.SourceManual,
+		Outcome:  history.OK,
+		Reviewed: true,
+		EndedAt:  time.Now(),
+	}
+	if err := history.Append(a.p.HistoryFile, run); err != nil {
+		t.Fatal(err)
+	}
+
+	screen, tracked := render(t, a, nil)
+	if !strings.Contains(screen, "api feature/crumb-tray") || strings.Contains(screen, "api #0") {
+		t.Fatalf("branch history was not rendered as a branch:\n%s", screen)
+	}
+	if slices.Contains(tracked, run.Key) {
+		t.Fatalf("branch key %q was sent for PR end-state tracking", run.Key)
+	}
+}
+
 func TestDashboardHonoursTheConfiguredHistorySize(t *testing.T) {
 	a := testApp(t)
 	a.cfg.History = 3

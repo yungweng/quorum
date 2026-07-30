@@ -54,28 +54,20 @@ func (c *Client) ViewPR(ctx context.Context, dir string, number int) (FullPR, er
 	return pr, nil
 }
 
-// OpenPRNumbersForBranch returns the open pull requests whose head has the
-// given branch name. The caller decides whether zero, one or several matches
-// are valid for its workflow.
-func (c *Client) OpenPRNumbersForBranch(ctx context.Context, dir, branch string) ([]int, error) {
+// OpenPRsForBranch returns the open pull requests whose head has the given
+// branch name. GitHub may include same-named branches from forks, so the caller
+// must still verify the head repository and commit.
+func (c *Client) OpenPRsForBranch(ctx context.Context, dir, branch string) ([]FullPR, error) {
 	out, err := c.runIn(ctx, dir, "pr", "list", "--head", branch, "--state", "open",
-		"--limit", "2", "--json", "number")
+		"--limit", "100", "--json", fullPRFields)
 	if err != nil {
 		return nil, err
 	}
-	var rows []struct {
-		Number int `json:"number"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
+	var prs []FullPR
+	if err := json.Unmarshal(out, &prs); err != nil {
 		return nil, fmt.Errorf("gh pr list --head %s: %w", branch, err)
 	}
-	numbers := make([]int, 0, len(rows))
-	for _, row := range rows {
-		if row.Number > 0 {
-			numbers = append(numbers, row.Number)
-		}
-	}
-	return numbers, nil
+	return prs, nil
 }
 
 // DefaultBranch returns the repository's default branch for the checkout.

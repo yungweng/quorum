@@ -21,7 +21,8 @@ import (
 
 var babysitBoolFlags = map[string]bool{
 	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
-	"no-direnv": true, "keep-worktree": true, "h": true, "help": true,
+	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true,
+	"h": true, "help": true,
 }
 
 var babysitValueFlags = map[string]bool{
@@ -102,6 +103,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	o.Verbose = args.boolean("verbose")
 	o.Out = os.Stdout
 	o.KeepWorktree = args.boolean("keep-worktree")
+	o.AllowEnvrcChange = args.boolean("allow-envrc-change")
 	if args.boolean("sandboxed") {
 		o.Bypass = false
 	}
@@ -167,6 +169,9 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 	if res != nil {
 		number = res.PR.Number
 		run.Title = res.PR.Title
+		if res.BranchOnly {
+			run.Branch = res.PR.HeadRefName
+		}
 		run.Rounds = res.Rounds
 		run.RunDir = res.RunDir
 		// Counts only mean something once a round has actually reviewed, and
@@ -184,10 +189,14 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 			run.Reason = ""
 		}
 	}
-	if number == 0 || repo == "" {
+	if repo == "" || number == 0 && run.Branch == "" {
 		return history.Run{}
 	}
-	run.Key = fmt.Sprintf("%s#%d", repo, number)
+	if number == 0 {
+		run.Key = history.BranchKey(repo, run.Branch)
+	} else {
+		run.Key = fmt.Sprintf("%s#%d", repo, number)
+	}
 	return run
 }
 
@@ -253,6 +262,7 @@ Options:
   --verbose              Stream the full output instead of the status line
   --no-notify            Disable terminal notifications
   --no-direnv            Skip direnv
+  --allow-envrc-change   Allow direnv allow when the target changed .envrc
   --keep-worktree        Keep the worktree after success
   -h, --help             Show this help
 

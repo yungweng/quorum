@@ -140,3 +140,22 @@ func TestRunSplitsItsKey(t *testing.T) {
 		t.Errorf("Number of a malformed key = %d", got)
 	}
 }
+
+func TestBranchRunUsesAStableKeyAndURL(t *testing.T) {
+	r := Run{
+		Key:    BranchKey("acme/api", "feature/crumb-tray"),
+		Branch: "feature/crumb-tray",
+	}
+	if got := r.Key; got != "acme/api#branch:feature/crumb-tray" {
+		t.Errorf("Key = %q", got)
+	}
+	if got := r.Name(); got != "api" {
+		t.Errorf("Name = %q", got)
+	}
+	if got := r.Number(); got != 0 {
+		t.Errorf("Number = %d", got)
+	}
+	if got := r.URL(); !strings.HasSuffix(got, "/acme/api/tree/feature/crumb-tray") {
+		t.Errorf("URL = %q", got)
+	}
+}

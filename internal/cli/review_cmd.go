@@ -162,16 +162,23 @@ func (a *app) cmdReview(argv []string) int {
 // with an empty key and logRun drops it.
 func (t *termReporter) historyRun(repo string, started time.Time, outcome, reason string, res *review.Result) history.Run {
 	t.mu.Lock()
-	number, title := t.number, t.title
+	number, title, branch := t.number, t.title, t.branch
 	if t.repo != "" {
 		repo = t.repo
 	}
 	t.mu.Unlock()
-	if number == 0 || repo == "" {
+	if repo == "" || number == 0 && branch == "" {
 		return history.Run{}
 	}
+	key := fmt.Sprintf("%s#%d", repo, number)
+	historyBranch := ""
+	if number == 0 {
+		key = history.BranchKey(repo, branch)
+		historyBranch = branch
+	}
 	run := history.Run{
-		Key:       fmt.Sprintf("%s#%d", repo, number),
+		Key:       key,
+		Branch:    historyBranch,
 		Title:     title,
 		Kind:      history.KindReview,
 		Source:    history.SourceManual,

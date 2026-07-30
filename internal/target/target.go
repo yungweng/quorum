@@ -35,22 +35,30 @@ func Resolve(
 	}
 
 	checkCheckout := branch == ""
+	var headSHA string
+	var err error
 	if checkCheckout {
-		var err error
 		branch, err = gitc.CurrentBranch(ctx, repoRoot)
 		if err != nil {
 			return Target{}, err
 		}
-		numbers, err := ghc.OpenPRNumbersForBranch(ctx, repoRoot, branch)
+		headSHA, err = pushedHead(ctx, gitc, repoRoot, branch)
 		if err != nil {
 			return Target{}, err
 		}
-		switch len(numbers) {
+		prs, err := ghc.OpenPRsForBranch(ctx, repoRoot, branch)
+		if err != nil {
+			return Target{}, err
+		}
+		prs, err = matchingPRs(branch, headSHA, prs)
+		if err != nil {
+			return Target{}, err
+		}
+		switch len(prs) {
 		case 0:
 			// Continue below with a branch-only target.
 		case 1:
-			pr, err := ghc.ViewPR(ctx, repoRoot, numbers[0])
-			return Target{PR: pr}, err
+			return Target{PR: prs[0]}, nil
 		default:
 			return Target{}, fmt.Errorf(
 				"branch %s has multiple open pull requests; pass a PR number or URL explicitly",
@@ -70,12 +78,11 @@ func Resolve(
 		return Target{}, fmt.Errorf("branch %s is the base branch; there is no branch diff to review", branch)
 	}
 
-	headSHA, err := gitc.LsRemote(ctx, repoRoot, "origin", "refs/heads/"+branch)
-	if err != nil {
-		return Target{}, fmt.Errorf(
-			"branch %s is not pushed to origin; commit and push it before running quorum: %w",
-			branch, err,
-		)
+	if headSHA == "" {
+		headSHA, err = pushedHead(ctx, gitc, repoRoot, branch)
+		if err != nil {
+			return Target{}, err
+		}
 	}
 	baseSHA, err := gitc.LsRemote(ctx, repoRoot, "origin", "refs/heads/"+baseBranch)
 	if err != nil {
@@ -114,4 +121,32 @@ func Resolve(
 		BaseRefOid:  baseSHA,
 	}
 	return Target{PR: pr, BranchOnly: true}, nil
+}
+
+func pushedHead(ctx context.Context, gitc git.G, repoRoot, branch string) (string, error) {
+	headSHA, err := gitc.LsRemote(ctx, repoRoot, "origin", "refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf(
+			"branch %s is not pushed to origin; commit and push it before running quorum: %w",
+			branch, err,
+		)
+	}
+	return headSHA, nil
+}
+
+func matchingPRs(branch, headSHA string, candidates []gh.FullPR) ([]gh.FullPR, error) {
+	prs := make([]gh.FullPR, 0, len(candidates))
+	for _, pr := range candidates {
+		if pr.IsCrossRepository || pr.HeadRefName != branch {
+			continue
+		}
+		if pr.HeadRefOid != headSHA {
+			return nil, fmt.Errorf(
+				"PR #%d head %s differs from origin/%s %s; retry after GitHub updates the PR head",
+				pr.Number, pr.HeadRefOid, branch, headSHA,
+			)
+		}
+		prs = append(prs, pr)
+	}
+	return prs, nil
 }

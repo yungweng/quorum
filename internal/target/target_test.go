@@ -42,9 +42,8 @@ func branchGH(t *testing.T, listJSON string) *gh.Client {
 	t.Helper()
 	bin := fakeTool(t, "gh", `
 case "$*" in
-  "pr list --head feature/crumb-tray --state open --limit 2 --json number") echo '`+listJSON+`' ;;
+  "pr list --head feature/crumb-tray --state open --limit 100 --json "*) echo '`+listJSON+`' ;;
   "repo view --json defaultBranchRef -q .defaultBranchRef.name") echo "main" ;;
-  "pr view 42 --json "*) echo '{"number":42,"title":"Improve crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}' ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac`)
 	return gh.New(bin)
@@ -67,13 +66,37 @@ func TestResolveFallsBackToAPushedBranchWithoutAnOpenPR(t *testing.T) {
 }
 
 func TestResolveKeepsUsingTheCurrentBranchPRWhenOneExists(t *testing.T) {
-	got, err := Resolve(context.Background(), branchGH(t, `[{"number":42}]`),
+	got, err := Resolve(context.Background(), branchGH(t,
+		`[{"number":42,"title":"Improve crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}]`),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.BranchOnly || got.PR.Number != 42 || got.PR.Title != "Improve crumb tray" {
 		t.Fatalf("PR target = %+v", got)
+	}
+}
+
+func TestResolveIgnoresAnUnrelatedPRWithTheSameBranchName(t *testing.T) {
+	prJSON := `{"number":42,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}`
+	got, err := Resolve(context.Background(),
+		branchGH(t, `[`+prJSON+`]`),
+		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.BranchOnly || got.PR.Number != 0 || got.PR.HeadRefOid != "head-sha" {
+		t.Fatalf("unrelated PR was selected: %+v", got)
+	}
+}
+
+func TestResolveRefusesAPRWhoseHeadDiffersFromOrigin(t *testing.T) {
+	prJSON := `{"number":42,"title":"Old change","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"other-sha","baseRefName":"main","baseRefOid":"base-sha"}`
+	_, err := Resolve(context.Background(),
+		branchGH(t, `[`+prJSON+`]`),
+		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
+	if err == nil || !strings.Contains(err.Error(), "differs from origin/feature/crumb-tray") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -98,7 +121,10 @@ func TestResolveRefusesDirtyOrUnpushedLocalWork(t *testing.T) {
 }
 
 func TestResolveRefusesAmbiguousCurrentBranchPRs(t *testing.T) {
-	_, err := Resolve(context.Background(), branchGH(t, `[{"number":41},{"number":42}]`),
+	_, err := Resolve(context.Background(), branchGH(t, `[
+		{"number":41,"title":"First crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"},
+		{"number":42,"title":"Second crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}
+	]`),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
 	if err == nil || !strings.Contains(err.Error(), "multiple open pull requests") {
 		t.Fatalf("error = %v", err)

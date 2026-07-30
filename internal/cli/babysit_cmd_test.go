@@ -4,6 +4,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/loop"
 )
 
 func TestManualCommandsDefaultToCurrentBranchPR(t *testing.T) {
@@ -71,5 +75,20 @@ func TestResolveBabysitTarget(t *testing.T) {
 					test.positionals, context, test.wantContext)
 			}
 		})
+	}
+}
+
+func TestBranchBabysitCreatesAHistoryRun(t *testing.T) {
+	run := babysitHistory("acme/api", 0, time.Now(), &loop.Result{
+		BranchOnly: true,
+		PR: gh.FullPR{
+			Title:       "feature/crumb-tray",
+			HeadRefName: "feature/crumb-tray",
+		},
+		Converged: true,
+	}, nil)
+	if run.Key != "acme/api#branch:feature/crumb-tray" ||
+		run.Branch != "feature/crumb-tray" {
+		t.Fatalf("history run = %+v", run)
 	}
 }

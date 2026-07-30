@@ -80,10 +80,12 @@ type Options struct {
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
 	// sandbox. They must run tests, use gh and push, unattended, and a
 	// sandboxed exec would silently skip exactly those commands.
-	Bypass       bool
-	Interactive  bool
-	UseDirenv    bool
-	KeepWorktree bool
+	Bypass      bool
+	Interactive bool
+	UseDirenv   bool
+	// AllowEnvrcChange permits direnv to load an .envrc changed by the target.
+	AllowEnvrcChange bool
+	KeepWorktree     bool
 
 	// Verbose streams the full Codex output instead of only the status line.
 	// The logs are written either way; this decides what reaches the terminal.

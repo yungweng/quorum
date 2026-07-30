@@ -3,6 +3,9 @@ package cli
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yungweng/quorum/internal/history"
 )
 
 func TestResolveReviewNumber(t *testing.T) {
@@ -95,5 +98,19 @@ func TestReviewTarget(t *testing.T) {
 					test.resolved, test.requested, got, test.want)
 			}
 		})
+	}
+}
+
+func TestBranchReviewCreatesAHistoryRun(t *testing.T) {
+	started := time.Now().Add(-time.Minute)
+	rep := &termReporter{
+		repo:   "acme/api",
+		branch: "feature/crumb-tray",
+		title:  "feature/crumb-tray",
+	}
+	run := rep.historyRun("", started, history.OK, "", nil)
+	if run.Key != "acme/api#branch:feature/crumb-tray" ||
+		run.Branch != "feature/crumb-tray" {
+		t.Fatalf("history run = %+v", run)
 	}
 }
