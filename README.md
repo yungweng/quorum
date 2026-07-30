@@ -6,7 +6,7 @@ hand the findings to a fix session, wait for CI, review again, until the PR is
 clean.
 
 ```bash
-quorum review 1811     # one review, posted as a comment
+quorum review          # review the PR of the current branch
 quorum babysit 1811    # review, fix, CI, repeat until it is clean
 quorum                 # what the agent is doing right now
 ```
@@ -55,6 +55,7 @@ needed for projects that have an `.envrc`.
 Run it from inside the repository checkout:
 
 ```bash
+quorum review                         # the PR of the current branch
 quorum review 1811
 quorum review https://github.com/owner/repo/pull/1811
 quorum review 1811 -n 8 --effort low

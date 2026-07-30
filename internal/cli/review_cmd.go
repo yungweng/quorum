@@ -47,7 +47,7 @@ func (a *app) cmdReview(argv []string) int {
 	if bad := args.unknown(allowed); len(bad) > 0 {
 		return a.die("unknown option: --%s", bad[0])
 	}
-	if len(args.pos) != 1 {
+	if len(args.pos) > 1 {
 		a.reviewUsage()
 		return exitError
 	}
@@ -60,12 +60,9 @@ func (a *app) cmdReview(argv []string) int {
 	if err != nil {
 		return a.die("%v", err)
 	}
-	number, argRepo, err := resolvePRArg(args.pos[0], repo)
+	number, err := resolveReviewNumber(args.pos, repo)
 	if err != nil {
 		return a.die("%v", err)
-	}
-	if argRepo != repo {
-		return a.die("PR URL is for %s, but the current checkout is %s", argRepo, repo)
 	}
 
 	o := review.Options{
@@ -127,10 +124,11 @@ func (a *app) cmdReview(argv []string) int {
 	if err != nil {
 		rep.status.Clear()
 		if notify {
-			a.out.Notify("quorum: review failed", fmt.Sprintf("PR #%d stopped", number))
+			a.out.Notify("quorum: review failed", reviewTarget(rep.number, number)+" stopped")
 		}
 		return a.reviewExit(err)
 	}
+	number = res.Findings.PR
 	if notify {
 		body := fmt.Sprintf("PR #%d: %d blockers, %d critical.",
 			number, res.Findings.Blockers, res.Findings.Critical)
@@ -162,7 +160,10 @@ func (a *app) reviewExit(err error) int {
 
 func (a *app) reviewUsage() {
 	fmt.Printf(`Usage:
-  quorum review <pr-number|github-pr-url> [options]
+  quorum review [pr-number|github-pr-url] [options]
+
+Reviews an open PR and posts the result. Without a PR argument the PR of the
+current branch is used.
 
 Options:
   -n, --runs N             Number of Codex reviewer passes. Default: %d
@@ -193,10 +194,12 @@ type termReporter struct {
 	out    *ui.Writer
 	status *ui.Status
 	notify bool
+	number int
 	runs   int
 }
 
 func (t *termReporter) Header(h review.RunHeader) {
+	t.number = h.Number
 	t.runs = h.Runs
 	o := t.out
 	o.Rule()
@@ -212,6 +215,33 @@ func (t *termReporter) Header(h review.RunHeader) {
 	o.Row("Effort", h.Effort)
 	o.Row("Run dir", h.RunDir)
 	o.Rule()
+}
+
+func reviewTarget(resolved, requested int) string {
+	if resolved > 0 {
+		return fmt.Sprintf("PR #%d", resolved)
+	}
+	if requested > 0 {
+		return fmt.Sprintf("PR #%d", requested)
+	}
+	return "current branch PR"
+}
+
+func resolveReviewNumber(positionals []string, repo string) (int, error) {
+	if len(positionals) == 0 {
+		return 0, nil
+	}
+	if len(positionals) > 1 {
+		return 0, fmt.Errorf("expected at most one PR argument")
+	}
+	number, argRepo, err := resolvePRArg(positionals[0], repo)
+	if err != nil {
+		return 0, err
+	}
+	if argRepo != repo {
+		return 0, fmt.Errorf("PR URL is for %s, but the current checkout is %s", argRepo, repo)
+	}
+	return number, nil
 }
 
 func (t *termReporter) Info(s string) {

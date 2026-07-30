@@ -6,8 +6,11 @@ what quorum does; this covers what you can set.
 ## quorum review
 
 ```text
-quorum review <pr-number|github-pr-url> [options]
+quorum review [pr-number|github-pr-url] [options]
 ```
+
+Without a PR argument, quorum reviews the PR of the current branch. Run the
+command from inside that repository's checkout.
 
 | Option | Meaning | Default |
 |---|---|---|

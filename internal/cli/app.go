@@ -232,7 +232,7 @@ func (a *app) newGit(bin string) git.G { return git.New(bin) }
 func (a *app) usage() {
 	fmt.Printf(`quorum %s - a panel of Codex reviewers for your pull requests
 
-  quorum review <pr>     review one PR now and post the comment
+  quorum review [pr]     review one PR now and post the comment
   quorum babysit [pr]    review, fix, wait for CI, repeat until it is clean
 
   quorum                 what is running, queued and finished
