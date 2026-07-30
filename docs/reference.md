@@ -3,6 +3,9 @@
 Every option, setting, exit code and file. [The README](../README.md) covers
 what quorum does; this covers what you can set.
 
+Running `quorum` without a command shows the command overview. The three main
+commands are `quorum watch`, `quorum review` and `quorum babysit`.
+
 ## quorum review
 
 ```text
@@ -63,6 +66,9 @@ for the fix session.
 
 | Command | Options |
 |---|---|
+| `quorum` | Show the command overview |
+| `quorum watch` | Follow running, queued and finished work |
+| `quorum status` | Show one dashboard snapshot |
 | `quorum logs` | `-n N` or `--lines N` for the tail length (default 50), `--no-follow` to print it and stop. A bare number also sets the length. |
 | `quorum gc` | `--dry-run` or `-n` to report what would go without removing it |
 | `quorum doctor` | `--fix` to apply what it can |

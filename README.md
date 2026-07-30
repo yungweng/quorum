@@ -6,9 +6,9 @@ hand the findings to a fix session, wait for CI, review again, until the PR is
 clean.
 
 ```bash
+quorum watch           # follow running, queued and finished work
 quorum review          # review the PR of the current branch
 quorum babysit 1811    # review, fix, CI, repeat until it is clean
-quorum                 # what the agent is doing right now
 ```
 
 The name is the mechanism: no single reviewer decides anything. Six of them run
@@ -176,9 +176,9 @@ posting a single review.
 ### Commands
 
 ```text
-quorum                 what is running, queued and finished
-quorum status          the same, spelled out
-quorum watch           the same, redrawn as it changes
+quorum                 show the command overview
+quorum watch           follow running, queued and finished work
+quorum status          show one dashboard snapshot
 quorum run <pr>        hand one PR to the agent right now
 quorum logs [-n N]     follow the log, --no-follow to just print the tail
 quorum doctor [--fix]  check the setup and report what to do about it

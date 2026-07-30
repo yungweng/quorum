@@ -59,19 +59,9 @@ func (a *app) cmdBabysit(argv []string) int {
 
 	// The first positional that looks like a PR is the PR; everything else is
 	// extra context for the fix session, which is how babysit behaved.
-	number := 0
-	var extraContext []string
-	for _, p := range args.pos {
-		if number == 0 {
-			if n, argRepo, err := resolvePRArg(p, repo); err == nil {
-				if argRepo != repo {
-					return a.die("PR URL is for %s, but the current checkout is %s", argRepo, repo)
-				}
-				number = n
-				continue
-			}
-		}
-		extraContext = append(extraContext, p)
+	number, extraContext, err := resolveBabysitTarget(args.pos, repo)
+	if err != nil {
+		return a.die("%v", err)
 	}
 
 	o := loop.Options{
@@ -154,6 +144,24 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.babysitExit(err)
 	}
 	return exitOK
+}
+
+func resolveBabysitTarget(positionals []string, repo string) (int, []string, error) {
+	number := 0
+	var extraContext []string
+	for _, positional := range positionals {
+		if number == 0 {
+			if n, argRepo, err := resolvePRArg(positional, repo); err == nil {
+				if argRepo != repo {
+					return 0, nil, fmt.Errorf("PR URL is for %s, but the current checkout is %s", argRepo, repo)
+				}
+				number = n
+				continue
+			}
+		}
+		extraContext = append(extraContext, positional)
+	}
+	return number, extraContext, nil
 }
 
 // babysitExit maps a failure onto babysit's exit codes.
