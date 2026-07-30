@@ -120,7 +120,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	rep := r.reporter()
 
-	tgt, err := target.Resolve(ctx, r.GH, r.Git, o.RepoRoot, o.Number, o.Branch, o.BaseBranch)
+	tgt, run, err := r.resolveRunTarget(ctx, &o)
 	if err != nil {
 		return nil, err
 	}
@@ -140,10 +140,6 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		o.Post = false
 	}
 
-	run, err := o.runDir(pr.Number, pr.HeadRefName)
-	if err != nil {
-		return nil, err
-	}
 	// Cache collection takes this same lock from its liveness check through
 	// dependency eviction. Create and claim the run while holding it so
 	// collection must happen wholly before this startup or see this run as live.
@@ -161,6 +157,11 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	defer releaseClaim()
+	if o.ResumeRun == "" {
+		if err := writeRunTarget(run.target, newRunTarget(o, tgt, baseBranch)); err != nil {
+			return nil, fmt.Errorf("write run target metadata: %w", err)
+		}
+	}
 
 	// A fresh run has not linked a dependency tree yet, so the age sweep may
 	// evict trees if no older run is using them. A resumed worktree may retain
@@ -300,6 +301,7 @@ type runPaths struct {
 	root     string
 	output   string
 	worktree string
+	target   string
 	comment  string
 	all      string
 	findings string
@@ -328,6 +330,7 @@ func (o Options) runDir(number int, branch string) (runPaths, error) {
 		root:     root,
 		output:   out,
 		worktree: filepath.Join(root, "worktree"),
+		target:   filepath.Join(root, "target.json"),
 		comment:  filepath.Join(out, "final-pr-comment.md"),
 		all:      filepath.Join(out, "all-reviewers.md"),
 		findings: filepath.Join(out, "findings.json"),

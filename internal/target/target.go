@@ -36,13 +36,14 @@ func Resolve(
 
 	checkCheckout := branch == ""
 	var headSHA string
+	var localSHA string
 	var err error
 	if checkCheckout {
 		branch, err = gitc.CurrentBranch(ctx, repoRoot)
 		if err != nil {
 			return Target{}, err
 		}
-		headSHA, err = pushedHead(ctx, gitc, repoRoot, branch)
+		localSHA, err = gitc.RevParse(ctx, repoRoot, "HEAD")
 		if err != nil {
 			return Target{}, err
 		}
@@ -50,7 +51,7 @@ func Resolve(
 		if err != nil {
 			return Target{}, err
 		}
-		prs, err = matchingPRs(branch, headSHA, prs)
+		prs, err = matchingPRs(branch, localSHA, prs)
 		if err != nil {
 			return Target{}, err
 		}
@@ -100,10 +101,6 @@ func Resolve(
 				branch,
 			)
 		}
-		localSHA, err := gitc.RevParse(ctx, repoRoot, "HEAD")
-		if err != nil {
-			return Target{}, err
-		}
 		if localSHA != headSHA {
 			return Target{}, fmt.Errorf(
 				"local branch %s (%s) differs from origin (%s); push your local commits first",
@@ -134,19 +131,27 @@ func pushedHead(ctx context.Context, gitc git.G, repoRoot, branch string) (strin
 	return headSHA, nil
 }
 
-func matchingPRs(branch, headSHA string, candidates []gh.FullPR) ([]gh.FullPR, error) {
+func matchingPRs(branch, localSHA string, candidates []gh.FullPR) ([]gh.FullPR, error) {
 	prs := make([]gh.FullPR, 0, len(candidates))
+	var sameRepoMismatch *gh.FullPR
 	for _, pr := range candidates {
-		if pr.IsCrossRepository || pr.HeadRefName != branch {
+		if pr.HeadRefName != branch {
 			continue
 		}
-		if pr.HeadRefOid != headSHA {
-			return nil, fmt.Errorf(
-				"PR #%d head %s differs from origin/%s %s; retry after GitHub updates the PR head",
-				pr.Number, pr.HeadRefOid, branch, headSHA,
-			)
+		if pr.HeadRefOid == localSHA {
+			prs = append(prs, pr)
+			continue
 		}
-		prs = append(prs, pr)
+		if !pr.IsCrossRepository {
+			candidate := pr
+			sameRepoMismatch = &candidate
+		}
+	}
+	if len(prs) == 0 && sameRepoMismatch != nil {
+		return nil, fmt.Errorf(
+			"PR #%d head %s differs from the checked-out branch %s; update the checkout before reviewing",
+			sameRepoMismatch.Number, sameRepoMismatch.HeadRefOid, localSHA,
+		)
 	}
 	return prs, nil
 }

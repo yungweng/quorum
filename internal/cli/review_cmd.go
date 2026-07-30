@@ -232,7 +232,7 @@ Options:
   --base BRANCH            Base branch. Default: PR base or repository default
   --dry-run                Write the report to disk without posting it
   --keep-worktree          Keep the temporary worktree after a successful run
-  --resume-run DIR         Reuse a run directory and only aggregate/publish
+  --resume-run DIR         Reuse a run with its original target and base
   --review-timeout DUR     Kill a reviewer that runs too long. Default: %s
   --min-successful N       Reviewer outputs required. Default: a majority
   --no-direnv              Skip direnv

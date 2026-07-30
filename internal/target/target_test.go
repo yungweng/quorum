@@ -78,7 +78,7 @@ func TestResolveKeepsUsingTheCurrentBranchPRWhenOneExists(t *testing.T) {
 }
 
 func TestResolveIgnoresAnUnrelatedPRWithTheSameBranchName(t *testing.T) {
-	prJSON := `{"number":42,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}`
+	prJSON := `{"number":42,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"other-sha","baseRefName":"main","baseRefOid":"base-sha"}`
 	got, err := Resolve(context.Background(),
 		branchGH(t, `[`+prJSON+`]`),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
@@ -90,13 +90,32 @@ func TestResolveIgnoresAnUnrelatedPRWithTheSameBranchName(t *testing.T) {
 	}
 }
 
-func TestResolveRefusesAPRWhoseHeadDiffersFromOrigin(t *testing.T) {
+func TestResolveRefusesAPRWhoseHeadDiffersFromTheCheckout(t *testing.T) {
 	prJSON := `{"number":42,"title":"Old change","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"other-sha","baseRefName":"main","baseRefOid":"base-sha"}`
 	_, err := Resolve(context.Background(),
 		branchGH(t, `[`+prJSON+`]`),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
-	if err == nil || !strings.Contains(err.Error(), "differs from origin/feature/crumb-tray") {
+	if err == nil || !strings.Contains(err.Error(), "differs from the checked-out branch") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveFindsAForkPRBeforeRequiringAnOriginBranch(t *testing.T) {
+	gitc := git.New(fakeTool(t, "git", `
+case "$*" in
+  "rev-parse --abbrev-ref HEAD") echo "feature/crumb-tray" ;;
+  "rev-parse HEAD") echo "fork-head-sha" ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac`))
+	prJSON := `{"number":42,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"fork-head-sha","baseRefName":"main","baseRefOid":"base-sha"}`
+
+	got, err := Resolve(context.Background(), branchGH(t, `[`+prJSON+`]`),
+		gitc, t.TempDir(), 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BranchOnly || got.PR.Number != 42 || !got.PR.IsCrossRepository {
+		t.Fatalf("fork PR target = %+v", got)
 	}
 }
 

@@ -26,7 +26,7 @@ match `origin`. Run the command from inside that repository's checkout.
 | `--base BRANCH` | Base branch to review against | PR base or repository default |
 | `--dry-run` | Write the report to disk without posting it | off |
 | `--keep-worktree` | Keep the worktree after a successful run | off |
-| `--resume-run DIR` | Reuse a run directory, only aggregate and publish | |
+| `--resume-run DIR` | Reuse a run directory with its original target and base | |
 | `--review-timeout DUR` | Kill a reviewer that runs too long | 45m |
 | `--min-successful N` | Reviewer outputs required to post | a majority |
 | `--no-direnv` | Skip direnv | off |

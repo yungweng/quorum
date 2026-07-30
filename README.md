@@ -76,7 +76,8 @@ branch-only reviews keep it on disk. Each run also writes a machine-readable
 `findings.json` beside the report.
 
 A failed run keeps its worktree, so the expensive reviewer passes never have to
-run twice: `quorum review 1811 --resume-run <dir>` picks it up.
+run twice: `quorum review 1811 --resume-run <dir>` picks it up with the original
+target and base.
 
 A run refuses to post rather than post something misleading: on a moved PR head,
 on an `.envrc` the PR itself changed, and on an aggregator answer with the wrong
