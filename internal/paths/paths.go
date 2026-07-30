@@ -14,14 +14,15 @@ import (
 
 // P holds the resolved locations for one process.
 type P struct {
-	Config     string // the config file itself
-	StateDir   string
-	StateFile  string
-	Log        string
-	RunningDir string
-	ManualDir  string
-	RunLogDir  string
-	CloneDir   string
+	Config      string // the config file itself
+	StateDir    string
+	StateFile   string
+	HistoryFile string // the log of finished runs
+	Log         string
+	RunningDir  string
+	ManualDir   string
+	RunLogDir   string
+	CloneDir    string
 
 	CacheRoot   string // everything below is under here
 	ReviewRuns  string // one directory per review run
@@ -63,14 +64,15 @@ func Resolve() P {
 	cacheRoot := filepath.Join(cacheHome, "quorum")
 
 	p := P{
-		Config:     env("QUORUM_CONFIG", filepath.Join(configHome, "quorum", "config")),
-		StateDir:   stateDir,
-		StateFile:  filepath.Join(stateDir, "state.json"),
-		Log:        filepath.Join(stateDir, "quorum.log"),
-		RunningDir: filepath.Join(stateDir, "running"),
-		ManualDir:  filepath.Join(stateDir, "manual-reviews"),
-		RunLogDir:  filepath.Join(stateDir, "runs"),
-		CloneDir:   env("QUORUM_CLONE_DIR", filepath.Join(cacheRoot, "repos")),
+		Config:      env("QUORUM_CONFIG", filepath.Join(configHome, "quorum", "config")),
+		StateDir:    stateDir,
+		StateFile:   filepath.Join(stateDir, "state.json"),
+		HistoryFile: filepath.Join(stateDir, "history.jsonl"),
+		Log:         filepath.Join(stateDir, "quorum.log"),
+		RunningDir:  filepath.Join(stateDir, "running"),
+		ManualDir:   filepath.Join(stateDir, "manual-reviews"),
+		RunLogDir:   filepath.Join(stateDir, "runs"),
+		CloneDir:    env("QUORUM_CLONE_DIR", filepath.Join(cacheRoot, "repos")),
 
 		CacheRoot: cacheRoot,
 		// Run directories and the shared dependency cache are siblings. In

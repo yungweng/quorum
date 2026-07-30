@@ -35,6 +35,11 @@ type Config struct {
 	CacheBudgetGB float64
 	PollInterval  int
 
+	// History is how many finished runs the dashboard lists. It is one entry
+	// per run rather than per pull request, so several reviews of the same one
+	// each take a line.
+	History int
+
 	SkipDrafts bool
 	SkipForks  bool
 	SkipBots   bool
@@ -95,6 +100,7 @@ func Default() Config {
 		Nice:          10,
 		CacheBudgetGB: 5,
 		PollInterval:  300,
+		History:       20,
 		SkipDrafts:    true,
 		SkipForks:     true,
 		SkipBots:      true,
@@ -271,6 +277,8 @@ func (c *Config) set(key, value string) {
 		c.Reviewers = intOr(value, c.Reviewers)
 	case "NICE":
 		c.Nice = intOr(value, c.Nice)
+	case "HISTORY":
+		c.History = intOr(value, c.History)
 	case "POLL_INTERVAL":
 		c.PollInterval = intOr(value, c.PollInterval)
 	case "LOAD_LIMIT":
@@ -403,7 +411,8 @@ func (c Config) Render() string {
 	w("CACHE_BUDGET_GB=%s\t# runs and dependency trees together, 0 disables\n\n", num(c.CacheBudgetGB))
 
 	w("MAX_RETRIES=%d\n", c.MaxRetries)
-	w("POLL_INTERVAL=%d\t\t# re-run `quorum install` after changing this\n\n", c.PollInterval)
+	w("POLL_INTERVAL=%d\t\t# re-run `quorum install` after changing this\n", c.PollInterval)
+	w("HISTORY=%d\t\t\t# finished runs listed by status and watch\n\n", c.History)
 
 	w("# Safety. Fork and bot PRs run foreign code locally through direnv.\n")
 	w("SKIP_DRAFTS=%s\n", bit(c.SkipDrafts))

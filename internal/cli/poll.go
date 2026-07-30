@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -405,9 +406,24 @@ func (a *app) forgetStalePending(prs []gh.PR) {
 	}
 }
 
+// record updates the state file, and adds the change to the history log when
+// it is one the log wants. Every decision the poll reaches goes through here,
+// which is what keeps the two stores from drifting apart.
 func (a *app) record(key string, fn func(*state.Record)) {
-	if err := state.Mutate(a.p.StateFile, key, fn); err != nil {
+	var before, after state.Record
+	capture := func(rec *state.Record) {
+		before = *rec
+		fn(rec)
+		after = *rec
+	}
+	if err := state.Mutate(a.p.StateFile, key, capture); err != nil {
 		a.log.Printf("could not update state for %s: %v", key, err)
+		return
+	}
+	if run, ok := history.FromState(key, before, after, history.SourceAgent); ok {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			a.log.Printf("could not add %s to the history log: %v", key, err)
+		}
 	}
 }
 

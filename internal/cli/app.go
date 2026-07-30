@@ -17,6 +17,7 @@ import (
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/logbook"
 	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/ui"
@@ -62,6 +63,21 @@ type app struct {
 	tick int
 
 	removeAll func(string) error // replaced by gc tests that need deterministic failures
+}
+
+// logRun adds a finished terminal run to the history log.
+//
+// Runs started from a terminal are the reason the log exists: they never touch
+// the state file, so without this they leave nothing behind and the dashboard
+// can only ever show what the agent did. A run with no key could not be
+// identified afterwards and is dropped rather than logged as a blank line.
+func (a *app) logRun(run history.Run) {
+	if run.Key == "" {
+		return
+	}
+	if err := history.Append(a.p.HistoryFile, run); err != nil {
+		a.log.Printf("could not add %s to the history log: %v", run.Key, err)
+	}
 }
 
 // Run dispatches one command line and returns the process exit code. version

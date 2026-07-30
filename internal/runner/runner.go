@@ -14,6 +14,7 @@ import (
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/logbook"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/paths"
@@ -217,9 +218,27 @@ func (r *Runner) reviewOptions(repo string, number int, clone string) review.Opt
 
 // mutate updates the state file and complains loudly if it cannot. Losing this
 // write means losing the outcome of a review that has already been paid for.
+//
+// It is also where the agent's runs reach the history log. Every terminal
+// state the agent reaches passes through here, so hooking it is what makes it
+// impossible to add an outcome later that quietly never gets logged.
 func (r *Runner) mutate(key string, fn func(*state.Record)) {
-	if err := state.Mutate(r.P.StateFile, key, fn); err != nil {
+	var before, after state.Record
+	capture := func(rec *state.Record) {
+		before = *rec
+		fn(rec)
+		after = *rec
+	}
+	if err := state.Mutate(r.P.StateFile, key, capture); err != nil {
 		r.Log.Printf("%s: could not record the result: %v", key, err)
+		return
+	}
+	if run, ok := history.FromState(key, before, after, history.SourceAgent); ok {
+		if err := history.Append(r.P.HistoryFile, run); err != nil {
+			// The run itself happened and its output is on disk, so a log that
+			// could not be extended is worth a line, not a failure.
+			r.Log.Printf("%s: could not add to the history log: %v", key, err)
+		}
 	}
 }
 

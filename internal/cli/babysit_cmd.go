@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
@@ -135,9 +136,11 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
+	started := time.Now()
 	res, err := pipe.Run(ctx, o)
 	rep.status.Clear()
 
+	a.logRun(babysitHistory(repo, number, started, res, err))
 	if res != nil {
 		rep.summary(res)
 	}
@@ -145,6 +148,47 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.babysitExit(err)
 	}
 	return exitOK
+}
+
+// babysitHistory describes a finished fix loop for the history log. A loop
+// that stopped before it could resolve its pull request has nothing to name
+// itself with, so it reports an empty key and logRun drops it.
+func babysitHistory(repo string, number int, started time.Time, res *loop.Result, err error) history.Run {
+	run := history.Run{
+		Kind:      history.KindBabysit,
+		Source:    history.SourceManual,
+		StartedAt: started,
+		EndedAt:   time.Now(),
+		Outcome:   history.Failed,
+	}
+	if err != nil {
+		run.Reason = err.Error()
+	}
+	if res != nil {
+		number = res.PR.Number
+		run.Title = res.PR.Title
+		run.Rounds = res.Rounds
+		run.RunDir = res.RunDir
+		// Counts only mean something once a round has actually reviewed, and
+		// LastFindings is zero both for a clean review and for a loop that
+		// never got that far.
+		if res.Rounds > 0 {
+			run.Reviewed = true
+			run.Blockers = res.LastFindings.Blockers
+			run.Critical = res.LastFindings.Critical
+			run.Suggestions = res.LastFindings.Suggestions
+			run.Questions = res.LastFindings.Questions
+		}
+		if res.Converged {
+			run.Outcome = history.Converged
+			run.Reason = ""
+		}
+	}
+	if number == 0 || repo == "" {
+		return history.Run{}
+	}
+	run.Key = fmt.Sprintf("%s#%d", repo, number)
+	return run
 }
 
 func resolveBabysitTarget(positionals []string, repo string) (int, []string, error) {
