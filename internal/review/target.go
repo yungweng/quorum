@@ -54,6 +54,17 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 	if err != nil {
 		return target.Target{}, runPaths{}, err
 	}
+	if o.HeadSHA != "" {
+		if !tgt.BranchOnly {
+			return target.Target{}, runPaths{}, fmt.Errorf("a pinned head SHA requires a branch-only target")
+		}
+		if tgt.PR.HeadRefOid != o.HeadSHA {
+			return target.Target{}, runPaths{}, fmt.Errorf(
+				"%w: pipeline worktree is %s, origin/%s is %s",
+				ErrHeadDrifted, o.HeadSHA, tgt.PR.HeadRefName, tgt.PR.HeadRefOid,
+			)
+		}
+	}
 	if o.ResumeRun == "" {
 		run, err = o.runDir(tgt.PR.Number, tgt.PR.HeadRefName)
 		if err != nil {

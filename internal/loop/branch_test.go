@@ -42,6 +42,21 @@ esac
 	if err := r.pushBranch(); err != nil {
 		t.Fatal(err)
 	}
+	if r.headSHA != "head-sha" {
+		t.Fatalf("pinned review head = %q", r.headSHA)
+	}
+}
+
+func TestBranchReviewPinsThePipelineWorktreeHead(t *testing.T) {
+	r := &run{
+		target:  target.Target{BranchOnly: true},
+		branch:  "feature/crumb-tray",
+		headSHA: "resolved-head-sha",
+	}
+	o := r.reviewOptions()
+	if o.Branch != r.branch || o.HeadSHA != r.headSHA {
+		t.Fatalf("review target = branch %q at %q", o.Branch, o.HeadSHA)
+	}
 }
 
 func TestBranchDirenvRequiresAnExplicitOverrideForTargetChanges(t *testing.T) {

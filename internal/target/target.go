@@ -36,35 +36,18 @@ func Resolve(
 
 	checkCheckout := branch == ""
 	var headSHA string
-	var localSHA string
 	var err error
 	if checkCheckout {
 		branch, err = gitc.CurrentBranch(ctx, repoRoot)
 		if err != nil {
 			return Target{}, err
 		}
-		localSHA, err = gitc.RevParse(ctx, repoRoot, "HEAD")
+		pr, found, err := ghc.CurrentBranchPR(ctx, repoRoot)
 		if err != nil {
 			return Target{}, err
 		}
-		prs, err := ghc.OpenPRsForBranch(ctx, repoRoot, branch)
-		if err != nil {
-			return Target{}, err
-		}
-		prs, err = matchingPRs(branch, localSHA, prs)
-		if err != nil {
-			return Target{}, err
-		}
-		switch len(prs) {
-		case 0:
-			// Continue below with a branch-only target.
-		case 1:
-			return Target{PR: prs[0]}, nil
-		default:
-			return Target{}, fmt.Errorf(
-				"branch %s has multiple open pull requests; pass a PR number or URL explicitly",
-				branch,
-			)
+		if found {
+			return Target{PR: pr}, nil
 		}
 	}
 
@@ -101,6 +84,10 @@ func Resolve(
 				branch,
 			)
 		}
+		localSHA, err := gitc.RevParse(ctx, repoRoot, "HEAD")
+		if err != nil {
+			return Target{}, err
+		}
 		if localSHA != headSHA {
 			return Target{}, fmt.Errorf(
 				"local branch %s (%s) differs from origin (%s); push your local commits first",
@@ -129,29 +116,4 @@ func pushedHead(ctx context.Context, gitc git.G, repoRoot, branch string) (strin
 		)
 	}
 	return headSHA, nil
-}
-
-func matchingPRs(branch, localSHA string, candidates []gh.FullPR) ([]gh.FullPR, error) {
-	prs := make([]gh.FullPR, 0, len(candidates))
-	var sameRepoMismatch *gh.FullPR
-	for _, pr := range candidates {
-		if pr.HeadRefName != branch {
-			continue
-		}
-		if pr.HeadRefOid == localSHA {
-			prs = append(prs, pr)
-			continue
-		}
-		if !pr.IsCrossRepository {
-			candidate := pr
-			sameRepoMismatch = &candidate
-		}
-	}
-	if len(prs) == 0 && sameRepoMismatch != nil {
-		return nil, fmt.Errorf(
-			"PR #%d head %s differs from the checked-out branch %s; update the checkout before reviewing",
-			sameRepoMismatch.Number, sameRepoMismatch.HeadRefOid, localSHA,
-		)
-	}
-	return prs, nil
 }

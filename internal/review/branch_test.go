@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,5 +58,20 @@ func TestBranchCheckoutAndDriftUseBranchRefsNotPullZero(t *testing.T) {
 	}
 	if note, err := r.checkDrift(context.Background(), o, tgt, "main", base, head); err != nil || note != "" {
 		t.Fatalf("drift result = %q, %v", note, err)
+	}
+}
+
+func TestPinnedBranchReviewRefusesAMovedRemoteHead(t *testing.T) {
+	r := &Runner{Git: fakeReviewGit(t)}
+	o := Options{
+		Repo:       "acme/api",
+		RepoRoot:   t.TempDir(),
+		Branch:     "feature/crumb-tray",
+		BaseBranch: "main",
+		HeadSHA:    "pipeline-head-sha",
+	}
+	_, _, err := r.resolveRunTarget(context.Background(), &o)
+	if !errors.Is(err, ErrHeadDrifted) {
+		t.Fatalf("resolveRunTarget error = %v, want ErrHeadDrifted", err)
 	}
 }

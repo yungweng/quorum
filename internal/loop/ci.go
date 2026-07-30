@@ -44,10 +44,19 @@ func (r *run) startReview(round int) {
 	}
 	r.review = br
 
-	opts := review.Options{
+	opts := r.reviewOptions()
+	go func() {
+		res, err := r.p.Review.Run(ctx, opts)
+		br.done <- bgResult{res, err}
+	}()
+}
+
+func (r *run) reviewOptions() review.Options {
+	return review.Options{
 		Repo:             r.o.Repo,
 		Number:           r.pr.Number,
 		Branch:           branchOnlyValue(r.target.BranchOnly, r.branch),
+		HeadSHA:          branchOnlyValue(r.target.BranchOnly, r.headSHA),
 		RepoRoot:         r.o.RepoRoot,
 		Runs:             r.o.Reviewers,
 		Model:            r.o.ReviewModel,
@@ -63,10 +72,6 @@ func (r *run) startReview(round int) {
 		DirenvBin:        r.o.DirenvBin,
 		ReviewTimeout:    review.DefaultReviewTimeout,
 	}
-	go func() {
-		res, err := r.p.Review.Run(ctx, opts)
-		br.done <- bgResult{res, err}
-	}()
 }
 
 func branchOnlyValue(branchOnly bool, branch string) string {

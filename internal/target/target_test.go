@@ -38,11 +38,15 @@ esac`)
 	return git.New(bin)
 }
 
-func branchGH(t *testing.T, listJSON string) *gh.Client {
+func branchGH(t *testing.T, prJSON string) *gh.Client {
 	t.Helper()
+	view := `echo '` + prJSON + `'`
+	if prJSON == "" {
+		view = `echo 'no pull requests found for branch "example-user:feature/crumb-tray"' >&2; exit 1`
+	}
 	bin := fakeTool(t, "gh", `
 case "$*" in
-  "pr list --head feature/crumb-tray --state open --limit 100 --json "*) echo '`+listJSON+`' ;;
+  "pr view --json "*) `+view+` ;;
   "repo view --json defaultBranchRef -q .defaultBranchRef.name") echo "main" ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac`)
@@ -50,7 +54,7 @@ esac`)
 }
 
 func TestResolveFallsBackToAPushedBranchWithoutAnOpenPR(t *testing.T) {
-	got, err := Resolve(context.Background(), branchGH(t, "[]"),
+	got, err := Resolve(context.Background(), branchGH(t, ""),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +71,7 @@ func TestResolveFallsBackToAPushedBranchWithoutAnOpenPR(t *testing.T) {
 
 func TestResolveKeepsUsingTheCurrentBranchPRWhenOneExists(t *testing.T) {
 	got, err := Resolve(context.Background(), branchGH(t,
-		`[{"number":42,"title":"Improve crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}]`),
+		`{"number":42,"title":"Improve crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}`),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -77,10 +81,20 @@ func TestResolveKeepsUsingTheCurrentBranchPRWhenOneExists(t *testing.T) {
 	}
 }
 
-func TestResolveIgnoresAnUnrelatedPRWithTheSameBranchName(t *testing.T) {
-	prJSON := `{"number":42,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"other-sha","baseRefName":"main","baseRefOid":"base-sha"}`
-	got, err := Resolve(context.Background(),
-		branchGH(t, `[`+prJSON+`]`),
+func TestResolveFallsBackWhenTheAssociatedPRIsClosed(t *testing.T) {
+	prJSON := `{"number":42,"title":"Old crumb tray","state":"CLOSED","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}`
+	got, err := Resolve(context.Background(), branchGH(t, prJSON),
+		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.BranchOnly || got.PR.Number != 0 {
+		t.Fatalf("closed PR was selected: %+v", got)
+	}
+}
+
+func TestResolveDoesNotSearchForSameNamedForkPRs(t *testing.T) {
+	got, err := Resolve(context.Background(), branchGH(t, ""),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -90,26 +104,15 @@ func TestResolveIgnoresAnUnrelatedPRWithTheSameBranchName(t *testing.T) {
 	}
 }
 
-func TestResolveRefusesAPRWhoseHeadDiffersFromTheCheckout(t *testing.T) {
-	prJSON := `{"number":42,"title":"Old change","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"other-sha","baseRefName":"main","baseRefOid":"base-sha"}`
-	_, err := Resolve(context.Background(),
-		branchGH(t, `[`+prJSON+`]`),
-		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
-	if err == nil || !strings.Contains(err.Error(), "differs from the checked-out branch") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestResolveFindsAForkPRBeforeRequiringAnOriginBranch(t *testing.T) {
 	gitc := git.New(fakeTool(t, "git", `
 case "$*" in
   "rev-parse --abbrev-ref HEAD") echo "feature/crumb-tray" ;;
-  "rev-parse HEAD") echo "fork-head-sha" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac`))
 	prJSON := `{"number":42,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"fork-head-sha","baseRefName":"main","baseRefOid":"base-sha"}`
 
-	got, err := Resolve(context.Background(), branchGH(t, `[`+prJSON+`]`),
+	got, err := Resolve(context.Background(), branchGH(t, prJSON),
 		gitc, t.TempDir(), 0, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +128,7 @@ func TestResolveRefusesDirtyOrUnpushedLocalWork(t *testing.T) {
 		"unpushed": branchGit(t, false, "local-sha"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Resolve(context.Background(), branchGH(t, "[]"),
+			_, err := Resolve(context.Background(), branchGH(t, ""),
 				gitc, t.TempDir(), 0, "", "")
 			if err == nil {
 				t.Fatal("unsafe branch target was accepted")
@@ -140,12 +143,14 @@ func TestResolveRefusesDirtyOrUnpushedLocalWork(t *testing.T) {
 }
 
 func TestResolveRefusesAmbiguousCurrentBranchPRs(t *testing.T) {
-	_, err := Resolve(context.Background(), branchGH(t, `[
-		{"number":41,"title":"First crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"},
-		{"number":42,"title":"Second crumb tray","state":"OPEN","headRefName":"feature/crumb-tray","headRefOid":"head-sha","baseRefName":"main","baseRefOid":"base-sha"}
-	]`),
-		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
-	if err == nil || !strings.Contains(err.Error(), "multiple open pull requests") {
+	ghc := gh.New(fakeTool(t, "gh", `
+case "$*" in
+  "pr view --json "*) echo "multiple pull requests found for branch" >&2; exit 1 ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac`))
+	_, err := Resolve(context.Background(), ghc, branchGit(t, false, "head-sha"),
+		t.TempDir(), 0, "", "")
+	if err == nil || !strings.Contains(err.Error(), "multiple pull requests") {
 		t.Fatalf("error = %v", err)
 	}
 }

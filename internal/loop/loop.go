@@ -163,6 +163,7 @@ type run struct {
 	target       target.Target
 	pr           gh.FullPR
 	branch       string
+	headSHA      string
 	root         string
 	worktree     string
 	logDir       string
@@ -255,6 +256,7 @@ func (r *run) prepare() error {
 		r.rep.Warn(fmt.Sprintf("origin/%s (%s) differs from %s (%s); using origin/%s",
 			r.branch, headSHA, source, pr.HeadRefOid, r.branch))
 	}
+	r.headSHA = headSHA
 	if r.p.Git.HasLocalBranch(r.ctx, r.o.RepoRoot, r.branch) {
 		localSHA, err := r.p.Git.RevParse(r.ctx, r.o.RepoRoot, "refs/heads/"+r.branch)
 		if err != nil {
@@ -597,6 +599,7 @@ func (r *run) pushBranch() error {
 			remote, _ = r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
 		}
 		if remote == pushedSHA {
+			r.headSHA = pushedSHA
 			return nil
 		}
 		if pushErr != nil {

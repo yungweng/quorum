@@ -65,6 +65,7 @@ type Options struct {
 	Repo     string // owner/repo
 	Number   int
 	Branch   string // internal branch target; empty resolves the current checkout
+	HeadSHA  string // internal branch pin; empty reviews the resolved target head
 	RepoRoot string // the checkout the worktree is created from
 
 	Runs          int

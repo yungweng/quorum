@@ -54,20 +54,22 @@ func (c *Client) ViewPR(ctx context.Context, dir string, number int) (FullPR, er
 	return pr, nil
 }
 
-// OpenPRsForBranch returns the open pull requests whose head has the given
-// branch name. GitHub may include same-named branches from forks, so the caller
-// must still verify the head repository and commit.
-func (c *Client) OpenPRsForBranch(ctx context.Context, dir, branch string) ([]FullPR, error) {
-	out, err := c.runIn(ctx, dir, "pr", "list", "--head", branch, "--state", "open",
-		"--limit", "100", "--json", fullPRFields)
-	if err != nil {
-		return nil, err
+// CurrentBranchPR asks GitHub CLI to resolve the PR associated with the
+// checkout's branch configuration and remotes. Unlike `pr list --head`, this
+// distinguishes an intended fork PR from an unrelated fork using the same
+// branch name.
+func (c *Client) CurrentBranchPR(ctx context.Context, dir string) (FullPR, bool, error) {
+	pr, err := c.ViewPR(ctx, dir, 0)
+	if err == nil {
+		if pr.State != "OPEN" {
+			return FullPR{}, false, nil
+		}
+		return pr, true, nil
 	}
-	var prs []FullPR
-	if err := json.Unmarshal(out, &prs); err != nil {
-		return nil, fmt.Errorf("gh pr list --head %s: %w", branch, err)
+	if strings.Contains(strings.ToLower(err.Error()), "no pull requests found") {
+		return FullPR{}, false, nil
 	}
-	return prs, nil
+	return FullPR{}, false, err
 }
 
 // DefaultBranch returns the repository's default branch for the checkout.
