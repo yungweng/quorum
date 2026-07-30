@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,17 +128,25 @@ func (w *Writer) Println(s string) {
 	fmt.Fprintln(w.Out, w.indent+s)
 }
 
-// Section prints a heading with a blank line before it.
+// Section prints a heading with a blank line before it, and pushes its count
+// out to the right edge of the block so that every section's figure lines up
+// in one column instead of trailing its own title at a different offset.
 func (w *Writer) Section(title string, count int, total int) {
 	fmt.Fprintln(w.Out)
 	head := strings.ToUpper(title)
+	badge := ""
 	switch {
 	case total > 0:
-		head = fmt.Sprintf("%s  %d of %d", head, count, total)
+		badge = fmt.Sprintf("%d / %d", count, total)
 	case count > 0:
-		head = fmt.Sprintf("%s  %d", head, count)
+		badge = strconv.Itoa(count)
 	}
-	fmt.Fprintln(w.Out, w.Bold(head))
+	if badge == "" {
+		fmt.Fprintln(w.Out, w.Bold(head))
+		return
+	}
+	gap := max(w.Cols()-Cells(head)-Cells(badge), 2)
+	fmt.Fprintln(w.Out, w.Bold(head)+strings.Repeat(" ", gap)+w.Dim(badge))
 }
 
 // Ago renders how long ago t was, in the shortest form that stays unambiguous.

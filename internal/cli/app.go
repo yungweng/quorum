@@ -56,6 +56,11 @@ type app struct {
 	agentOn bool
 	agentAt time.Time
 
+	// tick advances once per watch frame and drives the one animation on the
+	// dashboard. It only moves while work is in flight, so an idle dashboard
+	// still renders an identical frame and is never repainted.
+	tick int
+
 	removeAll func(string) error // replaced by gc tests that need deterministic failures
 }
 

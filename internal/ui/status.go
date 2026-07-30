@@ -24,24 +24,35 @@ func (w *Writer) SymFail() string {
 	return "FAIL:"
 }
 
-// Rule prints a horizontal separator.
+// Rule prints a horizontal separator across the block width.
+//
+// It used to be sixty columns whatever the terminal did, which on a wide
+// screen stops halfway under content that keeps going and is the single most
+// obvious sign of output that was never fitted to its terminal.
 func (w *Writer) Rule() {
-	line := strings.Repeat("-", 60)
+	unit := "-"
 	if w.Color {
-		line = strings.Repeat("─", 60)
+		unit = "─"
 	}
-	fmt.Fprintln(w.Out, w.Dim(line))
+	fmt.Fprintln(w.Out, w.Dim(strings.Repeat(unit, max(w.Cols(), 1))))
 }
 
-// Row prints one aligned "label   value" line of a run header.
+// labelColumn is the width of the label column in a run header. It is wide
+// enough for the longest label any header uses, so review and babysit line
+// their values up at the same offset.
+const labelColumn = 11
+
+// Row prints one aligned "label   value" line of a run header. Labels are dim
+// and lowercase so the eye lands on the values, which are what change.
 func (w *Writer) Row(label, value string) {
-	fmt.Fprintf(w.Out, "  %-10s %s\n", label, value)
+	fmt.Fprintf(w.Out, "  %s %s\n", w.Dim(Pad(strings.ToLower(label), labelColumn)), value)
 }
 
-// Step prints a section heading with a blank line before it.
+// Step prints a section heading with a blank line before it, in the same voice
+// as Section so a babysit run and the dashboard read as one tool.
 func (w *Writer) Step(title string) {
 	fmt.Fprintln(w.Out)
-	fmt.Fprintln(w.Out, w.Bold("==> "+title))
+	fmt.Fprintln(w.Out, w.Bold(strings.ToUpper(title)))
 }
 
 // Status is the single transient line at the bottom of the output, redrawn in
@@ -79,6 +90,9 @@ func (s *Status) Clear() {
 	fmt.Fprint(s.w.Out, "\r\x1b[K")
 	s.shown = false
 }
+
+// Spinner returns the current frame of the braille spinner for tick.
+func Spinner(tick int) string { return spinFrames[tick%len(spinFrames)] }
 
 // Notify sends an OSC 777 terminal notification.
 //

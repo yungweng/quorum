@@ -134,8 +134,11 @@ func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
 	}, "start\nok 1 30 1\n")
 
 	screen, shown := render(t, a, nil)
+	if got := sectionBadge(t, screen, "REVIEWING"); got != "0 / 6" {
+		t.Errorf("a manual review took an agent slot: heading says %q", got)
+	}
 	for _, want := range []string{
-		"REVIEWING  0 of 6", "api #42", "tenant scoping",
+		"api #42", "tenant scoping",
 		"manual", "2m", "1/2 reviewers done",
 	} {
 		if !strings.Contains(screen, want) {
@@ -234,8 +237,8 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	}
 	// It must not be counted against the review budget: babysit takes no slot,
 	// so a count next to the heading would be a budget that does not exist.
-	if strings.Contains(screen, "BABYSITTING  1 of") {
-		t.Errorf("the fix loop was counted against the review slots:\n%s", screen)
+	if got := sectionBadge(t, screen, "BABYSITTING"); strings.Contains(got, "/") {
+		t.Errorf("the fix loop was counted against the review slots: heading says %q", got)
 	}
 	if got := lineWith(t, screen, "api #42"); !strings.Contains(got, "merged") {
 		t.Errorf("the merged fix loop was not labelled: %q", got)
@@ -268,8 +271,8 @@ func TestDashboardDoesNotShowAnAgentBabysitTwice(t *testing.T) {
 	if !strings.Contains(screen, "waiting for CI") {
 		t.Errorf("the agent's fix loop is missing from BABYSITTING:\n%s", screen)
 	}
-	if !strings.Contains(screen, "REVIEWING  1 of 6") {
-		t.Errorf("the agent's fix loop is missing from the scheduler capacity count:\n%s", screen)
+	if got := sectionBadge(t, screen, "REVIEWING"); got != "1 / 6" {
+		t.Errorf("the agent's fix loop is missing from the scheduler capacity count: heading says %q", got)
 	}
 }
 
@@ -295,7 +298,10 @@ func TestDashboardShowsADirectRunBeforeItsStateUpdate(t *testing.T) {
 			if strings.Contains(screen, "nothing under review right now") {
 				t.Errorf("a claimed direct review was reported as idle:\n%s", screen)
 			}
-			for _, want := range []string{"REVIEWING  1 of 6", "api #42", "agent", "starting up"} {
+			if got := sectionBadge(t, screen, "REVIEWING"); got != "1 / 6" {
+				t.Errorf("preparing direct review is not counted: heading says %q", got)
+			}
+			for _, want := range []string{"api #42", "agent", "starting up"} {
 				if !strings.Contains(screen, want) {
 					t.Errorf("preparing direct review is missing %q:\n%s", want, screen)
 				}
@@ -428,6 +434,38 @@ func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 
 // Every line has to fit the terminal: watch paints a fixed number of rows, and
 // a line that wraps pushes the rest of the frame off the bottom.
+// A wide terminal puts what is running beside what the machine is set up to
+// do, instead of below it. A narrow one must still get every section.
+func TestDashboardUsesTwoColumnsOnlyWhenThereIsRoom(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = 5
+
+	draw := func(width int) string {
+		var b strings.Builder
+		a.dashboard(&ui.Writer{Out: &b, Width: width}, nil)
+		return b.String()
+	}
+
+	wide := draw(twoColumnMin)
+	if !strings.Contains(lineWith(t, wide, "REVIEWING"), "BABYSITTING") {
+		t.Errorf("reviewing and babysitting did not share a row:\n%s", wide)
+	}
+	if !strings.Contains(lineWith(t, wide, "QUEUED"), "SYSTEM") {
+		t.Errorf("queued and system did not share a row:\n%s", wide)
+	}
+
+	narrow := draw(twoColumnMin - 1)
+	if strings.Contains(lineWith(t, narrow, "REVIEWING"), "BABYSITTING") {
+		t.Errorf("a narrow terminal was given two columns:\n%s", narrow)
+	}
+	// Stacking must not lose a section on the way.
+	for _, want := range []string{"REVIEWING", "BABYSITTING", "QUEUED", "SYSTEM", "5.0 GB budget"} {
+		if !strings.Contains(narrow, want) {
+			t.Errorf("stacked dashboard is missing %q:\n%s", want, narrow)
+		}
+	}
+}
+
 func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	a := testApp(t)
 	longKey := "acme/" + strings.Repeat("r", 100) + "#1"
@@ -451,19 +489,46 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 		Commits: 99,
 	})
 
-	for _, width := range []int{80, 100} {
+	// A title whose runes and columns disagree, which is what used to push
+	// every column to its right out past the edge of the screen.
+	record(t, a, "acme/web#4", func(r *state.Record) {
+		r.Title = "✨ " + strings.Repeat("日本語のタイトル ", 8)
+		r.Mark(state.Pending, "waiting")
+	})
+
+	// Both sides of the two column threshold, and a terminal wider than the
+	// layout cap, where lines must stop at the cap rather than at the edge.
+	for _, width := range []int{80, 100, 112, 140, 220} {
 		var b strings.Builder
 		w := &ui.Writer{Out: &b, Width: width}
 		a.dashboard(w, map[string]string{longKey: gh.StateClosed, "acme/api#2": gh.StateMerged})
+		limit := min(width, ui.MaxWidth)
 		for _, line := range strings.Split(b.String(), "\n") {
-			if len([]rune(line)) > width {
-				t.Errorf("line is %d cells wide, terminal is %d: %q", len([]rune(line)), width, line)
+			if ui.Cells(line) > limit {
+				t.Errorf("line is %d columns wide, budget is %d: %q", ui.Cells(line), limit, line)
 			}
 		}
 	}
 }
 
 // lineWith returns the single screen line containing want.
+// sectionBadge returns the count a section heading carries at its right edge,
+// or "" when it carries none. The gap in between depends on the terminal
+// width, so the badge has to be read off the line rather than matched as one
+// literal string.
+func sectionBadge(t *testing.T, screen, heading string) string {
+	t.Helper()
+	for _, line := range strings.Split(ui.StripANSI(screen), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), heading)
+		if !ok {
+			continue
+		}
+		return strings.TrimSpace(rest)
+	}
+	t.Fatalf("no %s heading:\n%s", heading, screen)
+	return ""
+}
+
 func lineWith(t *testing.T, screen, want string) string {
 	t.Helper()
 	for _, line := range strings.Split(screen, "\n") {

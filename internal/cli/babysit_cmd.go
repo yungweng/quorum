@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -231,23 +232,25 @@ type loopTermReporter struct {
 func (l *loopTermReporter) Header(h loop.Header) {
 	o := l.out
 	o.Rule()
-	o.Row("PR", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)))
-	o.Row("Repo", h.Repo)
-	o.Row("Branch", h.Branch+" -> "+h.Base)
-	o.Row("Model", modelDesc(h.Model, h.Effort))
+	o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)))
+	o.Row("repo", h.Repo)
+	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
+	o.Row("model", modelDesc(h.Model, h.Effort))
+	// The sandbox line is the one thing here worth reading twice: bypassed
+	// means these sessions push and run tests unattended.
 	if h.Bypass {
-		o.Row("Sandbox", "bypassed (--dangerously-bypass-approvals-and-sandbox)")
+		o.Row("sandbox", o.Yellow("bypassed")+o.Dim("  --dangerously-bypass-approvals-and-sandbox"))
 	} else {
-		o.Row("Sandbox", "codex defaults (--sandboxed)")
+		o.Row("sandbox", "codex defaults"+o.Dim("  --sandboxed"))
 	}
+	mode := "autonomous"
 	if h.Interactive {
-		o.Row("Mode", "interactive (gates ask in the terminal)")
-	} else {
-		o.Row("Mode", "autonomous")
+		mode = "interactive" + o.Dim("  gates ask in the terminal")
 	}
-	o.Row("Loops", fmt.Sprintf("max %d review rounds, %d CI fixes", h.MaxIter, h.MaxCIFixes))
-	o.Row("Timeout", durationText(h.FixTimeout)+" per codex fix step")
-	o.Row("Run dir", h.RunDir)
+	o.Row("mode", mode)
+	o.Row("limits", fmt.Sprintf("%d review rounds, %d CI fixes", h.MaxIter, h.MaxCIFixes)+
+		o.Dim(fmt.Sprintf("  ·  %s per fix step", durationText(h.FixTimeout))))
+	o.Row("run dir", o.Link(o.Dim(filepath.Base(h.RunDir)), "file://"+h.RunDir))
 	o.Rule()
 }
 
@@ -341,10 +344,10 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 	o := l.out
 	fmt.Println()
 	o.Rule()
-	o.Row("PR", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+" "+res.PR.URL)
-	o.Row("Branch", res.PR.HeadRefName)
-	o.Row("Rounds", fmt.Sprintf("%d review round(s)", res.Rounds))
-	o.Row("Duration", ui.Duration(res.Duration))
+	o.Row("pr", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+"  "+o.Link(o.Blue(res.PR.URL), res.PR.URL))
+	o.Row("branch", res.PR.HeadRefName)
+	o.Row("rounds", fmt.Sprintf("%d review round(s)", res.Rounds))
+	o.Row("duration", ui.Duration(res.Duration))
 	if len(res.RoundLog) > 0 {
 		fmt.Println("  Commits per round:")
 		for _, r := range res.RoundLog {
@@ -356,7 +359,7 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 	}
 	switch {
 	case res.Converged && res.DisputeAccepted:
-		o.Row("Result", o.Green("CI green; remaining findings disputed by Codex and accepted"))
+		o.Row("result", o.Green("CI green, remaining findings disputed by Codex and accepted"))
 		fmt.Println("  Note: the review comment on the PR still lists the disputed findings.")
 		if res.DisputeText != "" {
 			for _, line := range strings.Split(res.DisputeText, "\n") {
@@ -366,11 +369,11 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 		o.Rule()
 		l.Notify("Fertig", fmt.Sprintf("PR #%d fertig; Disputes akzeptiert, bereit fuer den manuellen Test", res.PR.Number))
 	case res.Converged:
-		o.Row("Result", o.Green("review clean, CI green"))
+		o.Row("result", o.Green("review clean, CI green"))
 		o.Rule()
 		l.Notify("Fertig", fmt.Sprintf("PR #%d ist bereit fuer den manuellen Test", res.PR.Number))
 	default:
-		o.Row("Result", o.Red("not converged"))
+		o.Row("result", o.Red("not converged"))
 		o.Rule()
 	}
 }
