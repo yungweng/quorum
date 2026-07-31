@@ -193,12 +193,12 @@ func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo stri
 	}
 }
 
-// recordAutoMergeFailure preserves the successful review but marks its failed
-// final action. ReqAt is recorded so the next poll does not spend tokens
-// repeating a review whose exact head was already inspected.
+// recordAutoMergeFailure preserves the successful review and records the
+// failed final action as its reason. ReqAt marks this request handled, while
+// resetting Fails keeps merge errors out of the review retry budget.
 func (r *Runner) recordAutoMergeFailure(key, reqAt, runDir string, findings review.Findings, reason string) {
 	r.mutate(key, func(rec *state.Record) {
-		rec.Mark(state.Failed, reason)
+		rec.Mark(state.OK, reason)
 		rec.SHA = findings.HeadSHA
 		rec.RunDir = runDir
 		rec.CommentURL = urlOf(findings)
@@ -207,7 +207,7 @@ func (r *Runner) recordAutoMergeFailure(key, reqAt, runDir string, findings revi
 		rec.Suggestions = state.Num(findings.Suggestions)
 		rec.Questions = state.Num(findings.Questions)
 		rec.ReqAt = reqAt
-		rec.Fails++
+		rec.Fails = 0
 	})
 }
 

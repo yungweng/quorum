@@ -10,6 +10,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/state"
@@ -140,27 +141,37 @@ func TestSummaryLine(t *testing.T) {
 	}
 }
 
-func TestAutoMergeFailureMarksRequestHandled(t *testing.T) {
+func TestAutoMergeFailurePreservesSuccessfulReview(t *testing.T) {
 	dir := t.TempDir()
 	r := &Runner{P: paths.P{
 		StateFile:   filepath.Join(dir, "state.json"),
 		HistoryFile: filepath.Join(dir, "history.jsonl"),
 	}}
+	if err := state.Mutate(r.P.StateFile, "acme/api#42", func(rec *state.Record) {
+		rec.Fails = 2
+	}); err != nil {
+		t.Fatal(err)
+	}
 	url := "https://example.invalid/comment/42"
+	reason := "auto-merge failed after the approval was posted"
 	r.recordAutoMergeFailure("acme/api#42", "2026-07-31T09:00:00Z", "/run/42", review.Findings{
 		PR: 42, HeadSHA: "abc123", Posted: true, CommentURL: &url, Suggestions: 2, Questions: 1,
-	}, "auto-merge failed after the approval was posted")
+	}, reason)
 
 	file, err := state.Read(r.P.StateFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec := file.PRs["acme/api#42"]
-	if rec.Status != state.Failed || rec.ReqAt != "2026-07-31T09:00:00Z" || rec.SHA != "abc123" {
+	if rec.Status != state.OK || rec.Reason != reason || rec.ReqAt != "2026-07-31T09:00:00Z" || rec.SHA != "abc123" {
 		t.Fatalf("record = %+v", rec)
 	}
-	if rec.CommentURL != url || rec.Suggestions != 2 || rec.Questions != 1 || rec.Fails != 1 {
+	if rec.CommentURL != url || rec.Suggestions != 2 || rec.Questions != 1 || rec.Fails != 0 {
 		t.Fatalf("review result was not preserved: %+v", rec)
+	}
+	runs := history.Read(r.P.HistoryFile, 0)
+	if len(runs) != 1 || runs[0].Outcome != history.OK || !runs[0].Reviewed || runs[0].Reason != reason {
+		t.Fatalf("history = %+v", runs)
 	}
 }
 

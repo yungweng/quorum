@@ -252,6 +252,24 @@ func TestOpenSectionListsReviewedPullRequestsThatAreStillOpen(t *testing.T) {
 	}
 }
 
+func TestOpenSectionKeepsReviewedPullRequestAfterMergeFailure(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "protected merge"
+		r.CommentURL = "https://example.invalid/comment/42"
+		r.Suggestions = 1
+		r.Mark(state.OK, "auto-merge failed: permission denied")
+	})
+
+	screen, _ := render(t, a, nil)
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "protected merge", "0B 0C 1S", "comment"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("OPEN is missing %q after a merge failure:\n%s", want, screen)
+		}
+	}
+}
+
 func TestDashboardShowsPRAuthorInEverySection(t *testing.T) {
 	a := testApp(t)
 	record(t, a, "acme/open#42", func(r *state.Record) {
