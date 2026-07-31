@@ -89,7 +89,11 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	}
 	// Derive current reviewer state from submission time, independent of the
 	// order in which GitHub or a paginated response happens to return reviews.
+	// Review IDs break ties when GitHub timestamps have the same precision.
 	sort.SliceStable(reviews, func(i, j int) bool {
+		if reviews[i].SubmittedAt.Equal(reviews[j].SubmittedAt) {
+			return reviews[i].ID < reviews[j].ID
+		}
 		return reviews[i].SubmittedAt.Before(reviews[j].SubmittedAt)
 	})
 	approved := false

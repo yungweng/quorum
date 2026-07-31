@@ -156,6 +156,29 @@ esac`)
 	}
 }
 
+func TestRunOrdersEqualReviewTimestampsByID(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"id":102,"state":"CHANGES_REQUESTED","commit_id":"abc123","submitted_at":"2026-07-31T10:00:00Z","user":{"login":"reviewer"}},{"id":101,"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T10:00:00Z","user":{"login":"reviewer"}}]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"id":103,"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
+  7) echo '{"merged":true}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ApprovalCreated {
+		t.Fatalf("obsolete approval was treated as the current review: %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "event=APPROVE") {
+		t.Fatalf("approval was not renewed after the newer change request:\n%s", args)
+	}
+}
+
 func TestRunReportsPendingBranchRequirements(t *testing.T) {
 	client, _ := fakeGH(t, `
 case "$n" in
