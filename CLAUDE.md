@@ -137,9 +137,9 @@ make check
 go run . --help && go run . review --help && go run . babysit --help
 ```
 
-Project-local Claude Code and Codex Stop hooks run `make check` after an agent
-changes Go or check configuration. Their session state lives under `.git` and
-must not be moved into the working tree.
+The project-local Claude Code Stop hook runs `make check` after a session
+changes Go or check configuration. Its state lives under `.git` and must not
+be moved into the working tree.
 
 ## Test data
 

@@ -58,10 +58,9 @@ unformatted staged Go files, while pre-push runs the full check against the
 commits being pushed. Run the same format, race-test, build and lint checks
 directly with `make check`.
 
-Claude Code and Codex also load the project hooks from `.claude/` and `.codex/`.
-After either agent changes Go or check configuration, its Stop hook runs
-`make check` and returns failures to the agent. Review new or changed hooks when
-the client asks; Codex exposes that review through `/hooks`.
+Claude Code also loads the project hooks from `.claude/`. After it changes Go
+or check configuration, its Stop hook runs `make check` and returns failures to
+the session. Review new or changed hooks when the client asks.
 
 ## quorum review
 

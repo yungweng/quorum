@@ -101,7 +101,7 @@ func TestHookCommandsExitOutsideRepository(t *testing.T) {
 		Hooks map[string][]matcher `json:"hooks"`
 	}
 
-	for _, name := range []string{".claude/settings.json", ".codex/hooks.json"} {
+	for _, name := range []string{".claude/settings.json"} {
 		contents, err := os.ReadFile(filepath.Join(projectRoot(t), filepath.FromSlash(name)))
 		if err != nil {
 			t.Fatal(err)
