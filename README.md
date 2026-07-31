@@ -120,17 +120,18 @@ Three situations that used to need a human are decided automatically. Pass
   back for it to answer itself; after three rounds of that the run gives up.
 - **Disputed findings.** Review findings can be wrong, so a dispute is never
   accepted on first sight: the session must survive one forced re-check where it
-  actively tries to reproduce each finding. **A dispute it upholds still appears
-  on the PR as a review finding, so read the run summary before merging.**
+  actively tries to reproduce each finding. If the dispute survives, the
+  pipeline posts the final rebuttal with a link to the review comment. The
+  original review stays unchanged, so the PR conversation preserves both sides.
 - **Changed `.envrc` files.** A run stops before loading an `.envrc` changed by
   the target unless you pass `--allow-envrc-change` after reading it. Changes
   made during a fix round are printed before `direnv allow` runs; with the
   sandbox bypassed the session can execute anything anyway.
 
-Every fix round ends with a comment on the PR describing what was fixed and what
-was left alone as intended. The session writes the text, in the language of the
-PR description; the pipeline posts it, so it appears as an ordinary comment from
-you.
+Every pushed review fix and CI fix ends with a comment on the PR describing what
+failed, what changed and which checks ran. The session writes the text, in the
+language of the PR description; the pipeline posts it, so it appears as an
+ordinary comment from you.
 
 **Do not push to the PR branch while a run is active.** The pipeline also
 refuses dirty or diverged checkouts and fork PRs;

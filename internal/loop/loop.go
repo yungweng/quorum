@@ -115,10 +115,15 @@ type Result struct {
 	Converged       bool
 	DisputeAccepted bool
 	DisputeText     string
-	RoundLog        []RoundEntry
-	RunDir          string
-	Duration        time.Duration
-	LastFindings    review.Findings
+	// DisputeCommentURL is the linked rebuttal posted after an accepted dispute.
+	// DisputeCommentPosted distinguishes a successful post with no URL in gh's
+	// output from a failed post.
+	DisputeCommentURL    string
+	DisputeCommentPosted bool
+	RoundLog             []RoundEntry
+	RunDir               string
+	Duration             time.Duration
+	LastFindings         review.Findings
 }
 
 // Pipeline runs the review-fix cycle.
@@ -429,6 +434,8 @@ func (r *run) execute() (*Result, error) {
 				res.Converged = true
 				res.DisputeAccepted = true
 				res.DisputeText = r.disputeText
+				res.DisputeCommentURL, res.DisputeCommentPosted = r.postDisputeComment(
+					iteration, findingsCommentURL(findings), r.disputeText)
 				break
 			}
 			// The dispute gate only returns unaccepted once new commits exist.
@@ -438,7 +445,8 @@ func (r *run) execute() (*Result, error) {
 		if err := r.pushBranch(); err != nil {
 			return res, err
 		}
-		r.postFixComment(iteration, preFixSHA)
+		r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
+			fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA)
 
 		// Overlap the next review with this round's CI wait.
 		if iteration < r.o.MaxIter {
@@ -626,40 +634,105 @@ func (r *run) recordRound(label, preSHA string) {
 	}
 }
 
-// postFixComment posts the round's fix log to the PR.
+// postFixComment posts one pushed fix step's log to the PR.
 //
 // The text comes from the session's PR COMMENT block. A later gate step may
-// have produced the newest message, so the round's own message is checked as
+// have produced the newest message, so the step's own message is checked as
 // well; the commit list is the fallback. The pipeline posts it rather than the
 // session, which is what keeps it a normal comment from the user.
-func (r *run) postFixComment(round int, preSHA string) {
+func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) {
 	if r.target.BranchOnly {
 		return
 	}
-	body := section(r.lastMsg, MarkerComment)
+	commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
+	if commits == "" {
+		return
+	}
+	var original string
+	if data, err := os.ReadFile(filepath.Join(r.msgDir, tag+".md")); err == nil {
+		original = string(data)
+	}
+	body := fixCommentBody(label, reviewLabel, reviewURL, r.lastMsg, original, commits)
+	r.postPRComment("fix-log comment", body)
+}
+
+// postDisputeComment posts only the rebuttal that survived the dispute gate.
+// Earlier claims are deliberately kept off the PR because the adversarial
+// re-check may still prove them wrong.
+func (r *run) postDisputeComment(round int, reviewURL, dispute string) (string, bool) {
+	if r.target.BranchOnly {
+		return "", false
+	}
+	body := disputeCommentBody(round, reviewURL, dispute)
 	if body == "" {
-		if data, err := os.ReadFile(filepath.Join(r.msgDir, fmt.Sprintf("fix-round-%d.md", round))); err == nil {
-			body = section(string(data), MarkerComment)
-		}
+		return r.postPRComment("rebuttal", body)
 	}
-	if body != "" {
-		// Drop the marker line itself.
-		if _, rest, ok := strings.Cut(body, "\n"); ok {
-			body = rest
-		} else {
-			body = ""
-		}
+	if reviewURL == "" {
+		r.rep.Warn(fmt.Sprintf("review round %d has no comment URL; posting the rebuttal without a backlink", round))
 	}
+	return r.postPRComment("rebuttal", body)
+}
+
+func (r *run) postPRComment(kind, body string) (string, bool) {
 	if strings.TrimSpace(body) == "" {
-		commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
-		if commits == "" {
-			return
-		}
-		body = fmt.Sprintf("Review round %d:\n\n```\n%s\n```", round, commits)
+		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment body is empty", kind, r.pr.Number))
+		return "", false
 	}
-	if _, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, body); err != nil {
-		r.rep.Warn(fmt.Sprintf("could not post the fix-log comment to PR #%d: %v", r.pr.Number, err))
+	url, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, body)
+	if err != nil {
+		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: %v", kind, r.pr.Number, err))
+		return "", false
 	}
+	return url, true
+}
+
+func fixCommentBody(label, reviewLabel, reviewURL, current, original, commits string) string {
+	body := markerContent(current, MarkerComment)
+	if body == "" {
+		body = markerContent(original, MarkerComment)
+	}
+	if body == "" {
+		body = fmt.Sprintf("Commits:\n\n```text\n%s\n```", strings.TrimSpace(commits))
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "### %s", label)
+	if reviewURL != "" && reviewLabel != "" {
+		fmt.Fprintf(&b, "\n\n[%s](%s)", reviewLabel, reviewURL)
+	}
+	fmt.Fprintf(&b, "\n\n%s", body)
+	return b.String()
+}
+
+func disputeCommentBody(round int, reviewURL, dispute string) string {
+	body := markerContent(dispute, MarkerDisputed)
+	if body == "" {
+		return ""
+	}
+	title := fmt.Sprintf("review round %d", round)
+	if reviewURL != "" {
+		title = fmt.Sprintf("[%s](%s)", title, reviewURL)
+	}
+	return fmt.Sprintf("### Rebuttal to %s\n\n%s", title, body)
+}
+
+func markerContent(text, marker string) string {
+	block := section(text, marker)
+	if block == "" {
+		return ""
+	}
+	_, body, ok := strings.Cut(block, "\n")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(body)
+}
+
+func findingsCommentURL(findings review.Findings) string {
+	if findings.CommentURL == nil {
+		return ""
+	}
+	return *findings.CommentURL
 }
 
 // gcOldRuns drops run directories nothing has looked at for a week.

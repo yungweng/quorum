@@ -200,7 +200,8 @@ func (r *run) ensureCIGreen() error {
 		if err != nil {
 			return err
 		}
-		tag := fmt.Sprintf("ci-fix-%d", attempt)
+		fixNumber := r.ciFixTotal + 1
+		tag := fmt.Sprintf("ci-fix-%d", fixNumber)
 		r.enter(PhaseCIFix)
 		if err := r.codexCall(tag, ciFixPrompt(r.pr.Number, string(failsJSON))); err != nil {
 			return err
@@ -211,11 +212,13 @@ func (r *run) ensureCIGreen() error {
 		if err := r.ensureCommitted(tag); err != nil {
 			return err
 		}
-		r.ciFixTotal++
-		r.recordRound(fmt.Sprintf("CI fix %d", r.ciFixTotal), preSHA)
+		r.ciFixTotal = fixNumber
+		label := fmt.Sprintf("CI fix %d", fixNumber)
+		r.recordRound(label, preSHA)
 		if err := r.pushBranch(); err != nil {
 			return err
 		}
+		r.postFixComment(tag, label, "", "", preSHA)
 	}
 }
 

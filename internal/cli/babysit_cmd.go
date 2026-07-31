@@ -430,7 +430,14 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 		}
 		o.Row("result", o.Green(result))
 		if !res.BranchOnly {
-			fmt.Println("  Note: the review comment on the PR still lists the disputed findings.")
+			switch {
+			case res.DisputeCommentURL != "":
+				o.Row("rebuttal", o.Link(o.Blue(res.DisputeCommentURL), res.DisputeCommentURL))
+			case res.DisputeCommentPosted:
+				o.Row("rebuttal", o.Green("posted"))
+			default:
+				fmt.Println("  Note: the rebuttal could not be posted; it is included below.")
+			}
 		}
 		if res.DisputeText != "" {
 			for _, line := range strings.Split(res.DisputeText, "\n") {

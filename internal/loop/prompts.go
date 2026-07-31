@@ -74,8 +74,12 @@ func ciFixPrompt(number int, failsJSON string) string {
 
 %s
 
-Inspect the failures with gh (for example: gh run view <run-id> --log-failed; the run id is the number after /runs/ in the link). Reproduce locally where practical, fix the problems, run the affected checks locally, commit, and push. Do not wait for CI; the pipeline watches the checks for you and starts another fix session if they are still red.`,
-		number, failsJSON)
+Inspect the failures with gh (for example: gh run view <run-id> --log-failed; the run id is the number after /runs/ in the link). Reproduce locally where practical, fix the problems, run the affected checks locally, commit, and push. Do not wait for CI; the pipeline watches the checks for you and starts another fix session if they are still red.
+
+End your final message with a line that is exactly:
+%s
+followed by a short log comment for the PR: what failed, what you changed and how, and which checks you ran. Write it in the language of the PR description, plain and factual, and never mention AI, agents, Codex, or automation in it. Use this marker for nothing else.`,
+		number, failsJSON, MarkerComment)
 }
 
 // fixRoundPrompt hands a review round's findings to the session.
@@ -107,7 +111,7 @@ Please check for each finding whether it is a real issue or might be intended be
 
 Unless you end with the DISPUTED FINDINGS marker, end your final message with a line that is exactly:
 %s
-followed by a short log comment for the PR: what you fixed and how, and which findings you left unchanged because they are intended. Write it in the language of the PR description, plain and factual, and never mention AI, agents, or automation in it. Use this marker for nothing else.
+followed by a short log comment for the PR: what you fixed and how, which checks you ran, and which findings you left unchanged because they are intended. Write it in the language of the PR description, plain and factual, and never mention AI, agents, or automation in it. Use this marker for nothing else.
 
 ---
 

@@ -106,6 +106,22 @@ func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 	}
 }
 
+func TestPRFixPromptsRequireACommentBlock(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"ci fix":     ciFixPrompt(12, "[]"),
+		"review fix": fixRoundPrompt(12, "", false, "## Summary\n\nfine"),
+	} {
+		if !strings.Contains(prompt, "a line that is exactly:\n"+MarkerComment) {
+			t.Errorf("%s prompt does not require the PR comment marker", name)
+		}
+		for _, want := range []string{"what", "which checks you ran", "language of the PR description", "never mention AI"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt is missing %q from the comment contract", name, want)
+			}
+		}
+	}
+}
+
 func TestBranchFixPromptDoesNotInventAPROrCIWatcher(t *testing.T) {
 	got := fixRoundPrompt(0, "feature/crumb-tray", true, "## Summary\n\nfine")
 	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", MarkerComment} {
