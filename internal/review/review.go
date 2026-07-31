@@ -25,6 +25,7 @@ import (
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
+	"github.com/yungweng/quorum/internal/runname"
 	"github.com/yungweng/quorum/internal/target"
 )
 
@@ -314,7 +315,7 @@ func (o Options) runDir(number int, branch string) (runPaths, error) {
 		stamp := time.Now().Format("20060102-150405")
 		name := fmt.Sprintf("pr-%d", number)
 		if number == 0 {
-			name = "branch-" + safeRunPart(branch)
+			name = "branch-" + runname.BranchPart(branch)
 		}
 		root = filepath.Join(o.RunsDir, fmt.Sprintf("%s-%s-%s",
 			strings.ReplaceAll(o.Repo, "/", "-"), name, stamp))
@@ -336,16 +337,6 @@ func (o Options) runDir(number int, branch string) (runPaths, error) {
 		all:      filepath.Join(out, "all-reviewers.md"),
 		findings: filepath.Join(out, "findings.json"),
 	}, nil
-}
-
-func safeRunPart(s string) string {
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.ReplaceAll(s, "\\", "-")
-	s = strings.ReplaceAll(s, "..", "-")
-	if s == "" {
-		return "unknown"
-	}
-	return s
 }
 
 // checkout puts the target head into a detached worktree and returns the base
@@ -412,7 +403,10 @@ func (r *Runner) allowDirenv(ctx context.Context, o Options, run runPaths, baseR
 		return nil
 	}
 	changed, err := r.Git.ChangedFiles(ctx, run.worktree, baseRef+"...HEAD", ".envrc", ":(glob)**/.envrc")
-	if err == nil && changed != "" && !o.AllowEnvrcChange {
+	if err != nil {
+		return fmt.Errorf("check changed .envrc files: %w", err)
+	}
+	if changed != "" && !o.AllowEnvrcChange {
 		return fmt.Errorf("%w:\n%s\nReview the .envrc change manually, then rerun with --allow-envrc-change if it is safe",
 			ErrEnvrcChanged, changed)
 	}

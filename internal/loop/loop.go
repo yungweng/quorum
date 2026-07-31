@@ -24,6 +24,7 @@ import (
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/runname"
 	"github.com/yungweng/quorum/internal/target"
 )
 
@@ -271,7 +272,7 @@ func (r *run) prepare() error {
 	stamp := time.Now().Format("20060102-150405")
 	targetName := fmt.Sprintf("pr-%d", pr.Number)
 	if tgt.BranchOnly {
-		targetName = "branch-" + safeRunPart(r.branch)
+		targetName = "branch-" + runname.BranchPart(r.branch)
 	}
 	r.root = filepath.Join(r.o.RunsDir, fmt.Sprintf("%s-%s-%s",
 		strings.ReplaceAll(r.o.Repo, "/", "-"), targetName, stamp))
@@ -346,16 +347,6 @@ func (r *run) prepare() error {
 		r.rep.Warn("no open PR: GitHub PR checks and PR comments are skipped; fix steps still run repository tests")
 	}
 	return nil
-}
-
-func safeRunPart(s string) string {
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.ReplaceAll(s, "\\", "-")
-	s = strings.ReplaceAll(s, "..", "-")
-	if s == "" {
-		return "unknown"
-	}
-	return s
 }
 
 // execute is the main loop.

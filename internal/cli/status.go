@@ -45,22 +45,7 @@ func (a *app) endsOnce() map[string]string {
 	if err != nil {
 		return nil
 	}
-	cutoff := time.Now().Add(-openWindow)
-	var keys []string
-	for _, e := range file.Entries() {
-		if e.Status != state.OK || e.Number() == 0 {
-			continue
-		}
-		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
-			continue
-		}
-		keys = append(keys, e.Key)
-		if len(keys) == openLimit*2 {
-			// Twice the section's own limit, so a few merged pull requests at
-			// the front cannot push the list short.
-			break
-		}
-	}
+	keys := recentReviewedPRKeys(file, time.Now())
 	if len(keys) == 0 {
 		return nil
 	}
@@ -79,6 +64,21 @@ func (a *app) endsOnce() map[string]string {
 		return nil
 	}
 	return states
+}
+
+func recentReviewedPRKeys(file state.File, now time.Time) []string {
+	cutoff := now.Add(-openWindow)
+	var keys []string
+	for _, e := range file.Entries() {
+		if e.Status != state.OK || e.Number() == 0 {
+			continue
+		}
+		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
+			continue
+		}
+		keys = append(keys, e.Key)
+	}
+	return keys
 }
 
 // dashboard renders everything quorum knows in one screen: what is running, what

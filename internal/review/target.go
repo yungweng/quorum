@@ -188,8 +188,18 @@ func legacyPRRunMatches(root string, tgt target.Target) bool {
 		return false
 	}
 	stem := strings.TrimSuffix(name, "-"+stamp)
-	if strings.HasSuffix(stem, "-branch-"+safeRunPart(tgt.PR.HeadRefName)) {
+	if strings.HasSuffix(stem, "-branch-"+legacySafeRunPart(tgt.PR.HeadRefName)) {
 		return false
 	}
 	return strings.HasSuffix(stem, fmt.Sprintf("-pr-%d", tgt.PR.Number))
+}
+
+func legacySafeRunPart(s string) string {
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	s = strings.ReplaceAll(s, "..", "-")
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }

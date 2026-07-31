@@ -42,6 +42,22 @@ func testApp(t *testing.T) *app {
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}
 }
 
+func TestRecentReviewedPRKeysIncludesEveryEligibleRecord(t *testing.T) {
+	now := time.Now()
+	file := state.File{PRs: map[string]state.Record{}}
+	for i := 1; i <= 25; i++ {
+		file.PRs[fmt.Sprintf("acme/api#%d", i)] = state.Record{
+			Status: state.OK,
+			At:     now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+		}
+	}
+
+	keys := recentReviewedPRKeys(file, now)
+	if len(keys) != 25 {
+		t.Fatalf("recent reviewed PR keys = %d, want 25", len(keys))
+	}
+}
+
 // render draws the dashboard onto a terminal-capable writer and returns both
 // the screen and the pull requests it says it drew.
 func render(t *testing.T, a *app, ends map[string]string) (string, []string) {
