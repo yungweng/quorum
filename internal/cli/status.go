@@ -38,21 +38,22 @@ func (a *app) cmdStatus(args []string) int {
 // pull request that is still waiting for someone from one that was merged an
 // hour ago, and would list both. One batched query covers every candidate. It
 // is decoration on a command that has always been instant, so it gets one
-// attempt and a short deadline, and a machine with no network simply falls back
-// to showing everything recent.
+// attempt and a short deadline. A machine with no network uses the last known
+// states; uncached pull requests are labelled as still being checked.
 func (a *app) endsOnce() map[string]string {
+	cached := readEndStateCache(a.p.PRStatesFile)
 	file, err := state.Read(a.p.StateFile)
 	if err != nil {
-		return nil
+		return cached
 	}
 	runs := history.Read(a.p.HistoryFile, 0)
 	keys := recentReviewedPRKeys(reviewedPRs(file, runs), time.Now())
 	if len(keys) == 0 {
-		return nil
+		return cached
 	}
 	t, err := a.findTools()
 	if err != nil {
-		return nil
+		return cached
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -62,8 +63,9 @@ func (a *app) endsOnce() map[string]string {
 	client.Log = nil
 	states, err := client.PRStates(ctx, keys)
 	if err != nil {
-		return nil
+		return cached
 	}
+	_ = writeEndStateCache(a.p.PRStatesFile, states)
 	return states
 }
 
@@ -85,8 +87,9 @@ func recentReviewedPRKeys(reviewed []state.Entry, now time.Time) []string {
 // ends says how a pull request finished on GitHub, keyed the same way as the
 // state file and holding gh.StateMerged and friends. It is optional: status
 // asks once before drawing, while watch refreshes it in the background.
-// dashboard returns the keys it drew, which is how watch knows what is worth
-// looking up next time.
+// dashboard returns the keys watch must look up next. That includes every
+// recent review which could belong under OPEN, even when a cached terminal
+// state keeps it off screen, plus the pull requests drawn elsewhere.
 func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	file, err := state.Read(a.p.StateFile)
 	if err != nil {
@@ -178,7 +181,8 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	for _, p := range babysits {
 		busy[p.Key()] = true
 	}
-	open := openPRs(reviewedPRs(file, historyRuns), busy, ends)
+	reviewed := reviewedPRs(file, historyRuns)
+	open, checking := openPRs(reviewed, busy, ends)
 
 	// What is running gets as much room as it needs and no more, and the log of
 	// finished runs gets the rest.
@@ -188,42 +192,46 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	// the time, while the runs that had actually happened were squeezed in
 	// underneath. The counts that used to justify those headings are on the
 	// status bar, so nothing is lost by collapsing them.
-	a.sectionOpen(w, open, ends)
+	a.sectionOpen(w, open, checking, ends)
 	a.sectionActive(w, running, manualReviews, babysits, queued, live, ends)
 	past := a.sectionHistory(w, recent, historyRuns, ends)
 	a.footer(w)
 
-	shown := make([]string, 0, len(open)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
-	shownSet := make(map[string]bool, cap(shown))
+	tracked := make([]string, 0, len(reviewed)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
+	trackedSet := make(map[string]bool, cap(tracked))
+	for _, key := range recentReviewedPRKeys(reviewed, time.Now()) {
+		tracked = append(tracked, key)
+		trackedSet[key] = true
+	}
 	for _, group := range [][]state.Entry{open, running, queued} {
 		for _, e := range group {
-			if shownSet[e.Key] {
+			if trackedSet[e.Key] {
 				continue
 			}
-			shown = append(shown, e.Key)
-			shownSet[e.Key] = true
+			tracked = append(tracked, e.Key)
+			trackedSet[e.Key] = true
 		}
 	}
 	for _, key := range past {
-		if !shownSet[key] {
-			shown = append(shown, key)
-			shownSet[key] = true
+		if !trackedSet[key] {
+			tracked = append(tracked, key)
+			trackedSet[key] = true
 		}
 	}
 	for _, run := range manualReviews {
 		key := run.Key()
-		if !shownSet[key] {
-			shown = append(shown, key)
-			shownSet[key] = true
+		if !trackedSet[key] {
+			tracked = append(tracked, key)
+			trackedSet[key] = true
 		}
 	}
 	for _, p := range babysits {
-		if key := p.Key(); !shownSet[key] {
-			shown = append(shown, key)
-			shownSet[key] = true
+		if key := p.Key(); !trackedSet[key] {
+			tracked = append(tracked, key)
+			trackedSet[key] = true
 		}
 	}
-	return shown
+	return tracked
 }
 
 func (a *app) header(w *ui.Writer) {
@@ -381,30 +389,32 @@ func reviewedPRs(file state.File, runs []history.Run) []state.Entry {
 // to happen to it: newest first, minus everything the active section already
 // shows, minus everything GitHub says has been merged or closed.
 //
-// ends may be empty, which is what a dashboard drawn before the first lookup
-// answers looks like. An unknown pull request is treated as open, so the list
-// starts complete and shortens as answers arrive, rather than starting empty
-// and looking as though nothing had been reviewed.
-func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]string) []state.Entry {
+// A missing state is not evidence that a pull request is open. It is counted
+// separately so the dashboard can say GitHub is still being checked without
+// presenting stale reviews as work that is waiting for a person.
+func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]string) ([]state.Entry, int) {
 	cutoff := time.Now().Add(-openWindow)
 	out := make([]state.Entry, 0, openLimit)
+	checking := 0
 	for _, e := range reviewed {
 		if busy[e.Key] {
-			continue
-		}
-		switch ends[e.Key] {
-		case gh.StateMerged, gh.StateClosed:
 			continue
 		}
 		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
 			continue
 		}
-		out = append(out, e)
-		if len(out) == openLimit {
-			break
+		switch ends[e.Key] {
+		case gh.StateMerged, gh.StateClosed:
+			continue
+		case gh.StateOpen, gh.StateAutoMerge:
+			if len(out) < openLimit {
+				out = append(out, e)
+			}
+		default:
+			checking++
 		}
 	}
-	return out
+	return out, checking
 }
 
 // sectionOpen is the top of the dashboard: the pull requests quorum has
@@ -415,10 +425,15 @@ func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]strin
 // two blockers scrolls away under later runs even though nobody has done
 // anything about it yet. This section keeps it in view until the pull request
 // is merged or closed.
-func (a *app) sectionOpen(w *ui.Writer, open []state.Entry, ends map[string]string) {
-	if len(open) == 0 {
+func (a *app) sectionOpen(w *ui.Writer, open []state.Entry, checking int, ends map[string]string) {
+	if len(open) == 0 && checking == 0 {
 		fmt.Fprintln(w.Out)
 		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim("      nothing reviewed is still open"))
+		return
+	}
+	if len(open) == 0 {
+		fmt.Fprintln(w.Out)
+		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim(fmt.Sprintf("      checking GitHub for %d reviewed PR%s", checking, plural(checking))))
 		return
 	}
 	w.Section("open", len(open), 0)
@@ -427,6 +442,16 @@ func (a *app) sectionOpen(w *ui.Writer, open []state.Entry, ends map[string]stri
 		a.prLine(w, openMark(w, e), e, ends[e.Key])
 		w.Printf("      %s\n", openDetail(w, e, now))
 	}
+	if checking > 0 {
+		w.Printf("      %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d more reviewed PR%s", checking, plural(checking))))
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // openMark colours the bullet by what the review found, so the pull request
@@ -1115,10 +1140,11 @@ type endStates struct {
 	state  map[string]string
 	keys   []string
 	change chan struct{}
+	path   string
 }
 
-func newEndStates() *endStates {
-	return &endStates{state: map[string]string{}, change: make(chan struct{}, 1)}
+func newEndStates(path string) *endStates {
+	return &endStates{state: readEndStateCache(path), change: make(chan struct{}, 1), path: path}
 }
 
 // snapshot is what the dashboard reads: a copy, so rendering never holds the
@@ -1154,16 +1180,19 @@ func (e *endStates) wanted() []string {
 
 func (e *endStates) store(states map[string]string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.state = states
+	e.state = maps.Clone(states)
+	snapshot := maps.Clone(e.state)
+	path := e.path
+	e.mu.Unlock()
+	_ = writeEndStateCache(path, snapshot)
 }
 
-// trackEnds keeps the merge state of the visible pull requests roughly current.
+// trackEnds keeps the merge state of relevant pull requests roughly current.
 //
 // It runs beside the redraw and never inside it. The dashboard repaints every
 // few seconds, and asking GitHub at that rate would make the screen wait on the
 // network and earn a rate limit for a fact that only changes when somebody
-// presses a button. One batched query covers every visible pull request.
+// presses a button. One batched query covers every tracked pull request.
 func (a *app) trackEnds(ctx context.Context, ghBin string, e *endStates) {
 	client := gh.New(ghBin)
 	// No retries and a short deadline: this is decoration, and the next pass is
@@ -1182,15 +1211,22 @@ func (a *app) trackEnds(ctx context.Context, ghBin string, e *endStates) {
 		case <-time.After(30 * time.Second):
 		}
 		keys := e.wanted()
-		if len(keys) == 0 {
-			continue
-		}
-		states, err := client.PRStates(ctx, keys)
-		if err != nil {
+		if err := refreshEndStates(ctx, client, e, keys); err != nil {
 			// Nothing on the screen depends on this, so a failed lookup keeps
 			// the previous answer rather than blanking what it already knows.
 			continue
 		}
-		e.store(states)
 	}
+}
+
+func refreshEndStates(ctx context.Context, client *gh.Client, e *endStates, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	states, err := client.PRStates(ctx, keys)
+	if err != nil {
+		return err
+	}
+	e.store(states)
+	return nil
 }

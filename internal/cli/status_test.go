@@ -28,15 +28,16 @@ func testApp(t *testing.T) *app {
 	t.Helper()
 	dir := t.TempDir()
 	p := paths.P{
-		StateDir:    dir,
-		StateFile:   filepath.Join(dir, "state.json"),
-		HistoryFile: filepath.Join(dir, "history.jsonl"),
-		Log:         filepath.Join(dir, "log"),
-		RunningDir:  filepath.Join(dir, "running"),
-		ManualDir:   filepath.Join(dir, "manual-reviews"),
-		ReviewRuns:  filepath.Join(dir, "runs"),
-		BabysitRuns: filepath.Join(dir, "babysit"),
-		DepsCache:   filepath.Join(dir, "deps"),
+		StateDir:     dir,
+		StateFile:    filepath.Join(dir, "state.json"),
+		PRStatesFile: filepath.Join(dir, "pr-states.json"),
+		HistoryFile:  filepath.Join(dir, "history.jsonl"),
+		Log:          filepath.Join(dir, "log"),
+		RunningDir:   filepath.Join(dir, "running"),
+		ManualDir:    filepath.Join(dir, "manual-reviews"),
+		ReviewRuns:   filepath.Join(dir, "runs"),
+		BabysitRuns:  filepath.Join(dir, "babysit"),
+		DepsCache:    filepath.Join(dir, "deps"),
 	}
 	cfg := config.Config{MaxConcurrent: 6, Reviewers: 6, PollInterval: 120, History: 20}
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}
@@ -77,7 +78,10 @@ func TestOpenSectionIncludesSuccessfulManualRuns(t *testing.T) {
 		}
 	}
 
-	screen, tracked := render(t, a, nil)
+	screen, tracked := render(t, a, map[string]string{
+		"acme/api#42": gh.StateOpen,
+		"acme/web#43": gh.StateOpen,
+	})
 	open := sectionOf(t, screen, "OPEN")
 	for _, want := range []string{"api #42", "manual review", "2B 1C 0S", "web #43", "manual fix loop"} {
 		if !strings.Contains(open, want) {
@@ -111,7 +115,10 @@ func TestOpenSectionKeepsManualResultsWhenMergeFails(t *testing.T) {
 		}
 	}
 
-	screen, _ := render(t, a, nil)
+	screen, _ := render(t, a, map[string]string{
+		"acme/api#42": gh.StateOpen,
+		"acme/web#43": gh.StateOpen,
+	})
 	open := sectionOf(t, screen, "OPEN")
 	for _, want := range []string{"api #42", "review result", "web #43", "fix-loop result", "merge failed", "permission denied"} {
 		if !strings.Contains(open, want) {
@@ -132,7 +139,7 @@ func TestDashboardSurfacesRecordedMergeFailure(t *testing.T) {
 		r.At = time.Now().Format(time.RFC3339)
 	})
 
-	screen, _ := render(t, a, nil)
+	screen, _ := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
 	for _, section := range []string{"OPEN", "HISTORY"} {
 		text := sectionOf(t, screen, section)
 		for _, want := range []string{"merge failed", "permission denied"} {
@@ -254,7 +261,7 @@ func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
 		StartedAt: time.Now().Add(-2 * time.Minute), Reviewers: 2,
 	}, "start\nok 1 30 1\n")
 
-	screen, shown := render(t, a, nil)
+	screen, shown := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
 	if got := sectionBadge(t, screen, "ACTIVE"); got != "0 / 6" {
 		t.Errorf("a manual review took an agent slot: heading says %q", got)
 	}
@@ -292,7 +299,7 @@ func TestOpenSectionListsReviewedPullRequestsThatAreStillOpen(t *testing.T) {
 		r.Mark(state.OK, "")
 	})
 
-	screen, shown := render(t, a, nil)
+	screen, shown := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
 	open := sectionOf(t, screen, "OPEN")
 	for _, want := range []string{"api #42", "tenant scoping", "0B 2C 0S", "comment"} {
 		if !strings.Contains(open, want) {
@@ -313,7 +320,7 @@ func TestOpenSectionKeepsReviewedPullRequestAfterMergeFailure(t *testing.T) {
 		r.Mark(state.OK, "auto-merge failed: permission denied")
 	})
 
-	screen, _ := render(t, a, nil)
+	screen, _ := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
 	open := sectionOf(t, screen, "OPEN")
 	for _, want := range []string{"api #42", "protected merge", "0B 0C 1S", "comment"} {
 		if !strings.Contains(open, want) {
@@ -341,7 +348,10 @@ func TestDashboardShowsPRAuthorInEverySection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	screen, _ := render(t, a, nil)
+	screen, _ := render(t, a, map[string]string{
+		"acme/open#42":    gh.StateOpen,
+		"acme/history#44": gh.StateMerged,
+	})
 	for _, want := range []string{
 		"open #42 · @open-author",
 		"active #43 · @active-author",
@@ -405,11 +415,14 @@ func TestOpenSectionStopsAtTheWindowAndTheLimit(t *testing.T) {
 		r.Mark(state.OK, "")
 		r.At = old
 	})
+	ends := map[string]string{}
 	for i := range openLimit + 5 {
-		record(t, a, fmt.Sprintf("acme/web#%d", i+1), func(r *state.Record) { r.Mark(state.OK, "") })
+		key := fmt.Sprintf("acme/web#%d", i+1)
+		record(t, a, key, func(r *state.Record) { r.Mark(state.OK, "") })
+		ends[key] = gh.StateOpen
 	}
 
-	screen, _ := render(t, a, nil)
+	screen, _ := render(t, a, ends)
 	open := sectionOf(t, screen, "OPEN")
 	if strings.Contains(open, "api #1") {
 		t.Errorf("a month old review is still listed as open:\n%s", screen)
@@ -689,8 +702,8 @@ func TestDashboardCrossesOutMergedPullRequests(t *testing.T) {
 	}
 }
 
-// Nothing may depend on the lookup having happened: watch draws its first frame
-// before GitHub has answered, and the answer never arrives when gh is missing.
+// A cache miss is not evidence that a pull request is open. The first frame
+// must say that GitHub is being checked without inventing work for the user.
 func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 	a := testApp(t)
 	record(t, a, "acme/api#1", func(r *state.Record) {
@@ -701,8 +714,12 @@ func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 	if strings.Contains(screen, "\x1b[9m") {
 		t.Errorf("something was struck out without a known state:\n%s", screen)
 	}
-	if !strings.Contains(screen, "api #1") {
-		t.Errorf("the pull request went missing:\n%s", screen)
+	open := sectionOf(t, screen, "OPEN")
+	if strings.Contains(open, "api #1") {
+		t.Errorf("an unknown pull request was reported as open:\n%s", screen)
+	}
+	if !strings.Contains(open, "checking GitHub for 1 reviewed PR") {
+		t.Errorf("the unknown state was not explained:\n%s", screen)
 	}
 }
 
@@ -813,7 +830,10 @@ func TestDashboardFallsBackToTheStateFileWhileTheLogIsEmpty(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	screen, _ = render(t, a, nil)
+	screen, _ = render(t, a, map[string]string{
+		"acme/api#42": gh.StateOpen,
+		"acme/web#7":  gh.StateMerged,
+	})
 	if !strings.Contains(screen, "web #7") {
 		t.Errorf("the logged run is missing:\n%s", screen)
 	}

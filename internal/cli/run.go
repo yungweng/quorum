@@ -164,7 +164,7 @@ func (a *app) cmdWatch(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	ends := newEndStates()
+	ends := newEndStates(a.p.PRStatesFile)
 	if t, err := a.findTools(); err == nil {
 		go a.trackEnds(ctx, t.GH, ends)
 	}
