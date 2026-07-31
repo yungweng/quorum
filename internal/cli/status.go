@@ -196,13 +196,13 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	if limit <= 0 {
 		limit = config.Default().History
 	}
-	if len(historyRuns) > limit {
-		historyRuns = historyRuns[:limit]
-	}
 	if len(recent) > limit {
 		recent = recent[:limit]
 	}
 	groups := groupHistory(historyRuns)
+	if len(groups) > limit {
+		groups = groups[:limit]
+	}
 	if len(groups) > 0 {
 		recent = nil
 	}

@@ -457,11 +457,16 @@ func (r *run) execute() (*Result, error) {
 				if r.o.DivergenceScan {
 					r.traceFix(iteration, preFixSHA, afterSHA, tag)
 				}
+				commentURL, commentPosted, err := r.postDisputeComment(
+					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
+				if err != nil {
+					return res, err
+				}
 				res.Converged = true
 				res.DisputeAccepted = true
 				res.DisputeText = r.disputeText
-				res.DisputeCommentURL, res.DisputeCommentPosted = r.postDisputeComment(
-					iteration, findingsCommentURL(findings), r.disputeText)
+				res.DisputeCommentURL = commentURL
+				res.DisputeCommentPosted = commentPosted
 				break
 			}
 			// The dispute gate only returns unaccepted once new commits exist.
@@ -701,18 +706,28 @@ func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) 
 // postDisputeComment posts only the rebuttal that survived the dispute gate.
 // Earlier claims are deliberately kept off the PR because the adversarial
 // re-check may still prove them wrong.
-func (r *run) postDisputeComment(round int, reviewURL, dispute string) (string, bool) {
+func (r *run) postDisputeComment(round int, reviewURL, dispute, reviewedSHA string) (string, bool, error) {
 	if r.target.BranchOnly {
-		return "", false
+		return "", false, nil
 	}
 	body := disputeCommentBody(round, reviewURL, dispute)
 	if body == "" {
-		return r.postPRComment("rebuttal", body, "")
+		url, posted := r.postPRComment("rebuttal", body, "")
+		return url, posted, nil
+	}
+	currentSHA, err := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+	if err != nil {
+		return "", false, fmt.Errorf("checking the pull request head before posting the rebuttal: %w", err)
+	}
+	if currentSHA != reviewedSHA {
+		return "", false, fmt.Errorf("the review is for %s but GitHub reports %s; refusing to post the rebuttal",
+			reviewedSHA, currentSHA)
 	}
 	if reviewURL == "" {
 		r.rep.Warn(fmt.Sprintf("review round %d has no comment URL; posting the rebuttal without a backlink", round))
 	}
-	return r.postPRComment("rebuttal", body, reviewURL)
+	url, posted := r.postPRComment("rebuttal", body, reviewURL)
+	return url, posted, nil
 }
 
 func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {

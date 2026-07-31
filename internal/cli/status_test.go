@@ -831,6 +831,37 @@ func TestDashboardHonoursTheConfiguredHistorySize(t *testing.T) {
 	}
 }
 
+func TestDashboardAppliesHistorySizeAfterGroupingRuns(t *testing.T) {
+	a := testApp(t)
+	a.cfg.History = 3
+	now := time.Now()
+	for i, key := range []string{
+		"acme/oldest#1",
+		"acme/older#2",
+		"acme/repeated#3",
+		"acme/repeated#3",
+		"acme/repeated#3",
+		"acme/repeated#3",
+	} {
+		if err := history.Append(a.p.HistoryFile, history.Run{
+			Key: key, Kind: history.KindReview, Outcome: history.OK,
+			Reviewed: true, EndedAt: now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	historySection := sectionOf(t, mustRender(t, a, 140, nil), "HISTORY")
+	for _, want := range []string{"repeated #3", "older #2", "oldest #1"} {
+		if !strings.Contains(historySection, want) {
+			t.Errorf("history is missing %q:\n%s", want, historySection)
+		}
+	}
+	if got := strings.Count(historySection, " #"); got != 3 {
+		t.Errorf("HISTORY=3 listed %d pull requests:\n%s", got, historySection)
+	}
+}
+
 // Upgrading to a build that keeps a log must not show an empty screen for
 // everything the agent did before it existed.
 func TestDashboardFallsBackToTheStateFileWhileTheLogIsEmpty(t *testing.T) {

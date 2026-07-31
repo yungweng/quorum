@@ -201,9 +201,10 @@ func worktreeFingerprint(repo string) ([]byte, error) {
 		if path == "" {
 			continue
 		}
+		fullPath := filepath.Join(repo, filepath.FromSlash(path))
 		_, _ = io.WriteString(hash, path)
 		_, _ = hash.Write([]byte{0})
-		info, statErr := os.Lstat(filepath.Join(repo, filepath.FromSlash(path)))
+		info, statErr := os.Lstat(fullPath)
 		if errors.Is(statErr, os.ErrNotExist) {
 			_, _ = io.WriteString(hash, "missing\x00")
 			continue
@@ -213,9 +214,19 @@ func worktreeFingerprint(repo string) ([]byte, error) {
 		}
 		_, _ = io.WriteString(hash, strconv.FormatUint(uint64(info.Mode()), 8))
 		_, _ = hash.Write([]byte{0})
-		contents, readErr := os.ReadFile(filepath.Join(repo, filepath.FromSlash(path)))
-		if readErr != nil {
-			return nil, readErr
+		var contents []byte
+		switch {
+		case info.Mode().IsRegular():
+			contents, err = os.ReadFile(fullPath)
+		case info.Mode()&os.ModeSymlink != 0:
+			var target string
+			target, err = os.Readlink(fullPath)
+			contents = []byte(target)
+		default:
+			return nil, fmt.Errorf("fingerprint %s: unsupported file type %s", path, info.Mode().Type())
+		}
+		if err != nil {
+			return nil, err
 		}
 		fileHash := sha256.Sum256(contents)
 		_, _ = hash.Write(fileHash[:])

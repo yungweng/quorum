@@ -147,17 +147,25 @@ func TestDisputeCommentBodyLinksTheReviewAndDropsTheMarker(t *testing.T) {
 }
 
 func TestDisputeCommentPostingWarnsWithoutStoppingTheRun(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nif test \"$1\" = pr && test \"$2\" = view; then printf abc123; exit 0; fi\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	rep := &warningReporter{}
 	r := &run{
-		p:   &Pipeline{GH: gh.New("false")},
-		o:   Options{RepoRoot: t.TempDir()},
+		p:   &Pipeline{GH: gh.New(bin)},
+		o:   Options{RepoRoot: dir},
 		ctx: context.Background(),
 		rep: rep,
 		pr:  gh.FullPR{Number: 42},
 	}
 
-	url, posted := r.postDisputeComment(1, "https://example.invalid/review",
-		"DISPUTED FINDINGS:\n1. The fallback is unreachable.")
+	url, posted, err := r.postDisputeComment(1, "https://example.invalid/review",
+		"DISPUTED FINDINGS:\n1. The fallback is unreachable.", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if posted || url != "" {
 		t.Fatalf("post result = (%q, %v), want a reported failure", url, posted)
 	}
@@ -186,7 +194,10 @@ func TestFixCommentDoesNotClaimANoopWasFixed(t *testing.T) {
 func TestDisputeCommentPostsWithoutABacklinkWhenGitHubReturnedNoReviewURL(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "gh")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' 'https://example.invalid/rebuttal'\n"), 0o755); err != nil {
+	script := "#!/bin/sh\n" +
+		"if test \"$1\" = pr && test \"$2\" = view; then printf abc123; exit 0; fi\n" +
+		"printf '%s' 'https://example.invalid/rebuttal'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rep := &warningReporter{}
@@ -198,7 +209,11 @@ func TestDisputeCommentPostsWithoutABacklinkWhenGitHubReturnedNoReviewURL(t *tes
 		pr:  gh.FullPR{Number: 42},
 	}
 
-	url, posted := r.postDisputeComment(3, "", "DISPUTED FINDINGS:\n1. The lookup already covers this route.")
+	url, posted, err := r.postDisputeComment(3, "",
+		"DISPUTED FINDINGS:\n1. The lookup already covers this route.", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !posted || url != "https://example.invalid/rebuttal" {
 		t.Fatalf("post result = (%q, %v)", url, posted)
 	}
@@ -215,11 +230,41 @@ func TestBranchOnlyDisputeDoesNotPost(t *testing.T) {
 		rep:    rep,
 		target: target.Target{BranchOnly: true},
 	}
-	if _, posted := r.postDisputeComment(1, "", "DISPUTED FINDINGS:\n1. Not real."); posted {
+	if _, posted, err := r.postDisputeComment(1, "", "DISPUTED FINDINGS:\n1. Not real.", ""); err != nil {
+		t.Fatal(err)
+	} else if posted {
 		t.Fatal("branch-only dispute posted a PR comment")
 	}
 	if len(rep.warnings) != 0 {
 		t.Fatalf("branch-only dispute warnings = %v", rep.warnings)
+	}
+}
+
+func TestDisputeCommentRejectsHeadDrift(t *testing.T) {
+	dir := t.TempDir()
+	commented := filepath.Join(dir, "commented")
+	bin := filepath.Join(dir, "gh")
+	script := "#!/bin/sh\n" +
+		"if test \"$1\" = pr && test \"$2\" = view; then printf new-head; exit 0; fi\n" +
+		"if test \"$1\" = pr && test \"$2\" = comment; then touch '" + commented + "'; fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p: &Pipeline{GH: gh.New(bin)}, o: Options{RepoRoot: dir},
+		ctx: context.Background(), rep: NopReporter{}, pr: gh.FullPR{Number: 42},
+	}
+
+	_, posted, err := r.postDisputeComment(1, "",
+		"DISPUTED FINDINGS:\n1. The finding does not apply.", "reviewed-head")
+	if err == nil || !strings.Contains(err.Error(), "refusing to post the rebuttal") {
+		t.Fatalf("err = %v", err)
+	}
+	if posted {
+		t.Fatal("head-drifted rebuttal was reported as posted")
+	}
+	if _, err := os.Stat(commented); !os.IsNotExist(err) {
+		t.Fatalf("head-drifted rebuttal reached the comment command: %v", err)
 	}
 }
 

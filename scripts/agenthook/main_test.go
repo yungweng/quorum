@@ -90,6 +90,50 @@ func TestAgentHookChecksGoWorkspaceChanges(t *testing.T) {
 	assertFileContents(t, filepath.Join(repo, ".check-ran"), "xx")
 }
 
+func TestWorktreeFingerprintHashesSymlinkTextWithoutFollowingIt(t *testing.T) {
+	repo := newGitRepository(t)
+	external := filepath.Join(t.TempDir(), "outside.go")
+	if err := os.WriteFile(external, []byte("first contents\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(repo, "pkg", "linked.go")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, link); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := worktreeFingerprint(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(external, []byte("second contents\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afterContentsChange, err := worktreeFingerprint(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, afterContentsChange) {
+		t.Fatal("fingerprint included contents outside the worktree")
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("different-target.go", link); err != nil {
+		t.Fatal(err)
+	}
+	afterTargetChange, err := worktreeFingerprint(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(before, afterTargetChange) {
+		t.Fatal("fingerprint ignored changed symlink text")
+	}
+}
+
 func TestHookCommandsExitOutsideRepository(t *testing.T) {
 	type commandHook struct {
 		Command string `json:"command"`
