@@ -207,7 +207,7 @@ AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects
 AUTO_MERGE_REVIEW=0      # manual quorum review runs
 AUTO_MERGE_BABYSIT=0     # manual quorum babysit runs
 AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
-NOTIFY=1
+NOTIFY=1                 # terminal; detached macOS runs need terminal-notifier
 ```
 
 Durations accept a bare number of seconds or a value like `30m`, `45m`, `2h`.

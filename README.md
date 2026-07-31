@@ -31,7 +31,7 @@ costs one review no matter how many times it is pushed to.
 ## Install
 
 ```bash
-brew install yungweng/tap/quorum
+brew install yungweng/tap/quorum terminal-notifier
 brew install --cask codex     # Homebrew formulas cannot depend on a cask
 ```
 
@@ -48,8 +48,10 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 `PATH`, every new terminal uses this build. Check with `which quorum` and
 `quorum --version`.
 
-Requires `gh` (authenticated), `git` and `codex`. `direnv` is optional and only
-needed for projects that have an `.envrc`.
+Requires `gh` (authenticated), `git` and `codex`. `terminal-notifier` sends
+notifications from detached macOS agent runs; foreground commands notify
+through the terminal itself. `direnv` is optional and only needed for projects
+that have an `.envrc`.
 
 `make install-hooks` is needed once per clone and after a tracked hook changes.
 It copies the reviewed hooks into the clone's untracked Git directory and sets

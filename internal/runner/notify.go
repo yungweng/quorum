@@ -1,32 +1,50 @@
 package runner
 
 import (
+	"fmt"
 	"os/exec"
 	"runtime"
-	"strings"
 )
 
-// notify posts a desktop notification. When terminal-notifier is installed the
-// notification carries the URL, so clicking it opens the posted review comment;
-// osascript cannot do that, which is why it is only the fallback.
+// notify uses the terminal for foreground runs and terminal-notifier for the
+// detached launchd agent. AppleScript is deliberately not a fallback: macOS
+// attributes those notifications to Script Editor rather than to the terminal.
 func (r *Runner) notify(title, body, url string) {
-	if !r.Cfg.Notify || runtime.GOOS != "darwin" {
+	if !r.Cfg.Notify {
 		return
 	}
-	if bin, err := exec.LookPath("terminal-notifier"); err == nil {
-		args := []string{"-title", title, "-message", body, "-group", "io.github.quorum"}
-		if url != "" {
-			args = append(args, "-open", url)
-		}
-		if err := exec.Command(bin, args...).Run(); err == nil {
-			return
-		}
+	if r.TerminalNotify != nil {
+		r.TerminalNotify(title, body)
+		return
 	}
-	script := "display notification " + quote(body) + " with title " + quote(title)
-	exec.Command("osascript", "-e", script).Run()
+	if runtime.GOOS != "darwin" {
+		return
+	}
+
+	cmd, err := terminalNotifierCommand(title, body, url)
+	if err != nil {
+		r.logNotificationError(err)
+		return
+	}
+	if err := cmd.Run(); err != nil {
+		r.logNotificationError(err)
+	}
 }
 
-// quote produces an AppleScript string literal.
-func quote(s string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+func terminalNotifierCommand(title, body, url string) (*exec.Cmd, error) {
+	bin, err := exec.LookPath("terminal-notifier")
+	if err != nil {
+		return nil, fmt.Errorf("terminal-notifier not found: %w", err)
+	}
+	args := []string{"-title", title, "-message", body, "-group", "io.github.quorum"}
+	if url != "" {
+		args = append(args, "-open", url)
+	}
+	return exec.Command(bin, args...), nil
+}
+
+func (r *Runner) logNotificationError(err error) {
+	if r.Log != nil {
+		r.Log.Printf("notification not sent: %v", err)
+	}
 }

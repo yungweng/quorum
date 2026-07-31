@@ -34,6 +34,10 @@ type Runner struct {
 	Cfg config.Config
 	P   paths.P
 	Log *logbook.Logger
+	// TerminalNotify is set by commands that run in a terminal. It keeps their
+	// notifications on the same OSC 777 path as review and babysit instead of
+	// presenting them as notifications from an unrelated macOS app.
+	TerminalNotify func(title, body string)
 
 	GH     *gh.Client
 	Git    git.G
