@@ -33,10 +33,16 @@ lint:
 check: fmt-check test build lint
 
 install-hooks:
-	@current="$$(git config --local --get core.hooksPath || true)"; \
-	if test -n "$$current" && test "$$current" != '.githooks'; then \
+	@common_dir="$$(git rev-parse --git-common-dir)"; \
+	common_dir="$$(cd "$$common_dir" && pwd -P)"; \
+	hooks_dir="$$common_dir/quorum-hooks"; \
+	current="$$(git config --local --get core.hooksPath || true)"; \
+	if test -n "$$current" && test "$$current" != '.githooks' && test "$$current" != "$$hooks_dir"; then \
 		printf 'refusing to replace core.hooksPath=%s\n' "$$current" >&2; \
 		exit 1; \
-	fi
-	git config --local core.hooksPath .githooks
-	@printf '%s\n' 'Git hooks enabled from .githooks'
+	fi; \
+	mkdir -p "$$hooks_dir"; \
+	install -m 0755 .githooks/pre-commit "$$hooks_dir/pre-commit"; \
+	install -m 0755 .githooks/pre-push "$$hooks_dir/pre-push"; \
+	git config --local core.hooksPath "$$hooks_dir"; \
+	printf 'Git hooks installed in %s\n' "$$hooks_dir"

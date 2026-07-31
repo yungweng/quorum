@@ -123,7 +123,8 @@ at `/opt/homebrew/bin/quorum`.
 
 ## Checks before committing
 
-Enable the tracked Git hooks once per clone:
+Install trusted copies of the tracked Git hooks once per clone and after a hook
+changes:
 
 ```bash
 make install-hooks

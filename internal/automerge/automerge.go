@@ -13,7 +13,9 @@ import (
 	"github.com/yungweng/quorum/internal/review"
 )
 
-const approvalBody = "No blockers or critical findings found."
+const approvalText = "No blockers or critical findings found."
+const approvalProvenance = "<!-- quorum:auto-merge-approval:v1 -->"
+const approvalBody = approvalText + " " + approvalProvenance
 const driftDismissalBody = "The pull request head changed after this approval was submitted."
 const failureDismissalBody = "Automatic merge did not complete, so this approval is no longer active."
 

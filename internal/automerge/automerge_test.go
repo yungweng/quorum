@@ -82,7 +82,7 @@ func TestRunReusesApprovalAndMerges(t *testing.T) {
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
-  3) echo '[{"id":77,"state":"APPROVED","commit_id":"abc123","body":"Looks good.","user":{"login":"reviewer"}}]' ;;
+  3) echo '[{"id":77,"state":"APPROVED","commit_id":"abc123","body":"`+approvalText+`","user":{"login":"reviewer"}}]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
   5) echo '{"merged":true}' ;;
 esac`)
