@@ -191,7 +191,7 @@ func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, 
 func (c *Client) DismissReview(ctx context.Context, repo string, number int, reviewID int64, message string) error {
 	_, err := c.run(ctx, "api", "--method", "PUT",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews/%d/dismissals", repo, number, reviewID),
-		"-f", "message="+message, "-f", "event=DISMISS")
+		"-f", "message="+message)
 	return err
 }
 

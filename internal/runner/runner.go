@@ -99,13 +99,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			if errors.Is(mergeErr, automerge.ErrMergeNotReady) {
 				r.Log.Printf("%s: waiting for required checks before merge", key)
 				r.recordAutoMergePending(key, runDir, findings)
-				retryResult, retryErr := r.retryAutoMergeAfterChecks(ctx, clone, repo, number, findings.HeadSHA)
-				if mergeResult.ApprovalAttempted {
-					retryResult.ApprovalAttempted = true
-				}
-				if mergeResult.ApprovalCreated {
-					retryResult.ApprovalCreated = true
-				}
+				retryResult, retryErr := r.retryAutoMergeAfterChecks(ctx, clone, repo, number, findings.HeadSHA, mergeResult)
 				mergeResult, mergeErr = retryResult, retryErr
 			}
 			mergeStatus = mergeResult.Status
@@ -170,12 +164,12 @@ func (r *Runner) recordAutoMergePending(key, runDir string, findings review.Find
 	})
 }
 
-func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo string, number int, sha string) (automerge.Result, error) {
-	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, automerge.WaitTimeout)
+func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result) (automerge.Result, error) {
+	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, initial, automerge.WaitTimeout)
 }
 
-func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, waitTimeout time.Duration) (automerge.Result, error) {
-	return automerge.RetryWhenReady(ctx, r.GH, clone, repo, number, sha, waitTimeout)
+func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result, waitTimeout time.Duration) (automerge.Result, error) {
+	return automerge.RetryWhenReady(ctx, r.GH, clone, repo, number, sha, initial, waitTimeout)
 }
 
 // recordAutoMergeFailure preserves the successful review and records the

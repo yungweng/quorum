@@ -217,11 +217,13 @@ esac`)
 	for _, want := range []string{
 		"pulls/42/reviews/99/dismissals",
 		"message=" + driftDismissalBody,
-		"event=DISMISS",
 	} {
 		if args := readArgs(t, argsFile); !strings.Contains(args, want) {
 			t.Errorf("calls are missing %q:\n%s", want, args)
 		}
+	}
+	if args := readArgs(t, argsFile); strings.Contains(args, "event=DISMISS") {
+		t.Fatalf("dismissal sent the unsupported event parameter:\n%s", args)
 	}
 }
 
@@ -279,6 +281,66 @@ esac`)
 	}
 	if result.Status != Merged {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRunRejectsDifferentHeadAfterAmbiguousMergeFailure(t *testing.T) {
+	client, _ := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5|6|7) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
+  8) echo '{"headRefOid":"new-head","state":"MERGED","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.Status == Merged {
+		t.Fatalf("a different merged head was accepted: %+v", result)
+	}
+}
+
+func TestRetryDismissesApprovalWhenHeadMovesDuringChecks(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'all checks passed' ;;
+  3) echo '{"headRefOid":"new-head","state":"OPEN","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{
+		ApprovalCreated: true, approvalReviewID: 99,
+	}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.approvalReviewID != 0 {
+		t.Fatalf("created approval was not dismissed: %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if !strings.Contains(args, "pulls/42/reviews/99/dismissals") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("calls =\n%s", args)
+	}
+}
+
+func TestRetryBoundsChecksWatch(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) while true; do :; done ;;
+esac`)
+	started := time.Now()
+	_, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "did not settle") {
+		t.Fatalf("err = %v", err)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pr checks 42 --watch --fail-fast") {
+		t.Fatalf("checks watch was not reached:\n%s", args)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("checks watch took %s, want under 2s", elapsed)
 	}
 }
 

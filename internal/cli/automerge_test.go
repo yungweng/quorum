@@ -30,12 +30,11 @@ func TestManualAutoMergeWaitsForChecks(t *testing.T) {
   6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   7) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
   8) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  9) echo 'all checks passed' ;;
-  10) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  11) echo 'reviewer' ;;
-  12) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
-  13) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  14) echo '{"merged":true}' ;;
+  9|11|12|15) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  10) echo 'all checks passed' ;;
+  13) echo 'reviewer' ;;
+  14) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  16) echo '{"merged":true}' ;;
 esac
 `
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {

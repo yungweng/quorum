@@ -13,10 +13,8 @@ func (a *app) autoMerge(ctx context.Context, client *gh.Client, checksDir, repo 
 	result, err := automerge.Run(ctx, client, repo, number, sha)
 	if errors.Is(err, automerge.ErrMergeNotReady) {
 		retryResult, retryErr := automerge.RetryWhenReady(
-			ctx, client, checksDir, repo, number, sha, automerge.WaitTimeout,
+			ctx, client, checksDir, repo, number, sha, result, automerge.WaitTimeout,
 		)
-		retryResult.ApprovalAttempted = retryResult.ApprovalAttempted || result.ApprovalAttempted
-		retryResult.ApprovalCreated = retryResult.ApprovalCreated || result.ApprovalCreated
 		result, err = retryResult, retryErr
 	}
 	if err != nil {
