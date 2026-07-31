@@ -227,6 +227,30 @@ esac`)
 	}
 }
 
+func TestRunReconcilesTimedOutApprovalOnHeadDrift(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
+  6) echo '[{"id":99,"state":"APPROVED","commit_id":"abc123","body":"`+approvalBody+`","user":{"login":"reviewer"}}]' ;;
+  7) echo '{"headRefOid":"new-head","state":"OPEN","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
+		t.Fatalf("err = %v", err)
+	}
+	if !result.ApprovalAttempted || !result.ApprovalCreated || result.approvalReviewID != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("timed-out approval was not dismissed:\n%s", args)
+	}
+}
+
 func TestRunRejectsOwnPullRequest(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
@@ -341,6 +365,32 @@ esac`)
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("checks watch took %s, want under 2s", elapsed)
+	}
+}
+
+func TestRetryRetriesTransientChecksWatchFailure(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
+  3) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  4) echo 'all checks passed' ;;
+  5) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  7) echo 'reviewer' ;;
+  8) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  9) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  10) echo '{"merged":true}' ;;
+esac`)
+	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Merged {
+		t.Fatalf("result = %+v", result)
+	}
+	if calls := strings.Count(readArgs(t, argsFile), "pr checks 42 --watch --fail-fast"); calls != 2 {
+		t.Fatalf("checks watch ran %d times, want two", calls)
 	}
 }
 

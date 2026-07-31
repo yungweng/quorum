@@ -135,6 +135,7 @@ type PRReview struct {
 	ID          int64     `json:"id"`
 	State       string    `json:"state"`
 	CommitID    string    `json:"commit_id"`
+	Body        string    `json:"body"`
 	SubmittedAt time.Time `json:"submitted_at"`
 	User        struct {
 		Login string `json:"login"`
@@ -228,8 +229,8 @@ const ghChecksPendingExit = 8
 //
 // This deliberately bypasses the retry client: the call is expected to run for
 // as long as CI does, so the short per-call timeout and the retry policy would
-// both be wrong. Transient GitHub errors surface as ChecksFail and the caller's
-// own retry loop handles them.
+// both be wrong. Transient GitHub errors are marked so the caller's own retry
+// loop can handle them.
 func (c *Client) WatchChecks(ctx context.Context, dir string, number int) (CheckState, string, error) {
 	cmd := exec.CommandContext(ctx, c.Bin, "pr", "checks", fmt.Sprint(number), "--watch", "--fail-fast")
 	cmd.Dir = dir
@@ -241,6 +242,9 @@ func (c *Client) WatchChecks(ctx context.Context, dir string, number int) (Check
 	}
 	if err == nil {
 		return ChecksPass, text, nil
+	}
+	if looksTransient(text) {
+		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstLine(text))
 	}
 	// gh phrases this as "no checks reported on the <sha> commit".
 	if strings.Contains(strings.ToLower(text), "no checks reported") {

@@ -79,6 +79,10 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if err != nil {
 		return result, err
 	}
+	knownReviewIDs := make(map[int64]struct{}, len(reviews))
+	for _, existing := range reviews {
+		knownReviewIDs[existing.ID] = struct{}{}
+	}
 	// Derive current reviewer state from submission time, independent of the
 	// order in which GitHub or a paginated response happens to return reviews.
 	sort.SliceStable(reviews, func(i, j int) bool {
@@ -111,7 +115,11 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		result.ApprovalAttempted = true
 		createdReview, err = client.ApproveHead(ctx, repo, number, reviewedSHA, approvalBody)
 		if err != nil {
-			return result, fmt.Errorf("approving reviewed head: %w", err)
+			approvalErr := fmt.Errorf("approving reviewed head: %w", err)
+			if errors.Is(err, gh.ErrTransient) {
+				approvalErr = reconcileApprovalFailure(ctx, client, repo, number, login, reviewedSHA, knownReviewIDs, &result, approvalErr)
+			}
+			return result, approvalErr
 		}
 		result.ApprovalCreated = true
 		result.approvalReviewID = createdReview.ID
@@ -181,6 +189,16 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			if errors.Is(watchErr, context.DeadlineExceeded) {
 				return combined, fmt.Errorf("required checks did not settle within %s", waitTimeout)
 			}
+			if errors.Is(err, gh.ErrTransient) {
+				if !time.Now().Before(deadline) {
+					return combined, fmt.Errorf("required checks did not settle within %s", waitTimeout)
+				}
+				delay := min(retryDelay(time.Second, waitTimeout), time.Until(deadline))
+				if err := waitRetry(ctx, delay); err != nil {
+					return combined, err
+				}
+				continue
+			}
 			return combined, fmt.Errorf("waiting for required checks: %w", err)
 		}
 		if done, err := verifyRetryHead(ctx, client, repo, number, reviewedSHA, &combined); done || err != nil {
@@ -222,12 +240,8 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 		}
 
 		delay = min(delay, time.Until(deadline))
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return combined, ctx.Err()
-		case <-timer.C:
+		if err := waitRetry(ctx, delay); err != nil {
+			return combined, err
 		}
 	}
 }
@@ -246,6 +260,44 @@ func combineResults(first, second Result) Result {
 		ApprovalCreated:   first.ApprovalCreated || second.ApprovalCreated,
 		Status:            second.Status,
 		approvalReviewID:  reviewID,
+	}
+}
+
+func reconcileApprovalFailure(ctx context.Context, client *gh.Client, repo string, number int, login, reviewedSHA string, knownReviewIDs map[int64]struct{}, result *Result, approvalErr error) error {
+	reviews, err := client.Reviews(ctx, repo, number)
+	if err != nil {
+		return errors.Join(approvalErr, fmt.Errorf("reconciling timed-out approval: %w", err))
+	}
+	for _, candidate := range reviews {
+		_, existed := knownReviewIDs[candidate.ID]
+		if candidate.ID != 0 && !existed && candidate.State == "APPROVED" &&
+			candidate.CommitID == reviewedSHA && candidate.Body == approvalBody &&
+			strings.EqualFold(candidate.User.Login, login) {
+			result.ApprovalCreated = true
+			result.approvalReviewID = candidate.ID
+			break
+		}
+	}
+
+	current, err := client.PRDetails(ctx, repo, number)
+	if err != nil {
+		return dismissCreatedApproval(ctx, client, repo, number, result,
+			errors.Join(approvalErr, fmt.Errorf("reconciling timed-out approval: %w", err)))
+	}
+	if _, err := validateHead(current, repo, number, reviewedSHA); errors.Is(err, errHeadDrift) {
+		return dismissCreatedApproval(ctx, client, repo, number, result, errors.Join(approvalErr, err))
+	}
+	return approvalErr
+}
+
+func waitRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

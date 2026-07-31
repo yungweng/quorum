@@ -140,6 +140,17 @@ func TestApproveReturnsReviewID(t *testing.T) {
 	}
 }
 
+func TestWatchChecksClassifiesTransientFailure(t *testing.T) {
+	bin, _ := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
+	state, _, err := testClient(bin).WatchChecks(context.Background(), t.TempDir(), 42)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("err = %v, want ErrTransient", err)
+	}
+	if state != ChecksPending {
+		t.Fatalf("state = %v, want ChecksPending", state)
+	}
+}
+
 // An empty body is not an empty result: gh prints [] when a search found
 // nothing, so silence means the call did not really work.
 func TestSearchEmptyOutputIsTransient(t *testing.T) {
