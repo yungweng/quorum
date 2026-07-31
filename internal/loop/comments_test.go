@@ -61,7 +61,7 @@ func TestPRCommentRejectsProhibitedText(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:   &Pipeline{GH: gh.New("false")},
-		o:   Options{RepoRoot: t.TempDir()},
+		o:   Options{RepoRoot: t.TempDir(), Post: true},
 		ctx: context.Background(),
 		rep: rep,
 		pr:  gh.FullPR{Number: 42},
@@ -84,7 +84,7 @@ func TestPRCommentExemptsGeneratedReviewURLOnly(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:   &Pipeline{GH: gh.New(bin)},
-		o:   Options{RepoRoot: dir},
+		o:   Options{RepoRoot: dir, Post: true},
 		ctx: context.Background(),
 		rep: rep,
 		pr:  gh.FullPR{Number: 42},
@@ -125,6 +125,34 @@ func TestProhibitedPRCommentTermMatchesWholeWords(t *testing.T) {
 	}
 }
 
+func TestDisabledPostingSkipsPipelineComments(t *testing.T) {
+	dir := t.TempDir()
+	called := filepath.Join(dir, "called")
+	bin := filepath.Join(dir, "gh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch '"+called+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p: &Pipeline{GH: gh.New(bin), Git: git.New(bin)},
+		o: Options{RepoRoot: dir, Post: false}, ctx: context.Background(), rep: NopReporter{},
+		pr: gh.FullPR{Number: 42}, worktree: dir,
+	}
+
+	if _, posted := r.postPRComment("fix-log comment", "safe body", ""); posted {
+		t.Fatal("disabled posting reported a pipeline comment as posted")
+	}
+	r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha")
+	if _, posted, err := r.postDisputeComment(1, "",
+		"DISPUTED FINDINGS:\n1. The finding does not apply.", "reviewed-head"); err != nil {
+		t.Fatal(err)
+	} else if posted {
+		t.Fatal("disabled posting reported a rebuttal as posted")
+	}
+	if _, err := os.Stat(called); !os.IsNotExist(err) {
+		t.Fatalf("disabled posting invoked an external command: %v", err)
+	}
+}
+
 func TestDisputeCommentBodyLinksTheReviewAndDropsTheMarker(t *testing.T) {
 	dispute := `DISPUTED FINDINGS:
 1. Critical “Home fallback”: /payroll is resolved by PLANNING_SUB_PAGES first.`
@@ -155,7 +183,7 @@ func TestDisputeCommentPostingWarnsWithoutStoppingTheRun(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:   &Pipeline{GH: gh.New(bin)},
-		o:   Options{RepoRoot: dir},
+		o:   Options{RepoRoot: dir, Post: true},
 		ctx: context.Background(),
 		rep: rep,
 		pr:  gh.FullPR{Number: 42},
@@ -178,7 +206,7 @@ func TestFixCommentDoesNotClaimANoopWasFixed(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:        &Pipeline{GH: gh.New("false"), Git: git.New("false")},
-		o:        Options{RepoRoot: t.TempDir()},
+		o:        Options{RepoRoot: t.TempDir(), Post: true},
 		ctx:      context.Background(),
 		rep:      rep,
 		pr:       gh.FullPR{Number: 42},
@@ -203,7 +231,7 @@ func TestDisputeCommentPostsWithoutABacklinkWhenGitHubReturnedNoReviewURL(t *tes
 	rep := &warningReporter{}
 	r := &run{
 		p:   &Pipeline{GH: gh.New(bin)},
-		o:   Options{RepoRoot: dir},
+		o:   Options{RepoRoot: dir, Post: true},
 		ctx: context.Background(),
 		rep: rep,
 		pr:  gh.FullPR{Number: 42},
@@ -226,6 +254,7 @@ func TestBranchOnlyDisputeDoesNotPost(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:      &Pipeline{GH: gh.New("false")},
+		o:      Options{Post: true},
 		ctx:    context.Background(),
 		rep:    rep,
 		target: target.Target{BranchOnly: true},
@@ -251,7 +280,7 @@ func TestDisputeCommentRejectsHeadDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &run{
-		p: &Pipeline{GH: gh.New(bin)}, o: Options{RepoRoot: dir},
+		p: &Pipeline{GH: gh.New(bin)}, o: Options{RepoRoot: dir, Post: true},
 		ctx: context.Background(), rep: NopReporter{}, pr: gh.FullPR{Number: 42},
 	}
 

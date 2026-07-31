@@ -85,8 +85,7 @@ type Options struct {
 	DivergenceScan       bool
 	DivergenceEscalateTo []string
 	DivergenceTimeout    time.Duration
-	// Post controls the divergence report only. Existing review and fix
-	// comments retain their own posting policy.
+	// Post controls every pull request comment produced by the run.
 	Post bool
 
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
@@ -688,7 +687,7 @@ func (r *run) recordRound(label, preSHA string) {
 // well; the commit list is the fallback. The pipeline posts it rather than the
 // session, which is what keeps it a normal comment from the user.
 func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) {
-	if r.target.BranchOnly {
+	if r.target.BranchOnly || !r.o.Post {
 		return
 	}
 	commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
@@ -707,7 +706,7 @@ func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) 
 // Earlier claims are deliberately kept off the PR because the adversarial
 // re-check may still prove them wrong.
 func (r *run) postDisputeComment(round int, reviewURL, dispute, reviewedSHA string) (string, bool, error) {
-	if r.target.BranchOnly {
+	if r.target.BranchOnly || !r.o.Post {
 		return "", false, nil
 	}
 	body := disputeCommentBody(round, reviewURL, dispute)
@@ -731,6 +730,9 @@ func (r *run) postDisputeComment(round int, reviewURL, dispute, reviewedSHA stri
 }
 
 func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {
+	if !r.o.Post {
+		return "", false
+	}
 	if strings.TrimSpace(body) == "" {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment body is empty", kind, r.pr.Number))
 		return "", false

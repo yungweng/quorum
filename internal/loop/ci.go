@@ -62,7 +62,7 @@ func (r *run) reviewOptions() review.Options {
 		Model:            r.o.ReviewModel,
 		Effort:           r.o.ReviewEffort,
 		BaseBranch:       r.pr.BaseRefName,
-		Post:             !r.target.BranchOnly,
+		Post:             r.o.Post && !r.target.BranchOnly,
 		UseDirenv:        r.o.UseDirenv,
 		AllowEnvrcChange: r.o.AllowEnvrcChange,
 		RunsDir:          r.o.ReviewRunsDir,
