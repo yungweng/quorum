@@ -132,6 +132,7 @@ func (c *Client) CommentBody(ctx context.Context, dir string, number int, body s
 // idempotent. GitHub changes State to DISMISSED when an approval no longer
 // counts, so only APPROVED reviews are reusable.
 type PRReview struct {
+	ID          int64     `json:"id"`
 	State       string    `json:"state"`
 	CommitID    string    `json:"commit_id"`
 	SubmittedAt time.Time `json:"submitted_at"`
@@ -163,15 +164,34 @@ func (c *Client) Reviews(ctx context.Context, repo string, number int) ([]PRRevi
 
 // ApproveHead approves one exact commit rather than whichever head happens to
 // be current when GitHub receives the request.
-func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, body string) error {
+func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, body string) (PRReview, error) {
 	// A timed-out POST may have reached GitHub. Do not retry it blindly and
 	// create duplicate reviews; a later AutoMerge run lists reviews first and
 	// can tell whether this one landed.
 	once := *c
 	once.Attempts = 1
-	_, err := once.run(ctx, "api", "--method", "POST",
+	out, err := once.run(ctx, "api", "--method", "POST",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number),
 		"-f", "event=APPROVE", "-f", "commit_id="+sha, "-f", "body="+body)
+	if err != nil {
+		return PRReview{}, err
+	}
+	var created PRReview
+	if err := json.Unmarshal(out, &created); err != nil {
+		return PRReview{}, fmt.Errorf("gh api create pull request review: %w", err)
+	}
+	if created.ID == 0 {
+		return PRReview{}, fmt.Errorf("%w: gh returned no review id after approval", ErrTransient)
+	}
+	return created, nil
+}
+
+// DismissReview revokes one exact submitted review. Callers only use IDs
+// returned by ApproveHead, so this cannot dismiss a pre-existing user review.
+func (c *Client) DismissReview(ctx context.Context, repo string, number int, reviewID int64, message string) error {
+	_, err := c.run(ctx, "api", "--method", "PUT",
+		fmt.Sprintf("repos/%s/pulls/%d/reviews/%d/dismissals", repo, number, reviewID),
+		"-f", "message="+message, "-f", "event=DISMISS")
 	return err
 }
 

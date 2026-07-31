@@ -49,7 +49,7 @@ case "$n" in
   2) echo 'reviewer' ;;
   3) echo '[]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  5) echo '{"state":"APPROVED"}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
   7) echo '{"merged":true}' ;;
 esac`)
@@ -107,7 +107,7 @@ case "$n" in
   2) echo 'reviewer' ;;
   3) echo '[{"state":"CHANGES_REQUESTED","commit_id":"abc123","submitted_at":"2026-07-31T10:01:00Z","user":{"login":"reviewer"}},{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T10:00:00Z","user":{"login":"reviewer"}}]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  5) echo '{"state":"APPROVED"}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
   7) echo '{"merged":true}' ;;
 esac`)
@@ -171,6 +171,17 @@ func TestRunRejectsHeadDriftBeforeApproval(t *testing.T) {
 	}
 }
 
+func TestRunRejectsMergedDifferentHead(t *testing.T) {
+	client, _ := fakeGH(t, `echo '{"headRefOid":"new-head","state":"MERGED","author":{"login":"example-user"}}'`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "reviewed-head")
+	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.Status == Merged {
+		t.Fatalf("a different merged head was accepted: %+v", result)
+	}
+}
+
 func TestRunPreservesExistingAutoMergeOnHeadDrift(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 	echo '{"headRefOid":"new-head","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}'`)
@@ -183,14 +194,14 @@ func TestRunPreservesExistingAutoMergeOnHeadDrift(t *testing.T) {
 	}
 }
 
-func TestRunRejectsHeadDriftAfterApproval(t *testing.T) {
+func TestRunDismissesCreatedApprovalOnHeadDrift(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
   3) echo '[]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  5) echo '{"state":"APPROVED"}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"new-head","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
@@ -202,6 +213,15 @@ esac`)
 	}
 	if args := readArgs(t, argsFile); strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("a moved head reached merge:\n%s", args)
+	}
+	for _, want := range []string{
+		"pulls/42/reviews/99/dismissals",
+		"message=" + driftDismissalBody,
+		"event=DISMISS",
+	} {
+		if args := readArgs(t, argsFile); !strings.Contains(args, want) {
+			t.Errorf("calls are missing %q:\n%s", want, args)
+		}
 	}
 }
 
@@ -228,7 +248,7 @@ case "$n" in
   2) echo 'reviewer' ;;
   3) echo '[]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  5) echo '{"state":"APPROVED"}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
   7) echo 'branch protection rejected the merge' >&2; exit 1 ;;
 esac`)

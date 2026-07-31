@@ -288,6 +288,37 @@ esac`)
 	}
 }
 
+func TestRetryAutoMergeWaitsForMergeabilityAfterGreenChecks(t *testing.T) {
+	client, dir, args := mergeRetryGH(t, `case "$n" in
+  1|8) echo 'all checks passed' ;;
+  2|9) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  3|10) echo 'reviewer' ;;
+  4|11) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  5|12) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  13) echo '{"merged":true}' ;;
+esac`)
+	r := &Runner{GH: client}
+
+	result, err := r.retryAutoMergeAfterChecksWithin(
+		context.Background(), dir, "acme/api", 42, "abc123", 2*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != automerge.Merged {
+		t.Fatalf("result = %+v", result)
+	}
+	calls, err := os.ReadFile(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "pulls/42/merge"); got != 2 {
+		t.Fatalf("merge calls = %d, want 2:\n%s", got, calls)
+	}
+}
+
 func TestLoadAvgIsPlausible(t *testing.T) {
 	load, ok := LoadAvg1()
 	if !ok {

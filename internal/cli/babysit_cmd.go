@@ -146,7 +146,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	mergeStatus := ""
 	var mergeErr error
 	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMergeBabysit, a.cfg.Post, res.LastFindings) {
-		mergeResult, finishErr := a.autoMerge(ctx, client, repo, res.PR.Number, res.LastFindings.HeadSHA)
+		mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
 		mergeStatus, mergeErr = mergeResult.Status, finishErr
 		if mergeErr != nil {
 			err = mergeErr

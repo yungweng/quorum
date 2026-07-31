@@ -120,12 +120,23 @@ func TestRunDoesNotRetryPermanentFailure(t *testing.T) {
 
 func TestApproveDoesNotRetryAmbiguousPost(t *testing.T) {
 	bin, countFile := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
-	err := testClient(bin).ApproveHead(context.Background(), "acme/api", 42, "abc123", "approved")
+	_, err := testClient(bin).ApproveHead(context.Background(), "acme/api", 42, "abc123", "approved")
 	if err == nil {
 		t.Fatal("a timed-out approval was reported as success")
 	}
 	if got := calls(t, countFile); got != 1 {
 		t.Fatalf("approval POST ran %d times, want one", got)
+	}
+}
+
+func TestApproveReturnsReviewID(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"id":99,"state":"APPROVED"}'`)
+	review, err := testClient(bin).ApproveHead(context.Background(), "acme/api", 42, "abc123", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.ID != 99 || review.State != "APPROVED" {
+		t.Fatalf("review = %+v", review)
 	}
 }
 

@@ -44,9 +44,6 @@ type Runner struct {
 	DirenvBin string
 }
 
-// Keep this aligned with the fix loop's no-check registration window.
-const mergeNoChecksGrace = 180 * time.Second
-
 // Review clones or refreshes the repository, reviews the pull request and
 // records the outcome. It runs in the detached child process that owns the
 // marker.
@@ -174,41 +171,11 @@ func (r *Runner) recordAutoMergePending(key, runDir string, findings review.Find
 }
 
 func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo string, number int, sha string) (automerge.Result, error) {
-	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, mergeNoChecksGrace)
+	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, automerge.WaitTimeout)
 }
 
-func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, noChecksGrace time.Duration) (automerge.Result, error) {
-	var noChecksDeadline time.Time
-	for {
-		checkState, output, err := r.GH.WatchChecks(ctx, clone, number)
-		if err != nil {
-			return automerge.Result{}, fmt.Errorf("waiting for required checks: %w", err)
-		}
-		switch checkState {
-		case gh.ChecksPass:
-			return automerge.Run(ctx, r.GH, repo, number, sha)
-		case gh.ChecksFail:
-			return automerge.Result{}, fmt.Errorf("required checks failed: %s", firstLine(output))
-		case gh.ChecksNone, gh.ChecksPending:
-			delay := 10 * time.Second
-			if checkState == gh.ChecksNone {
-				if noChecksDeadline.IsZero() {
-					noChecksDeadline = time.Now().Add(noChecksGrace)
-				}
-				if !time.Now().Before(noChecksDeadline) {
-					return automerge.Run(ctx, r.GH, repo, number, sha)
-				}
-				delay = min(20*time.Second, time.Until(noChecksDeadline))
-			}
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return automerge.Result{}, ctx.Err()
-			case <-timer.C:
-			}
-		}
-	}
+func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, waitTimeout time.Duration) (automerge.Result, error) {
+	return automerge.RetryWhenReady(ctx, r.GH, clone, repo, number, sha, waitTimeout)
 }
 
 // recordAutoMergeFailure preserves the successful review and records the

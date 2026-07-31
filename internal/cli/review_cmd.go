@@ -139,7 +139,7 @@ func (a *app) cmdReview(argv []string) int {
 	number = res.Findings.PR
 	mergeStatus := ""
 	if automerge.Allowed(a.cfg.AutoMergeReview, a.cfg.Post, res.Findings) {
-		mergeResult, mergeErr := a.autoMerge(ctx, client, repo, number, res.Findings.HeadSHA)
+		mergeResult, mergeErr := a.autoMerge(ctx, client, repoRoot, repo, number, res.Findings.HeadSHA)
 		if mergeErr != nil {
 			// The review finished and was posted. Keep that result in OPEN;
 			// the merge error remains the reason and the command still fails.
