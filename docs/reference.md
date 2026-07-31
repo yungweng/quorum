@@ -231,11 +231,13 @@ After a posted review with zero Blockers and zero Critical findings, quorum:
 3. calls GitHub's merge API with `merge_method=merge` and `sha=SHA`.
 
 Suggestions and Questions do not block. GitHub branch rules and required checks
-still apply. The merge is one atomic request for the reviewed SHA, so it fails
-rather than leaving a new request that could survive a later push. Target
-branches that require a merge queue are rejected before approval. Quorum never
+still apply; optional check failures do not block the merge wait. The merge is
+one atomic request for the reviewed SHA, so it fails rather than leaving a new
+request that could survive a later push. Target branches that require a merge
+queue are rejected before approval. Quorum never
 disables an existing auto-merge or merge-queue request because it cannot prove
-who created it. It does not merge an own PR, a moved head, a branch-only run,
+who created it. Repositories with merge commits disabled are also rejected
+before approval. It does not merge an own PR, a moved head, a branch-only run,
 `POST=0`, `--dry-run`, or an accepted dispute whose last review still contains
 Blockers or Critical findings.
 

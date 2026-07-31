@@ -263,7 +263,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"pr checks 42 --watch --fail-fast", "pulls/42/merge", "sha=abc123"} {
+	for _, want := range []string{"pr checks 42 --watch --fail-fast --required", "pulls/42/merge", "sha=abc123"} {
 		if !strings.Contains(string(calls), want) {
 			t.Errorf("calls are missing %q:\n%s", want, calls)
 		}
@@ -272,12 +272,14 @@ esac
 
 func TestRetryAutoMergeGivesChecksTimeToRegister(t *testing.T) {
 	client, dir, args := mergeRetryGH(t, `case "$n" in
-  1|3|4|6|7|10) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  2) echo 'no checks reported on the abc123 commit' >&2; exit 1 ;;
-  5) echo 'all checks passed' ;;
-  8) echo 'reviewer' ;;
-  9) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
-  11) echo '{"merged":true}' ;;
+  1|3|4|7|10|12|13|16) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'no required checks reported on the topic branch' >&2; exit 1 ;;
+  5|14) echo 'reviewer' ;;
+  6|15) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  8) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  9) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
+  11) echo 'all checks passed' ;;
+  17) echo '{"merged":true}' ;;
 esac`)
 	r := &Runner{GH: client}
 
@@ -294,18 +296,19 @@ esac`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(calls), "pr checks 42 --watch --fail-fast"); got != 2 {
+	if got := strings.Count(string(calls), "pr checks 42 --watch --fail-fast --required"); got != 2 {
 		t.Fatalf("check calls = %d, want 2:\n%s", got, calls)
 	}
 }
 
 func TestRetryAutoMergeWaitsForMergeabilityAfterGreenChecks(t *testing.T) {
 	client, dir, args := mergeRetryGH(t, `case "$n" in
-  1|3|4|7|9|10|12|13|16) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  1|3|4|7|10|12|13|16) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2|11) echo 'all checks passed' ;;
   5|14) echo 'reviewer' ;;
   6|15) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
   8) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  9) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
   17) echo '{"merged":true}' ;;
 esac`)
 	r := &Runner{GH: client}

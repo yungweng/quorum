@@ -68,12 +68,15 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		return result, err
 	}
 	if pr.BaseRefName != "" {
-		requiresQueue, err := client.MergeQueueEnabled(ctx, repo, number, reviewedSHA)
+		requiresQueue, mergeCommitAllowed, err := client.MergePolicy(ctx, repo, number, reviewedSHA)
 		if err != nil {
-			return result, fmt.Errorf("checking merge queue policy: %w", err)
+			return result, fmt.Errorf("checking merge policy: %w", err)
 		}
 		if requiresQueue {
 			return result, fmt.Errorf("refusing auto-merge: target branch %s requires a merge queue", pr.BaseRefName)
+		}
+		if !mergeCommitAllowed {
+			return result, fmt.Errorf("refusing auto-merge: repository %s does not allow merge commits", repo)
 		}
 	}
 
@@ -183,31 +186,26 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 			fmt.Errorf("refusing auto-merge: pull request %s#%d has active change requests", repo, number))
 	}
 	if mergeErr := client.MergeHead(ctx, repo, number, reviewedSHA); mergeErr != nil {
-		if current, inspectErr := client.PRDetails(ctx, repo, number); inspectErr == nil {
-			merged, headErr := validateHead(current, repo, number, reviewedSHA)
-			if headErr != nil {
-				if current.HeadRefOid != reviewedSHA {
-					headErr = dismissCreatedApproval(ctx, client, repo, number, &result, headErr)
-				} else {
-					headErr = dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, headErr)
-				}
-				return result, headErr
-			}
-			if merged {
-				result.Status = Merged
-				return result, nil
-			}
-		} else {
-			cause := fmt.Errorf("merging reviewed head: %w", mergeErr)
-			if strings.Contains(mergeErr.Error(), "HTTP 405") {
-				cause = fmt.Errorf("%w: %v", ErrMergeNotReady, mergeErr)
-			}
-			cause = errors.Join(cause, fmt.Errorf("rechecking pull request after merge failure: %w", inspectErr))
+		current, inspectErr := client.PRDetails(ctx, repo, number)
+		if inspectErr != nil {
+			cause := errors.Join(fmt.Errorf("merging reviewed head: %w", mergeErr),
+				fmt.Errorf("rechecking pull request after merge failure: %w", inspectErr))
 			return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, cause)
 		}
-		// GitHub uses 405 while an otherwise valid pull request is waiting
-		// for protected-branch requirements. Keep other errors terminal.
-		if strings.Contains(mergeErr.Error(), "HTTP 405") {
+		merged, headErr := validateHead(current, repo, number, reviewedSHA)
+		if headErr != nil {
+			if current.HeadRefOid != reviewedSHA {
+				headErr = dismissCreatedApproval(ctx, client, repo, number, &result, headErr)
+			} else {
+				headErr = dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, headErr)
+			}
+			return result, headErr
+		}
+		if merged {
+			result.Status = Merged
+			return result, nil
+		}
+		if mergeReadinessPending(current, mergeErr) {
 			return result, fmt.Errorf("%w: %v", ErrMergeNotReady, mergeErr)
 		}
 		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
@@ -215,6 +213,15 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	}
 	result.Status = Merged
 	return result, nil
+}
+
+func mergeReadinessPending(current gh.Details, mergeErr error) bool {
+	message := strings.ToLower(mergeErr.Error())
+	if !strings.Contains(message, "http 405") || !strings.Contains(message, "pull request is not mergeable") {
+		return false
+	}
+	return current.Mergeable == "MERGEABLE" && current.MergeStateStatus == "BLOCKED" ||
+		current.Mergeable == "UNKNOWN" && current.MergeStateStatus == "UNKNOWN"
 }
 
 func latestReviewsRequestChanges(reviews []gh.LatestReview, login string) bool {
@@ -250,7 +257,7 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			}
 			watchCtx, cancel = context.WithTimeout(ctx, remaining)
 		}
-		checkState, output, err := client.WatchChecks(watchCtx, checksDir, number)
+		checkState, output, err := client.WatchRequiredChecks(watchCtx, checksDir, number)
 		watchErr := watchCtx.Err()
 		cancel()
 		if err != nil {
@@ -301,12 +308,12 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			return stopRetry(ctx, client, repo, number, combined,
 				fmt.Errorf("required checks failed: %s", firstLine(output)))
 		case gh.ChecksNone:
-			if deadlineExpired(deadline) {
-				result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
-				combined = combineResults(combined, result)
-				if mergeErr == nil {
-					return combined, nil
-				}
+			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
+			combined = combineResults(combined, result)
+			if mergeErr == nil {
+				return combined, nil
+			}
+			if !errors.Is(mergeErr, ErrMergeNotReady) || deadlineExpired(deadline) {
 				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			delay = retryDelay(20*time.Second, waitTimeout)

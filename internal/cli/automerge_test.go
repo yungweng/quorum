@@ -29,7 +29,7 @@ func TestManualAutoMergeWaitsForChecks(t *testing.T) {
   5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   7) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
-  8) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  8) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
   9|11|12|15) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   10) echo 'all checks passed' ;;
   13) echo 'reviewer' ;;
@@ -55,7 +55,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(calls), "pr checks 42 --watch --fail-fast") {
+	if !strings.Contains(string(calls), "pr checks 42 --watch --fail-fast --required") {
 		t.Fatalf("manual merge did not wait for checks:\n%s", calls)
 	}
 }

@@ -148,19 +148,22 @@ func TestMergeHeadRejectsUnmergedResponse(t *testing.T) {
 	}
 }
 
-func TestMergeQueueEnabledChecksTheExactHead(t *testing.T) {
+func TestMergePolicyChecksTheExactHead(t *testing.T) {
 	bin, _ := fakeGH(t, `
-if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
+if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"mergeCommitAllowed"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
   echo "unexpected arguments: $*" >&2
   exit 1
 fi
-echo '{"data":{"repository":{"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
-	required, err := testClient(bin).MergeQueueEnabled(context.Background(), "acme/api", 42, "abc123")
+echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
+	required, allowed, err := testClient(bin).MergePolicy(context.Background(), "acme/api", 42, "abc123")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !required {
 		t.Fatal("required merge queue was not detected")
+	}
+	if !allowed {
+		t.Fatal("allowed merge commits were not detected")
 	}
 }
 
@@ -172,6 +175,33 @@ func TestWatchChecksClassifiesTransientFailure(t *testing.T) {
 	}
 	if state != ChecksPending {
 		t.Fatalf("state = %v, want ChecksPending", state)
+	}
+}
+
+func TestWatchRequiredChecksFiltersOptionalChecks(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != "pr checks 42 --watch --fail-fast --required" ]]; then
+  echo "unexpected arguments: $*" >&2
+  exit 1
+fi
+echo 'required checks passed'`)
+	state, _, err := testClient(bin).WatchRequiredChecks(context.Background(), t.TempDir(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != ChecksPass {
+		t.Fatalf("state = %v, want ChecksPass", state)
+	}
+}
+
+func TestWatchRequiredChecksClassifiesNoRequiredChecks(t *testing.T) {
+	bin, _ := fakeGH(t, `echo "no required checks reported on the 'topic' branch" >&2; exit 1`)
+	state, _, err := testClient(bin).WatchRequiredChecks(context.Background(), t.TempDir(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != ChecksNone {
+		t.Fatalf("state = %v, want ChecksNone", state)
 	}
 }
 
@@ -329,11 +359,11 @@ func TestPRDetailsRejectsEmptyHead(t *testing.T) {
 
 func TestPRDetailsReadsReviewDecision(t *testing.T) {
 	bin, _ := fakeGH(t, `
-if [[ "$*" != *reviewDecision* || "$*" != *latestReviews* || "$*" != *baseRefName* ]]; then
+if [[ "$*" != *reviewDecision* || "$*" != *latestReviews* || "$*" != *baseRefName* || "$*" != *mergeStateStatus* || "$*" != *mergeable* ]]; then
   echo 'review policy fields were not requested' >&2
   exit 1
 fi
-echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","latestReviews":[{"state":"CHANGES_REQUESTED","author":{"login":"example-reviewer"}}]}'`)
+echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","reviewDecision":"CHANGES_REQUESTED","latestReviews":[{"state":"CHANGES_REQUESTED","author":{"login":"example-reviewer"}}]}'`)
 	details, err := testClient(bin).PRDetails(context.Background(), "acme/api", 42)
 	if err != nil {
 		t.Fatal(err)
@@ -342,7 +372,8 @@ echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","reviewDecision
 		t.Fatalf("review decision = %q", details.ReviewDecision)
 	}
 	if details.BaseRefName != "main" || len(details.LatestReviews) != 1 ||
-		details.LatestReviews[0].Author.Login != "example-reviewer" {
+		details.LatestReviews[0].Author.Login != "example-reviewer" ||
+		details.Mergeable != "CONFLICTING" || details.MergeStateStatus != "DIRTY" {
 		t.Fatalf("details = %+v", details)
 	}
 }

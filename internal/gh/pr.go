@@ -230,7 +230,7 @@ const (
 	ChecksPass CheckState = iota
 	// ChecksFail means at least one check failed or was cancelled.
 	ChecksFail
-	// ChecksNone means GitHub reports no checks at all for this PR.
+	// ChecksNone means GitHub reports no checks selected by the request.
 	ChecksNone
 	// ChecksPending means checks exist but have not settled yet.
 	ChecksPending
@@ -241,15 +241,28 @@ const (
 // state change that is not terminal.
 const ghChecksPendingExit = 8
 
-// WatchChecks blocks until CI settles, mirroring `gh pr checks --watch
-// --fail-fast`. It returns the state plus the tail of gh's output for logging.
+// WatchChecks blocks until every reported CI check settles.
 //
 // This deliberately bypasses the retry client: the call is expected to run for
 // as long as CI does, so the short per-call timeout and the retry policy would
 // both be wrong. Transient GitHub errors are marked so the caller's own retry
 // loop can handle them.
 func (c *Client) WatchChecks(ctx context.Context, dir string, number int) (CheckState, string, error) {
-	cmd := exec.CommandContext(ctx, c.Bin, "pr", "checks", fmt.Sprint(number), "--watch", "--fail-fast")
+	return c.watchChecks(ctx, dir, number, false)
+}
+
+// WatchRequiredChecks blocks until the checks enforced by branch rules settle.
+// Optional failures must not stop a merge that GitHub would allow.
+func (c *Client) WatchRequiredChecks(ctx context.Context, dir string, number int) (CheckState, string, error) {
+	return c.watchChecks(ctx, dir, number, true)
+}
+
+func (c *Client) watchChecks(ctx context.Context, dir string, number int, required bool) (CheckState, string, error) {
+	args := []string{"pr", "checks", fmt.Sprint(number), "--watch", "--fail-fast"}
+	if required {
+		args = append(args, "--required")
+	}
+	cmd := exec.CommandContext(ctx, c.Bin, args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	text := string(out)
@@ -263,8 +276,9 @@ func (c *Client) WatchChecks(ctx context.Context, dir string, number int) (Check
 	if looksTransient(text) {
 		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstLine(text))
 	}
-	// gh phrases this as "no checks reported on the <sha> commit".
-	if strings.Contains(strings.ToLower(text), "no checks reported") {
+	// With --required, gh says "no required checks reported" instead.
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "no checks reported") || strings.Contains(lower, "no required checks reported") {
 		return ChecksNone, text, nil
 	}
 	var ee *exec.ExitError

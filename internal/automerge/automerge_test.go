@@ -154,7 +154,7 @@ func TestRunRejectsMergeQueueBeforeApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  2) echo '{"data":{"repository":{"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}' ;;
+  2) echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}' ;;
 esac`)
 	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err == nil || !strings.Contains(err.Error(), "requires a merge queue") {
@@ -163,6 +163,22 @@ esac`)
 	args := readArgs(t, argsFile)
 	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("merge queue branch reached a side effect:\n%s", args)
+	}
+}
+
+func TestRunRejectsDisabledMergeCommitsBeforeApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo '{"data":{"repository":{"mergeCommitAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":false}}}}' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "does not allow merge commits") {
+		t.Fatalf("err = %v", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("disabled merge method reached a side effect:\n%s", args)
 	}
 }
 
@@ -215,7 +231,8 @@ case "$n" in
   3) echo '[{"id":99,"state":"APPROVED","commit_id":"abc123","body":"`+approvalBody+`","user":{"login":"reviewer"}}]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   5) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
-  6|7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
+  7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   8) echo 'all checks passed' ;;
   9) echo '{"headRefOid":"new-head","state":"OPEN","author":{"login":"example-user"}}' ;;
 esac`)
@@ -294,12 +311,60 @@ case "$n" in
   3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   5) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
-  6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
 esac`)
 
 	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if !errors.Is(err, ErrMergeNotReady) {
 		t.Fatalf("err = %v, want ErrMergeNotReady", err)
+	}
+}
+
+func TestRunDismissesApprovalForTerminal405(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  7) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  8) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || errors.Is(err, ErrMergeNotReady) {
+		t.Fatalf("err = %v, want terminal merge failure", err)
+	}
+	if result.approvalReviewID != 0 {
+		t.Fatalf("terminal 405 left approval active: %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("terminal 405 did not dismiss approval:\n%s", args)
+	}
+}
+
+func TestMergeReadinessPendingRequiresUnsettledState(t *testing.T) {
+	err405 := errors.New("Pull Request is not mergeable (HTTP 405)")
+	methodErr := errors.New("Merge commits are not allowed on this repository (HTTP 405)")
+	cases := []struct {
+		name      string
+		details   gh.Details
+		err       error
+		retryable bool
+	}{
+		{"requirements blocked", gh.Details{Mergeable: "MERGEABLE", MergeStateStatus: "BLOCKED"}, err405, true},
+		{"mergeability unknown", gh.Details{Mergeable: "UNKNOWN", MergeStateStatus: "UNKNOWN"}, err405, true},
+		{"merge method rejected", gh.Details{Mergeable: "MERGEABLE", MergeStateStatus: "BLOCKED"}, methodErr, false},
+		{"conflict", gh.Details{Mergeable: "CONFLICTING", MergeStateStatus: "DIRTY"}, err405, false},
+		{"non-405", gh.Details{Mergeable: "MERGEABLE", MergeStateStatus: "BLOCKED"}, errors.New("forbidden"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mergeReadinessPending(tc.details, tc.err); got != tc.retryable {
+				t.Fatalf("mergeReadinessPending() = %v, want %v", got, tc.retryable)
+			}
+		})
 	}
 }
 
@@ -591,7 +656,7 @@ esac`)
 	if err == nil || !strings.Contains(err.Error(), "did not settle") {
 		t.Fatalf("err = %v", err)
 	}
-	if args := readArgs(t, argsFile); !strings.Contains(args, "pr checks 42 --watch --fail-fast") {
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pr checks 42 --watch --fail-fast --required") {
 		t.Fatalf("checks watch was not reached:\n%s", args)
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
@@ -665,16 +730,16 @@ esac`)
 	if result.Status != Merged {
 		t.Fatalf("result = %+v", result)
 	}
-	if calls := strings.Count(readArgs(t, argsFile), "pr checks 42 --watch --fail-fast"); calls != 2 {
+	if calls := strings.Count(readArgs(t, argsFile), "pr checks 42 --watch --fail-fast --required"); calls != 2 {
 		t.Fatalf("checks watch ran %d times, want two", calls)
 	}
 }
 
-func TestRetryAllowsUnlimitedWait(t *testing.T) {
-	client, _ := fakeGH(t, `
+func TestRetryWithoutChecksAllowsUnlimitedWait(t *testing.T) {
+	client, argsFile := fakeGH(t, `
 case "$n" in
   1|3|4|7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  2) echo 'all checks passed' ;;
+  2) echo 'no required checks reported on the topic branch' >&2; exit 1 ;;
   5) echo 'reviewer' ;;
   6) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
   8) echo '{"merged":true}' ;;
@@ -685,6 +750,10 @@ esac`)
 	}
 	if result.Status != Merged {
 		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if calls := strings.Count(args, "pr checks 42 --watch --fail-fast --required"); calls != 1 {
+		t.Fatalf("required checks watch ran %d times, want one:\n%s", calls, args)
 	}
 }
 
