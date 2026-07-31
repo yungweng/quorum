@@ -655,7 +655,7 @@ func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) 
 		original = string(data)
 	}
 	body := fixCommentBody(label, reviewLabel, reviewURL, r.lastMsg, original, commits)
-	r.postPRComment("fix-log comment", body)
+	r.postPRComment("fix-log comment", body, reviewURL)
 }
 
 // postDisputeComment posts only the rebuttal that survived the dispute gate.
@@ -667,20 +667,20 @@ func (r *run) postDisputeComment(round int, reviewURL, dispute string) (string, 
 	}
 	body := disputeCommentBody(round, reviewURL, dispute)
 	if body == "" {
-		return r.postPRComment("rebuttal", body)
+		return r.postPRComment("rebuttal", body, "")
 	}
 	if reviewURL == "" {
 		r.rep.Warn(fmt.Sprintf("review round %d has no comment URL; posting the rebuttal without a backlink", round))
 	}
-	return r.postPRComment("rebuttal", body)
+	return r.postPRComment("rebuttal", body, reviewURL)
 }
 
-func (r *run) postPRComment(kind, body string) (string, bool) {
+func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {
 	if strings.TrimSpace(body) == "" {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment body is empty", kind, r.pr.Number))
 		return "", false
 	}
-	if term := prohibitedPRCommentTerm(body); term != "" {
+	if term := prohibitedPRCommentTermExcept(body, generatedURL); term != "" {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment contains prohibited term %q", kind, r.pr.Number, term))
 		return "", false
 	}
@@ -693,6 +693,13 @@ func (r *run) postPRComment(kind, body string) (string, bool) {
 }
 
 func prohibitedPRCommentTerm(text string) string {
+	return prohibitedPRCommentTermExcept(text, "")
+}
+
+func prohibitedPRCommentTermExcept(text, generatedURL string) string {
+	if generatedURL != "" {
+		text = strings.ReplaceAll(text, generatedURL, " ")
+	}
 	words := strings.FieldsFunc(text, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})

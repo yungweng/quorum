@@ -67,11 +67,39 @@ func TestPRCommentRejectsProhibitedText(t *testing.T) {
 		pr:  gh.FullPR{Number: 42},
 	}
 	body := fixCommentBody("CI fix 1", "", "", "PR COMMENT:\nCodex fixed the check.", "", "abc123 Fix check")
-	if _, posted := r.postPRComment("fix-log comment", body); posted {
+	if _, posted := r.postPRComment("fix-log comment", body, ""); posted {
 		t.Fatal("CI fix comment with prohibited text was posted")
 	}
 	if len(rep.warnings) != 1 || !strings.Contains(rep.warnings[0], "prohibited term") {
 		t.Fatalf("warnings = %v", rep.warnings)
+	}
+}
+
+func TestPRCommentExemptsGeneratedReviewURLOnly(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' 'https://example.invalid/comment'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rep := &warningReporter{}
+	r := &run{
+		p:   &Pipeline{GH: gh.New(bin)},
+		o:   Options{RepoRoot: dir},
+		ctx: context.Background(),
+		rep: rep,
+		pr:  gh.FullPR{Number: 42},
+	}
+	reviewURL := "https://github.com/acme/codex-tools/pull/42#issuecomment-7"
+	body := fixCommentBody("Review fix round 1", "Review round 1", reviewURL,
+		"PR COMMENT:\nFixed the check and ran the tests.", "", "abc123 Fix check")
+	if _, posted := r.postPRComment("fix-log comment", body, reviewURL); !posted {
+		t.Fatalf("safe comment with generated review URL was rejected: %v", rep.warnings)
+	}
+
+	body = fixCommentBody("Review fix round 1", "Review round 1", reviewURL,
+		"PR COMMENT:\nCodex fixed the check.", "", "abc123 Fix check")
+	if _, posted := r.postPRComment("fix-log comment", body, reviewURL); posted {
+		t.Fatal("prohibited session text was exempted with the generated review URL")
 	}
 }
 
