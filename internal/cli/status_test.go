@@ -52,9 +52,60 @@ func TestRecentReviewedPRKeysIncludesEveryEligibleRecord(t *testing.T) {
 		}
 	}
 
-	keys := recentReviewedPRKeys(file, now)
+	keys := recentReviewedPRKeys(reviewedPRs(file, nil), now)
 	if len(keys) != 25 {
 		t.Fatalf("recent reviewed PR keys = %d, want 25", len(keys))
+	}
+}
+
+func TestOpenSectionIncludesSuccessfulManualRuns(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{
+			Key: "acme/api#42", Title: "manual review", Kind: history.KindReview,
+			Source: history.SourceManual, Outcome: history.OK, Reviewed: true,
+			Blockers: 2, Critical: 1, CommentURL: "https://example.invalid/comment/42", EndedAt: now,
+		},
+		{
+			Key: "acme/web#43", Title: "manual fix loop", Kind: history.KindBabysit,
+			Source: history.SourceManual, Outcome: history.Converged, Reviewed: true, EndedAt: now.Add(-time.Minute),
+		},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, tracked := render(t, a, nil)
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "manual review", "2B 1C 0S", "web #43", "manual fix loop"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("OPEN is missing %q:\n%s", want, screen)
+		}
+	}
+	for _, key := range []string{"acme/api#42", "acme/web#43"} {
+		if !slices.Contains(tracked, key) {
+			t.Errorf("tracked = %v, want manual run %s", tracked, key)
+		}
+	}
+}
+
+func TestNewerFailedManualRunHidesStaleReview(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{Key: "acme/api#42", Source: history.SourceManual, Outcome: history.OK, Reviewed: true, EndedAt: now.Add(-time.Hour)},
+		{Key: "acme/api#42", Source: history.SourceManual, Outcome: history.Failed, EndedAt: now},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, _ := render(t, a, nil)
+	if open := sectionOf(t, screen, "OPEN"); strings.Contains(open, "api #42") {
+		t.Errorf("OPEN kept a stale successful review after a newer failure:\n%s", screen)
 	}
 }
 
@@ -558,11 +609,12 @@ func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
 	}
 
 	screen, shown := render(t, a, nil)
-	if got := strings.Count(screen, "api #42"); got != 2 {
+	historySection := sectionOf(t, screen, "HISTORY")
+	if got := strings.Count(historySection, "api #42"); got != 2 {
 		t.Errorf("two runs on one pull request produced %d lines:\n%s", got, screen)
 	}
 	// Newest first.
-	if strings.Index(screen, "web #7") > strings.Index(screen, "api #42") {
+	if strings.Index(historySection, "web #7") > strings.Index(historySection, "api #42") {
 		t.Errorf("the history is not newest first:\n%s", screen)
 	}
 	for _, want := range []string{"fix, 3 rounds", "0B 2C 0S", "reviewer-2 timed out"} {

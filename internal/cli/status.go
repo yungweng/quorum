@@ -45,7 +45,8 @@ func (a *app) endsOnce() map[string]string {
 	if err != nil {
 		return nil
 	}
-	keys := recentReviewedPRKeys(file, time.Now())
+	runs := history.Read(a.p.HistoryFile, 0)
+	keys := recentReviewedPRKeys(reviewedPRs(file, runs), time.Now())
 	if len(keys) == 0 {
 		return nil
 	}
@@ -66,13 +67,10 @@ func (a *app) endsOnce() map[string]string {
 	return states
 }
 
-func recentReviewedPRKeys(file state.File, now time.Time) []string {
+func recentReviewedPRKeys(reviewed []state.Entry, now time.Time) []string {
 	cutoff := now.Add(-openWindow)
 	var keys []string
-	for _, e := range file.Entries() {
-		if e.Status != state.OK || e.Number() == 0 {
-			continue
-		}
+	for _, e := range reviewed {
 		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
 			continue
 		}
@@ -85,15 +83,16 @@ func recentReviewedPRKeys(file state.File, now time.Time) []string {
 // is waiting, what came back, and whether the machine is in a state to do more.
 //
 // ends says how a pull request finished on GitHub, keyed the same way as the
-// state file and holding gh.StateMerged and friends. It is optional: only watch
-// looks that up, because it is the only caller that can afford to ask GitHub in
-// the background. dashboard returns the keys it drew, which is how watch knows
-// what is worth looking up next time.
+// state file and holding gh.StateMerged and friends. It is optional: status
+// asks once before drawing, while watch refreshes it in the background.
+// dashboard returns the keys it drew, which is how watch knows what is worth
+// looking up next time.
 func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	file, err := state.Read(a.p.StateFile)
 	if err != nil {
 		w.Printf("%s\n", w.Red("state file unreadable: "+err.Error()))
 	}
+	historyRuns := history.Read(a.p.HistoryFile, 0)
 	live := map[string]runner.Marker{}
 	liveMarkers := runner.Live(a.p.RunningDir)
 	for _, m := range liveMarkers {
@@ -117,12 +116,9 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 
 	a.header(w)
 
-	var running, queued, recent, reviewed []state.Entry
+	var running, queued, recent []state.Entry
 	seen := map[string]bool{}
 	for _, e := range file.Entries() {
-		if e.Status == state.OK {
-			reviewed = append(reviewed, e)
-		}
 		seen[e.Key] = true
 		if m, ok := live[e.Key]; ok && !babysitPID[m.PID] && e.Status != state.Running {
 			// A direct run claims its slot before it updates an existing state
@@ -182,7 +178,7 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	for _, p := range babysits {
 		busy[p.Key()] = true
 	}
-	open := openPRs(reviewed, busy, ends)
+	open := openPRs(reviewedPRs(file, historyRuns), busy, ends)
 
 	// What is running gets as much room as it needs and no more, and the log of
 	// finished runs gets the rest.
@@ -194,7 +190,7 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	// status bar, so nothing is lost by collapsing them.
 	a.sectionOpen(w, open, ends)
 	a.sectionActive(w, running, manualReviews, babysits, queued, live, ends)
-	past := a.sectionHistory(w, recent, ends)
+	past := a.sectionHistory(w, recent, historyRuns, ends)
 	a.footer(w)
 
 	shown := make([]string, 0, len(open)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
@@ -321,6 +317,63 @@ const (
 	openLimit  = 10
 	openWindow = 14 * 24 * time.Hour
 )
+
+// reviewedPRs merges agent state with terminal-run history and keeps the
+// newest completed event for each pull request. A newer failed run must hide
+// an older successful result, just as a failed agent run does in the state
+// file, while a newer successful terminal run replaces stale agent state.
+func reviewedPRs(file state.File, runs []history.Run) []state.Entry {
+	type event struct {
+		at       time.Time
+		reviewed bool
+		entry    state.Entry
+	}
+	latest := make(map[string]event)
+	for _, e := range file.Entries() {
+		if e.Number() == 0 {
+			continue
+		}
+		latest[e.Key] = event{at: e.Time(), reviewed: e.Status == state.OK, entry: e}
+	}
+	for _, run := range runs {
+		if run.Source != history.SourceManual || run.Number() == 0 || run.EndedAt.IsZero() {
+			continue
+		}
+		if current, ok := latest[run.Key]; ok && !run.EndedAt.After(current.at) {
+			continue
+		}
+		succeeded := run.Reviewed && (run.Outcome == history.OK || run.Outcome == history.Converged)
+		latest[run.Key] = event{
+			at:       run.EndedAt,
+			reviewed: succeeded,
+			entry: state.Entry{Key: run.Key, Record: state.Record{
+				Title:       run.Title,
+				Status:      state.OK,
+				At:          run.EndedAt.Format(time.RFC3339),
+				CommentURL:  run.CommentURL,
+				Blockers:    state.Num(run.Blockers),
+				Critical:    state.Num(run.Critical),
+				Suggestions: state.Num(run.Suggestions),
+				Questions:   state.Num(run.Questions),
+			}},
+		}
+	}
+
+	out := make([]state.Entry, 0, len(latest))
+	for _, event := range latest {
+		if event.reviewed {
+			out = append(out, event.entry)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti, tj := out[i].Time(), out[j].Time()
+		if ti.Equal(tj) {
+			return out[i].Key < out[j].Key
+		}
+		return ti.After(tj)
+	})
+	return out
+}
 
 // openPRs is what quorum has reviewed and what is still waiting for something
 // to happen to it: newest first, minus everything the active section already
@@ -641,12 +694,14 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 // fallback is what the state file still holds. It is used only while the log
 // is empty, so upgrading to a build that keeps a log does not start on a blank
 // screen; the first logged run takes over from it.
-func (a *app) sectionHistory(w *ui.Writer, fallback []state.Entry, ends map[string]string) []string {
+func (a *app) sectionHistory(w *ui.Writer, fallback []state.Entry, runs []history.Run, ends map[string]string) []string {
 	limit := a.cfg.History
 	if limit <= 0 {
 		limit = config.Default().History
 	}
-	runs := history.Read(a.p.HistoryFile, limit)
+	if len(runs) > limit {
+		runs = runs[:limit]
+	}
 
 	w.Section("history", 0, 0)
 	if len(runs) == 0 && len(fallback) == 0 {
