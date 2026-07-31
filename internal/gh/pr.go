@@ -183,13 +183,6 @@ func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha str
 	return err
 }
 
-// DisableAutoMerge removes a request created by an older quorum version
-// before the head-bound merge is attempted.
-func (c *Client) DisableAutoMerge(ctx context.Context, repo string, number int) error {
-	_, err := c.run(ctx, "pr", "merge", fmt.Sprint(number), "--repo", repo, "--disable-auto")
-	return err
-}
-
 // CheckState is the outcome of one CI observation.
 type CheckState int
 

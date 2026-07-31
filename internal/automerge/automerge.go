@@ -47,7 +47,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if err != nil {
 		return result, err
 	}
-	if merged, err := validateHead(ctx, client, pr, repo, number, reviewedSHA); merged || err != nil {
+	if merged, err := validateHead(pr, repo, number, reviewedSHA); merged || err != nil {
 		if merged {
 			result.Status = Merged
 		}
@@ -83,7 +83,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		if err != nil {
 			return result, err
 		}
-		if merged, err := validateHead(ctx, client, current, repo, number, reviewedSHA); merged || err != nil {
+		if merged, err := validateHead(current, repo, number, reviewedSHA); merged || err != nil {
 			if merged {
 				result.Status = Merged
 			}
@@ -101,26 +101,11 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if err != nil {
 		return result, err
 	}
-	if merged, err := validateHead(ctx, client, current, repo, number, reviewedSHA); merged || err != nil {
+	if merged, err := validateHead(current, repo, number, reviewedSHA); merged || err != nil {
 		if merged {
 			result.Status = Merged
 		}
 		return result, err
-	}
-	if current.AutoMergeRequest != nil {
-		if err := client.DisableAutoMerge(ctx, repo, number); err != nil {
-			return result, fmt.Errorf("disabling the existing auto-merge request: %w", err)
-		}
-		current, err = client.PRDetails(ctx, repo, number)
-		if err != nil {
-			return result, err
-		}
-		if merged, err := validateHead(ctx, client, current, repo, number, reviewedSHA); merged || err != nil {
-			if merged {
-				result.Status = Merged
-			}
-			return result, err
-		}
 	}
 	if err := client.MergeHead(ctx, repo, number, reviewedSHA); err != nil {
 		if current, inspectErr := client.PRDetails(ctx, repo, number); inspectErr == nil {
@@ -135,7 +120,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	return result, nil
 }
 
-func validateHead(ctx context.Context, client *gh.Client, current gh.Details, repo string, number int, reviewedSHA string) (bool, error) {
+func validateHead(current gh.Details, repo string, number int, reviewedSHA string) (bool, error) {
 	if current.State == gh.StateMerged {
 		return true, nil
 	}
@@ -143,11 +128,6 @@ func validateHead(ctx context.Context, client *gh.Client, current gh.Details, re
 		return false, fmt.Errorf("pull request %s#%d is %s, not open", repo, number, strings.ToLower(current.State))
 	}
 	if current.HeadRefOid != reviewedSHA {
-		if current.AutoMergeRequest != nil {
-			if err := client.DisableAutoMerge(ctx, repo, number); err != nil {
-				return false, fmt.Errorf("refusing auto-merge after head drift and disabling the existing request: %w", err)
-			}
-		}
 		return false, fmt.Errorf("refusing auto-merge: reviewed head is %s but GitHub reports %s", reviewedSHA, current.HeadRefOid)
 	}
 	return false, nil

@@ -9,9 +9,11 @@ worktrees=()
 
 cleanup() {
 	local worktree
-	for worktree in "${worktrees[@]}"; do
-		git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
-	done
+	if (( ${#worktrees[@]} > 0 )); then
+		for worktree in "${worktrees[@]}"; do
+			git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+		done
+	fi
 	rmdir "$tmp_root" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -25,12 +27,14 @@ while read -r local_ref local_oid _ _; do
 
 	commit=$(git -C "$repo" rev-parse --verify "$local_oid^{commit}")
 	already_checked=false
-	for checked_commit in "${checked[@]}"; do
-		if [[ "$checked_commit" == "$commit" ]]; then
-			already_checked=true
-			break
-		fi
-	done
+	if (( ${#checked[@]} > 0 )); then
+		for checked_commit in "${checked[@]}"; do
+			if [[ "$checked_commit" == "$commit" ]]; then
+				already_checked=true
+				break
+			fi
+		done
+	fi
 	if [[ "$already_checked" == true ]]; then
 		continue
 	fi

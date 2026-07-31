@@ -228,7 +228,7 @@ func TestPrePushChecksThePushedCommit(t *testing.T) {
 		"refs/heads/main %s refs/heads/main %s\nrefs/tags/example %s refs/tags/example %s\n(delete) %s refs/heads/old %s\n",
 		goodCommit, zero, goodCommit, zero, zero, goodCommit,
 	)
-	output, err := runScript(t, repo, hookPath(t, "pre-push"), input, hookEnv)
+	output, err := runBashScript(t, repo, hookPath(t, "pre-push"), input, hookEnv)
 	if err != nil {
 		t.Fatalf("pre-push tested the dirty working tree instead of the commit: %v\n%s", err, output)
 	}
@@ -241,7 +241,7 @@ func TestPrePushChecksThePushedCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	input = fmt.Sprintf("refs/heads/main %s refs/heads/main %s\n", badCommit, goodCommit)
-	output, err = runScript(t, repo, hookPath(t, "pre-push"), input, hookEnv)
+	output, err = runBashScript(t, repo, hookPath(t, "pre-push"), input, hookEnv)
 	if err == nil {
 		t.Fatal("pre-push accepted a failing pushed commit")
 	}
@@ -252,6 +252,18 @@ func TestPrePushChecksThePushedCommit(t *testing.T) {
 	worktreeList := git(t, repo, "worktree", "list", "--porcelain")
 	if got := strings.Count(worktreeList, "worktree "); got != 1 {
 		t.Fatalf("pre-push left %d worktrees behind:\n%s", got-1, worktreeList)
+	}
+}
+
+func TestPrePushAcceptsEmptyInputWithMacOSBash(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS system Bash compatibility")
+	}
+	repo := newGitRepository(t)
+	cmd := exec.Command("/bin/bash", hookPath(t, "pre-push"))
+	cmd.Dir = repo
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("empty pre-push failed: %v\n%s", err, output)
 	}
 }
 
@@ -299,6 +311,16 @@ func projectRoot(t *testing.T) string {
 func runScript(t *testing.T, repo, path, stdin string, extraEnv []string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(path)
+	cmd.Dir = repo
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func runBashScript(t *testing.T, repo, path, stdin string, extraEnv []string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("/bin/bash", path)
 	cmd.Dir = repo
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = append(os.Environ(), extraEnv...)
