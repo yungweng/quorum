@@ -28,6 +28,15 @@ func sampleDivergenceTrace() DivergenceTrace {
 	}
 }
 
+func TestDivergenceTimeoutSurvivesDefaults(t *testing.T) {
+	for _, timeout := range []time.Duration{0, 12 * time.Minute} {
+		got := (Options{DivergenceTimeout: timeout}).withDefaults().DivergenceTimeout
+		if got != timeout {
+			t.Errorf("divergence timeout = %s, want %s", got, timeout)
+		}
+	}
+}
+
 func TestValidateDivergenceReportRequiresConcreteEvidence(t *testing.T) {
 	trace := sampleDivergenceTrace()
 	report := DivergenceReport{

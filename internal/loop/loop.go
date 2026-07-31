@@ -884,9 +884,6 @@ func (o Options) withDefaults() Options {
 	if o.FixTimeout == 0 {
 		o.FixTimeout = DefaultFixTimeout
 	}
-	if o.DivergenceTimeout == 0 {
-		o.DivergenceTimeout = review.DefaultReviewTimeout
-	}
 	return o
 }
 
