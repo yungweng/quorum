@@ -186,7 +186,7 @@ func (r *Runner) recordAutoMergePending(key, runDir string, findings review.Find
 }
 
 func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result) (automerge.Result, error) {
-	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, initial, automerge.WaitTimeout)
+	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, initial, r.Cfg.AutoMergeTimeout)
 }
 
 func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result, waitTimeout time.Duration) (automerge.Result, error) {

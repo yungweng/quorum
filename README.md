@@ -129,6 +129,7 @@ Auto-merge is off by default and enabled separately for each source:
 AUTO_MERGE_AGENT=0
 AUTO_MERGE_REVIEW=0
 AUTO_MERGE_BABYSIT=0
+AUTO_MERGE_TIMEOUT="2h"
 ```
 
 A clean posted PR review has no Blockers or Critical findings; Suggestions and
@@ -139,7 +140,9 @@ report (`POST=0` or `--dry-run`) and a branch without a PR are not merged.
 
 The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
 The other two settings apply only to the matching command started in a
-terminal. Change them with `quorum config` or in the config file.
+terminal. The wait for protected checks and mergeability defaults to two hours;
+set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these
+settings with `quorum config` or in the config file.
 
 **The fix sessions run with the Codex sandbox bypassed**, which gives them full
 file and network access on your machine. `--sandboxed` opts out. Read

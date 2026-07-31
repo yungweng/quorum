@@ -619,6 +619,24 @@ esac`)
 	}
 }
 
+func TestRetryAllowsUnlimitedWait(t *testing.T) {
+	client, _ := fakeGH(t, `
+case "$n" in
+  1|3|4|7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'all checks passed' ;;
+  5) echo 'reviewer' ;;
+  6) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  8) echo '{"merged":true}' ;;
+esac`)
+	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Merged {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestRunPreservesExistingAutoMergeWhenDirectMergeFails(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in

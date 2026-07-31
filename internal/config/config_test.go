@@ -105,7 +105,8 @@ NOTIFY=1
 		t.Errorf("ReviewArgs = %q", cfg.ReviewArgs)
 	}
 	// Keys the old file never had must fall back to the defaults.
-	if cfg.Reviewers != Default().Reviewers || cfg.Nice != Default().Nice {
+	if cfg.Reviewers != Default().Reviewers || cfg.Nice != Default().Nice ||
+		cfg.AutoMergeTimeout != Default().AutoMergeTimeout {
 		t.Errorf("new keys did not default: %+v", cfg)
 	}
 }
@@ -117,6 +118,12 @@ func TestLoadMissingFileIsDefault(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg, Default()) {
 		t.Error("missing file did not produce the defaults")
+	}
+}
+
+func TestDefaultAutoMergeTimeoutCoversLongChecks(t *testing.T) {
+	if got := Default().AutoMergeTimeout; got != 2*time.Hour {
+		t.Fatalf("AutoMergeTimeout = %s, want 2h", got)
 	}
 }
 
@@ -158,6 +165,7 @@ func TestRoundTrip(t *testing.T) {
 	want.AutoMergeAgent = true
 	want.AutoMergeReview = true
 	want.AutoMergeBabysit = true
+	want.AutoMergeTimeout = 90 * time.Minute
 	want.Unknown = map[string]string{"FUTURE_KEY": "keep me"}
 
 	path := filepath.Join(t.TempDir(), "config")

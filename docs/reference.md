@@ -202,6 +202,7 @@ AGENT_ACTION="review"    # or "babysit"
 AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects
 AUTO_MERGE_REVIEW=0      # manual quorum review runs
 AUTO_MERGE_BABYSIT=0     # manual quorum babysit runs
+AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
 NOTIFY=1
 ```
 
@@ -217,6 +218,10 @@ The three `AUTO_MERGE_*` settings are independent and default to `0`. The agent
 uses only `AUTO_MERGE_AGENT`, even when `AGENT_ACTION="babysit"`; `quorum
 review` and `quorum run` use `AUTO_MERGE_REVIEW`, and `quorum babysit` uses
 `AUTO_MERGE_BABYSIT`.
+
+`AUTO_MERGE_TIMEOUT` defaults to two hours. Set it above the longest protected
+check or merge queue wait in the repository. A value of `0` waits until the run
+is stopped.
 
 After a posted review with zero Blockers and zero Critical findings, quorum:
 

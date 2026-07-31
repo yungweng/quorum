@@ -13,7 +13,7 @@ func (a *app) autoMerge(ctx context.Context, client *gh.Client, checksDir, repo 
 	result, err := automerge.Run(ctx, client, repo, number, sha)
 	if errors.Is(err, automerge.ErrMergeNotReady) {
 		retryResult, retryErr := automerge.RetryWhenReady(
-			ctx, client, checksDir, repo, number, sha, result, automerge.WaitTimeout,
+			ctx, client, checksDir, repo, number, sha, result, a.cfg.AutoMergeTimeout,
 		)
 		result, err = retryResult, retryErr
 	}

@@ -29,9 +29,6 @@ const (
 var ErrMergeNotReady = errors.New("reviewed head is not ready to merge")
 var errHeadDrift = errors.New("pull request head moved after review")
 
-// WaitTimeout bounds check registration and GitHub's mergeability lag.
-const WaitTimeout = 180 * time.Second
-
 type Result struct {
 	ApprovalAttempted bool
 	ApprovalCreated   bool
@@ -197,20 +194,28 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 
 // RetryWhenReady waits for checks, then retries the exact-head merge. A green
 // check result can precede GitHub's mergeability update, so ErrMergeNotReady
-// remains retryable until waitTimeout expires.
+// remains retryable until waitTimeout expires. A zero timeout waits until the
+// caller cancels the context.
 func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo string, number int, reviewedSHA string, initial Result, waitTimeout time.Duration) (Result, error) {
-	deadline := time.Now().Add(waitTimeout)
+	var deadline time.Time
+	if waitTimeout > 0 {
+		deadline = time.Now().Add(waitTimeout)
+	}
 	combined := initial
 	for {
 		if done, err := verifyRetryHead(ctx, client, repo, number, reviewedSHA, &combined); done || err != nil {
 			return combined, err
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return stopRetry(ctx, client, repo, number, combined,
-				fmt.Errorf("required checks did not settle within %s", waitTimeout))
+		watchCtx := ctx
+		cancel := func() {}
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return stopRetry(ctx, client, repo, number, combined,
+					fmt.Errorf("required checks did not settle within %s", waitTimeout))
+			}
+			watchCtx, cancel = context.WithTimeout(ctx, remaining)
 		}
-		watchCtx, cancel := context.WithTimeout(ctx, remaining)
 		checkState, output, err := client.WatchChecks(watchCtx, checksDir, number)
 		watchErr := watchCtx.Err()
 		cancel()
@@ -223,11 +228,14 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 					fmt.Errorf("required checks did not settle within %s", waitTimeout))
 			}
 			if errors.Is(err, gh.ErrTransient) {
-				if !time.Now().Before(deadline) {
+				if deadlineExpired(deadline) {
 					return stopRetry(ctx, client, repo, number, combined,
 						fmt.Errorf("required checks did not settle within %s", waitTimeout))
 				}
-				delay := min(retryDelay(time.Second, waitTimeout), time.Until(deadline))
+				delay := retryDelay(time.Second, waitTimeout)
+				if !deadline.IsZero() {
+					delay = min(delay, time.Until(deadline))
+				}
 				if err := waitRetry(ctx, delay); err != nil {
 					return stopRetry(ctx, client, repo, number, combined, err)
 				}
@@ -251,7 +259,7 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			if !errors.Is(mergeErr, ErrMergeNotReady) {
 				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
-			if !time.Now().Before(deadline) {
+			if deadlineExpired(deadline) {
 				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			delay = retryDelay(5*time.Second, waitTimeout)
@@ -259,7 +267,7 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			return stopRetry(ctx, client, repo, number, combined,
 				fmt.Errorf("required checks failed: %s", firstLine(output)))
 		case gh.ChecksNone:
-			if !time.Now().Before(deadline) {
+			if deadlineExpired(deadline) {
 				result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
 				combined = combineResults(combined, result)
 				if mergeErr == nil {
@@ -269,14 +277,16 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			}
 			delay = retryDelay(20*time.Second, waitTimeout)
 		case gh.ChecksPending:
-			if !time.Now().Before(deadline) {
+			if deadlineExpired(deadline) {
 				return stopRetry(ctx, client, repo, number, combined,
 					fmt.Errorf("required checks did not settle within %s", waitTimeout))
 			}
 			delay = retryDelay(10*time.Second, waitTimeout)
 		}
 
-		delay = min(delay, time.Until(deadline))
+		if !deadline.IsZero() {
+			delay = min(delay, time.Until(deadline))
+		}
 		if err := waitRetry(ctx, delay); err != nil {
 			return stopRetry(ctx, client, repo, number, combined, err)
 		}
@@ -284,7 +294,14 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 }
 
 func retryDelay(limit, waitTimeout time.Duration) time.Duration {
+	if waitTimeout <= 0 {
+		return limit
+	}
 	return min(limit, max(waitTimeout/4, time.Millisecond))
+}
+
+func deadlineExpired(deadline time.Time) bool {
+	return !deadline.IsZero() && !time.Now().Before(deadline)
 }
 
 func combineResults(first, second Result) Result {

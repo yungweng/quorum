@@ -264,6 +264,23 @@ func (a *app) settings() []setting {
 			func(c config.Config) bool { return c.AutoMergeBabysit },
 			func(c *config.Config, v bool) { c.AutoMergeBabysit = v }),
 
+		{"auto-merge wait", func(c config.Config) string {
+			if c.AutoMergeTimeout == 0 {
+				return "no limit; waits until the run is stopped"
+			}
+			return config.FormatDuration(c.AutoMergeTimeout) + " for checks and mergeability"
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, "how long to wait for checks and mergeability; 0 means no limit",
+				config.FormatDuration(c.AutoMergeTimeout))
+			if err != nil {
+				return err
+			}
+			if d, err := config.ParseDuration(v); err == nil {
+				c.AutoMergeTimeout = d
+			}
+			return nil
+		}},
+
 		{"fix sessions", func(c config.Config) string {
 			model := c.FixModel
 			if model == "" {

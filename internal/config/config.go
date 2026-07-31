@@ -71,10 +71,12 @@ type Config struct {
 
 	// Auto-merge is opt-in per source. An agent run uses AutoMergeAgent even
 	// when AgentAction is "babysit"; the other two fields only affect commands
-	// started explicitly in a terminal.
+	// started explicitly in a terminal. AutoMergeTimeout bounds the wait for
+	// checks and mergeability; zero leaves it bounded only by the run context.
 	AutoMergeAgent   bool
 	AutoMergeReview  bool
 	AutoMergeBabysit bool
+	AutoMergeTimeout time.Duration
 
 	Notify bool
 
@@ -122,7 +124,8 @@ func Default() Config {
 		MaxCIFixes: 3,
 		FixTimeout: 2 * time.Hour,
 
-		AgentAction: ActionReview,
+		AgentAction:      ActionReview,
+		AutoMergeTimeout: 2 * time.Hour,
 
 		Notify:  true,
 		Unknown: map[string]string{},
@@ -322,6 +325,8 @@ func (c *Config) set(key, value string) {
 		c.AutoMergeReview = truthy(value)
 	case "AUTO_MERGE_BABYSIT":
 		c.AutoMergeBabysit = truthy(value)
+	case "AUTO_MERGE_TIMEOUT":
+		c.AutoMergeTimeout = durationOr(value, c.AutoMergeTimeout)
 	case "REVIEW_ARGS":
 		// Retired: it was passed verbatim to a separate binary that no longer
 		// exists. The only flag anyone used through it was --dry-run, so that
@@ -457,7 +462,8 @@ func (c Config) Render() string {
 	w("# commit once its branch rules pass. Each source is opt-in.\n")
 	w("AUTO_MERGE_AGENT=%s\n", bit(c.AutoMergeAgent))
 	w("AUTO_MERGE_REVIEW=%s\n", bit(c.AutoMergeReview))
-	w("AUTO_MERGE_BABYSIT=%s\n\n", bit(c.AutoMergeBabysit))
+	w("AUTO_MERGE_BABYSIT=%s\n", bit(c.AutoMergeBabysit))
+	w("AUTO_MERGE_TIMEOUT=%q\t# wait for checks and mergeability; 0 disables timeout\n\n", FormatDuration(c.AutoMergeTimeout))
 
 	w("NOTIFY=%s\n", bit(c.Notify))
 
