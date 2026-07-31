@@ -100,6 +100,47 @@ esac`)
 	}
 }
 
+func TestRunRejectsActiveChangeRequests(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","author":{"login":"example-user"}}' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "active change requests") {
+		t.Fatalf("err = %v", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("active change request reached a side effect:\n%s", args)
+	}
+}
+
+func TestRunRejectsChangeRequestCreatedAfterApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "active change requests") {
+		t.Fatalf("err = %v", err)
+	}
+	if !result.ApprovalCreated || result.approvalReviewID != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("created approval was not dismissed:\n%s", args)
+	}
+	if strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("late change request reached merge:\n%s", args)
+	}
+}
+
 func TestRunTracksReusedAutomaticApprovalForCleanup(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in

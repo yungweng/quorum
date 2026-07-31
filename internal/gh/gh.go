@@ -226,6 +226,7 @@ type Details struct {
 	IsCrossRepository bool   `json:"isCrossRepository"`
 	State             string `json:"state"`
 	Title             string `json:"title"`
+	ReviewDecision    string `json:"reviewDecision"`
 	AutoMergeRequest  *struct {
 		EnabledAt string `json:"enabledAt"`
 	} `json:"autoMergeRequest"`
@@ -239,7 +240,7 @@ type Details struct {
 func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Details, error) {
 	var d Details
 	out, err := c.run(ctx, "pr", "view", fmt.Sprint(number), "--repo", repo,
-		"--json", "headRefOid,isDraft,isCrossRepository,author,state,title,autoMergeRequest")
+		"--json", "headRefOid,isDraft,isCrossRepository,author,state,title,reviewDecision,autoMergeRequest")
 	if err != nil {
 		return d, err
 	}

@@ -311,6 +311,22 @@ func TestPRDetailsRejectsEmptyHead(t *testing.T) {
 	}
 }
 
+func TestPRDetailsReadsReviewDecision(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != *reviewDecision* ]]; then
+  echo 'reviewDecision was not requested' >&2
+  exit 1
+fi
+echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED"}'`)
+	details, err := testClient(bin).PRDetails(context.Background(), "acme/api", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.ReviewDecision != "CHANGES_REQUESTED" {
+		t.Fatalf("review decision = %q", details.ReviewDecision)
+	}
+}
+
 func TestPRStatesReadsABatch(t *testing.T) {
 	// One call, one alias per pull request, three different outcomes.
 	bin, countFile := fakeGH(t, `echo "$@" > `+t.TempDir()+`/args
