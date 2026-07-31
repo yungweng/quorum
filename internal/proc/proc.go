@@ -191,12 +191,14 @@ func Claim(dir string) (func(), error) {
 // A missing or unlocked claim counts as unclaimed; callers decide whether a
 // compatibility grace still protects a directory written by an older version.
 func Claimed(dir string) bool {
-	f, err := os.OpenFile(filepath.Join(dir, ClaimFile), os.O_RDWR, 0)
+	f, err := os.Open(filepath.Join(dir, ClaimFile))
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	// Readers take shared locks so concurrent status, watch and GC processes do
+	// not mistake one another for the run's exclusive claim.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		// Failure to take the lock means another process has it. Treat any
 		// other lock error conservatively too: deleting an uncertain run is
 		// worse than leaving it for the next collection.

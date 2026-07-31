@@ -27,6 +27,23 @@ func TestClaimed(t *testing.T) {
 		t.Error("a released directory still reads as held")
 	}
 
+	// Status, watch and GC can inspect the same stale run concurrently. Their
+	// shared probe locks must not make one reader look like a live run holder.
+	observer, err := os.Open(filepath.Join(dir, ClaimFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+	if err := syscall.Flock(int(observer.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if Claimed(dir) {
+		t.Error("another claim reader made a released directory look held")
+	}
+	if err := syscall.Flock(int(observer.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+
 	// An unlocked file is stale even when it names this process. A PID-only
 	// check would mistake it for a live claim, and PID reuse makes that happen
 	// to real run directories eventually.
