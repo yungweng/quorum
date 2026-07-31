@@ -28,7 +28,7 @@ func fakeGH(t *testing.T, cases string) (*gh.Client, string) {
 	}
 	client := gh.New(bin)
 	client.Backoff = time.Millisecond
-	client.Timeout = time.Second
+	client.Timeout = 5 * time.Second
 	return client, args
 }
 

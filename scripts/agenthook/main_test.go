@@ -141,10 +141,15 @@ func TestPreCommitChecksTheIndexWithoutChangingIt(t *testing.T) {
 func TestPrePushChecksThePushedCommit(t *testing.T) {
 	repo := newGitRepository(t)
 	logPath := filepath.Join(t.TempDir(), "checks.log")
-	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@printf x >> \"$${CHECK_LOG}\"\n\t@test ! -f fail\n")
+	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@test -z \"$${GIT_DIR:-}\"\n\t@test -z \"$${GIT_WORK_TREE:-}\"\n\t@printf x >> \"$${CHECK_LOG}\"\n\t@test ! -f fail\n")
 	git(t, repo, "add", "Makefile")
 	git(t, repo, "commit", "-m", "good")
 	goodCommit := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	hookEnv := []string{
+		"CHECK_LOG=" + logPath,
+		"GIT_DIR=" + strings.TrimSpace(git(t, repo, "rev-parse", "--git-dir")),
+		"GIT_WORK_TREE=" + repo,
+	}
 
 	writeTestFile(t, repo, "fail", "working-tree-only failure\n")
 	zero := strings.Repeat("0", 40)
@@ -152,7 +157,7 @@ func TestPrePushChecksThePushedCommit(t *testing.T) {
 		"refs/heads/main %s refs/heads/main %s\nrefs/tags/example %s refs/tags/example %s\n(delete) %s refs/heads/old %s\n",
 		goodCommit, zero, goodCommit, zero, zero, goodCommit,
 	)
-	output, err := runScript(t, repo, hookPath(t, "pre-push"), input, []string{"CHECK_LOG=" + logPath})
+	output, err := runScript(t, repo, hookPath(t, "pre-push"), input, hookEnv)
 	if err != nil {
 		t.Fatalf("pre-push tested the dirty working tree instead of the commit: %v\n%s", err, output)
 	}
@@ -165,7 +170,7 @@ func TestPrePushChecksThePushedCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	input = fmt.Sprintf("refs/heads/main %s refs/heads/main %s\n", badCommit, goodCommit)
-	output, err = runScript(t, repo, hookPath(t, "pre-push"), input, []string{"CHECK_LOG=" + logPath})
+	output, err = runScript(t, repo, hookPath(t, "pre-push"), input, hookEnv)
 	if err == nil {
 		t.Fatal("pre-push accepted a failing pushed commit")
 	}

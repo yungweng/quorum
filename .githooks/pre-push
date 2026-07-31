@@ -3,6 +3,7 @@
 set -euo pipefail
 
 repo=$(git rev-parse --show-toplevel)
+unset $(git rev-parse --local-env-vars)
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/quorum-pre-push.XXXXXX")
 worktrees=()
 
