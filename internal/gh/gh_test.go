@@ -205,6 +205,25 @@ func TestWatchRequiredChecksClassifiesNoRequiredChecks(t *testing.T) {
 	}
 }
 
+func TestWatchRequiredChecksDoesNotTreatFailedCheckTextAsTransient(t *testing.T) {
+	for _, output := range []string{
+		"integration timeout\tfail\t1m",
+		"HTTP 503 coverage\tfail\t1m",
+		"connection refused test\tcancel\t1m",
+	} {
+		t.Run(output, func(t *testing.T) {
+			bin, _ := fakeGH(t, "echo '"+output+"' >&2; exit 1")
+			state, _, err := testClient(bin).WatchRequiredChecks(context.Background(), t.TempDir(), 42)
+			if err != nil {
+				t.Fatalf("err = %v, want terminal check failure", err)
+			}
+			if state != ChecksFail {
+				t.Fatalf("state = %v, want ChecksFail", state)
+			}
+		})
+	}
+}
+
 // An empty body is not an empty result: gh prints [] when a search found
 // nothing, so silence means the call did not really work.
 func TestSearchEmptyOutputIsTransient(t *testing.T) {

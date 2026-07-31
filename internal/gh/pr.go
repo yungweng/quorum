@@ -273,9 +273,6 @@ func (c *Client) watchChecks(ctx context.Context, dir string, number int, requir
 	if err == nil {
 		return ChecksPass, text, nil
 	}
-	if looksTransient(text) {
-		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstLine(text))
-	}
 	// With --required, gh says "no required checks reported" instead.
 	lower := strings.ToLower(text)
 	if strings.Contains(lower, "no checks reported") || strings.Contains(lower, "no required checks reported") {
@@ -285,7 +282,27 @@ func (c *Client) watchChecks(ctx context.Context, dir string, number int, requir
 	if errors.As(err, &ee) && ee.ExitCode() == ghChecksPendingExit {
 		return ChecksPending, text, nil
 	}
+	// A failed check's name or description may contain the same words as a
+	// transport error. Prefer the status column gh printed over matching those
+	// words, or a test named "connection timeout" can be retried as pending.
+	if reportsFailedCheck(text) {
+		return ChecksFail, text, nil
+	}
+	if looksTransient(text) {
+		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstLine(text))
+	}
 	return ChecksFail, text, nil
+}
+
+func reportsFailedCheck(output string) bool {
+	for line := range strings.Lines(output) {
+		for _, field := range strings.Fields(line) {
+			if field == "fail" || field == "cancel" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FailingCheck is one red check, as handed to the Codex fix session.

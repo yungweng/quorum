@@ -113,9 +113,32 @@ func TestOpenSectionKeepsManualResultsWhenMergeFails(t *testing.T) {
 
 	screen, _ := render(t, a, nil)
 	open := sectionOf(t, screen, "OPEN")
-	for _, want := range []string{"api #42", "review result", "web #43", "fix-loop result"} {
+	for _, want := range []string{"api #42", "review result", "web #43", "fix-loop result", "merge failed", "permission denied"} {
 		if !strings.Contains(open, want) {
 			t.Errorf("OPEN is missing %q after a merge failure:\n%s", want, screen)
+		}
+	}
+	if historySection := sectionOf(t, screen, "HISTORY"); !strings.Contains(historySection, "merge failed") {
+		t.Errorf("HISTORY hides the merge failure:\n%s", screen)
+	}
+}
+
+func TestDashboardSurfacesRecordedMergeFailure(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "review result"
+		r.Status = state.OK
+		r.Reason = "auto-merge failed: permission denied"
+		r.At = time.Now().Format(time.RFC3339)
+	})
+
+	screen, _ := render(t, a, nil)
+	for _, section := range []string{"OPEN", "HISTORY"} {
+		text := sectionOf(t, screen, section)
+		for _, want := range []string{"merge failed", "permission denied"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s is missing %q:\n%s", section, want, screen)
+			}
 		}
 	}
 }

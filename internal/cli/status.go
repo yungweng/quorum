@@ -350,6 +350,7 @@ func reviewedPRs(file state.File, runs []history.Run) []state.Entry {
 				Title:       run.Title,
 				Author:      run.Author,
 				Status:      state.OK,
+				Reason:      run.Reason,
 				At:          run.EndedAt.Format(time.RFC3339),
 				CommentURL:  run.CommentURL,
 				Blockers:    state.Num(run.Blockers),
@@ -432,6 +433,8 @@ func (a *app) sectionOpen(w *ui.Writer, open []state.Entry, ends map[string]stri
 // that needs a person is the one the eye lands on first.
 func openMark(w *ui.Writer, e state.Entry) string {
 	switch {
+	case e.Reason != "":
+		return w.Red("●")
 	case e.Blockers > 0:
 		return w.Red("●")
 	case e.Critical > 0:
@@ -456,6 +459,9 @@ func openDetail(w *ui.Writer, e state.Entry, now time.Time) string {
 		counts = w.Dim(counts)
 	}
 	text := w.Dim("reviewed "+historyWhen(now, e.Time())+" · ") + counts
+	if e.Reason != "" {
+		text = w.Red("merge failed") + w.Dim(": "+ui.Truncate(mergeFailureReason(e.Reason), 30)+" · ") + counts
+	}
 	if e.CommentURL != "" {
 		text += w.Dim("  ") + w.Link(w.Blue("comment ↗"), e.CommentURL)
 	}
@@ -744,7 +750,12 @@ func (a *app) historyFromState(w *ui.Writer, recent []state.Entry, limit int, en
 		var symbol, detail string
 		switch e.Status {
 		case state.OK:
-			symbol, detail = w.Green(w.SymOK()), findingsText(w, e)
+			if e.Reason != "" {
+				symbol = w.Red(w.SymFail())
+				detail = w.Red("merge failed") + w.Dim(", "+ui.Truncate(mergeFailureReason(e.Reason), 44))
+			} else {
+				symbol, detail = w.Green(w.SymOK()), findingsText(w, e)
+			}
 		case state.Failed:
 			symbol = w.Red(w.SymFail())
 			detail = w.Red(fmt.Sprintf("failed after %d attempt(s)", e.Fails))
@@ -782,6 +793,9 @@ func historyWhen(now, t time.Time) string {
 }
 
 func historyMark(w *ui.Writer, run history.Run) string {
+	if run.Reviewed && run.Reason != "" {
+		return mark(w, w.Red(w.SymFail()))
+	}
 	switch run.Outcome {
 	case history.OK, history.Converged:
 		return mark(w, w.Green(w.SymOK()))
@@ -816,6 +830,12 @@ func historyDetail(w *ui.Writer, run history.Run) string {
 			text += w.Dim(", " + ui.Truncate(run.Reason, 44))
 		}
 		return prefixKind(w, run) + text
+	case run.Reviewed && run.Reason != "":
+		text = prefixKind(w, run) + w.Red("merge failed") + w.Dim(", "+ui.Truncate(mergeFailureReason(run.Reason), 44))
+		if run.CommentURL != "" {
+			text += w.Dim("  ") + w.Link(w.Blue("comment ↗"), run.CommentURL)
+		}
+		return text
 	case !run.Reviewed:
 		return prefixKind(w, run) + w.Dim("finished")
 	}
@@ -838,6 +858,15 @@ func historyDetail(w *ui.Writer, run history.Run) string {
 		return text + "  " + w.Link(w.Blue("comment ↗"), run.CommentURL)
 	}
 	return text
+}
+
+func mergeFailureReason(reason string) string {
+	if strings.HasPrefix(reason, "auto-merge failed") {
+		if _, detail, ok := strings.Cut(reason, ": "); ok {
+			return detail
+		}
+	}
+	return reason
 }
 
 // prefixKind marks a fix loop. A review says nothing, because that is what
