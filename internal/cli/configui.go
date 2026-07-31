@@ -299,7 +299,7 @@ func autoMergeSetting(name, title string, enabled func(config.Config) bool, set 
 		return a.pick(in, title, c, []option{
 			{"off", "leave the pull request open", func(c *config.Config) { set(c, false) },
 				func(c config.Config) bool { return !enabled(c) }},
-			{"on", "approve the reviewed head and use GitHub auto-merge", func(c *config.Config) { set(c, true) },
+			{"on", "approve and merge only the exact reviewed head", func(c *config.Config) { set(c, true) },
 				func(c config.Config) bool { return enabled(c) }},
 		}, nil)
 	}}

@@ -138,7 +138,7 @@ func (a *app) cmdReview(argv []string) int {
 	}
 	number = res.Findings.PR
 	mergeStatus := ""
-	if a.cfg.AutoMergeReview && automerge.Eligible(res.Findings) {
+	if automerge.Allowed(a.cfg.AutoMergeReview, a.cfg.Post, res.Findings) {
 		mergeResult, mergeErr := a.autoMerge(ctx, client, repo, number, res.Findings.HeadSHA)
 		if mergeErr != nil {
 			a.logRun(rep.historyRun(repo, started, history.Failed, mergeErr.Error(), res))
@@ -169,8 +169,6 @@ func (a *app) cmdReview(argv []string) int {
 		switch mergeStatus {
 		case automerge.Merged:
 			body += " Merged."
-		case automerge.Requested:
-			body += " Auto-merge requested."
 		}
 		a.out.Notify("quorum: review complete", body)
 	}

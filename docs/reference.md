@@ -222,17 +222,18 @@ After a posted review with zero Blockers and zero Critical findings, quorum:
 1. confirms that GitHub still reports the exact reviewed head;
 2. submits an approval tied to that commit, unless the same user already
    approved it; and
-3. runs `gh pr merge --auto --merge --match-head-commit SHA`.
+3. calls GitHub's merge API with `merge_method=merge` and `sha=SHA`.
 
-Suggestions and Questions do not block. GitHub branch rules, required checks
-and merge queues still apply; quorum never passes `--admin`. It does not merge
+Suggestions and Questions do not block. GitHub branch rules and required checks
+still apply. The merge is one atomic request for the reviewed SHA, so it fails
+rather than leaving a request that could survive a later push. It does not merge
 an own PR, a moved head, a branch-only run, `POST=0`, `--dry-run`, or an accepted
 dispute whose last review still contains Blockers or Critical findings.
 
-If GitHub accepts the request but requirements are pending, the dashboard marks
-the PR `auto-merge queued`. An Auto-Merge failure returns exit code 1. Agent
-runs record the review request as handled, so a failure after a successful
-review does not spend tokens repeating that review.
+If branch requirements are still pending, Auto-Merge fails instead of queuing a
+persistent request. An Auto-Merge failure returns exit code 1. Agent runs record
+the review request as handled, so a failure after a successful review does not
+spend tokens repeating that review.
 
 ### Keeping the machine usable
 

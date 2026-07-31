@@ -93,7 +93,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 
 	if runErr == nil {
 		mergeStatus := ""
-		if r.Cfg.AutoMergeAgent && automerge.Eligible(findings) {
+		if automerge.Allowed(r.Cfg.AutoMergeAgent, r.Cfg.Post, findings) {
 			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA)
 			mergeStatus = mergeResult.Status
 			if mergeErr != nil {
@@ -127,8 +127,6 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		switch mergeStatus {
 		case automerge.Merged:
 			note += "; merged"
-		case automerge.Requested:
-			note += "; auto-merge requested"
 		}
 		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
 		return nil

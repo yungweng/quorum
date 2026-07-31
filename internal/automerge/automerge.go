@@ -1,5 +1,4 @@
-// Package automerge approves a reviewed pull request head and asks GitHub to
-// merge it once the repository's own rules pass.
+// Package automerge approves and merges one reviewed pull request head.
 package automerge
 
 import (
@@ -14,8 +13,7 @@ import (
 const approvalBody = "No blockers or critical findings found."
 
 const (
-	Requested = "requested"
-	Merged    = "merged"
+	Merged = "merged"
 )
 
 type Result struct {
@@ -30,9 +28,15 @@ func Eligible(findings review.Findings) bool {
 	return findings.PR > 0 && findings.Posted && findings.Blocking() == 0
 }
 
+// Allowed also requires the source-specific option and global posting policy.
+// Fix loops post their own reviews, so Findings.Posted alone cannot represent
+// POST=0 at these call sites.
+func Allowed(enabled, post bool, findings review.Findings) bool {
+	return enabled && post && Eligible(findings)
+}
+
 // Run binds both side effects to reviewedSHA. It is safe to repeat: an
-// existing approval for that commit is reused, and an existing auto-merge
-// request is accepted as success.
+// existing approval for that commit is reused, and a merged PR is success.
 func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string) (Result, error) {
 	var result Result
 	if repo == "" || number <= 0 || reviewedSHA == "" {
@@ -43,15 +47,11 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if err != nil {
 		return result, err
 	}
-	if pr.State == gh.StateMerged {
-		result.Status = Merged
-		return result, nil
-	}
-	if pr.State != gh.StateOpen {
-		return result, fmt.Errorf("pull request %s#%d is %s, not open", repo, number, strings.ToLower(pr.State))
-	}
-	if pr.HeadRefOid != reviewedSHA {
-		return result, fmt.Errorf("refusing auto-merge: reviewed head is %s but GitHub reports %s", reviewedSHA, pr.HeadRefOid)
+	if merged, err := validateHead(ctx, client, pr, repo, number, reviewedSHA); merged || err != nil {
+		if merged {
+			result.Status = Merged
+		}
+		return result, err
 	}
 
 	login, err := client.Login(ctx)
@@ -79,6 +79,16 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		}
 	}
 	if !approved {
+		current, err := client.PRDetails(ctx, repo, number)
+		if err != nil {
+			return result, err
+		}
+		if merged, err := validateHead(ctx, client, current, repo, number, reviewedSHA); merged || err != nil {
+			if merged {
+				result.Status = Merged
+			}
+			return result, err
+		}
 		result.ApprovalAttempted = true
 		if err := client.ApproveHead(ctx, repo, number, reviewedSHA, approvalBody); err != nil {
 			return result, fmt.Errorf("approving reviewed head: %w", err)
@@ -86,43 +96,59 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		result.ApprovalCreated = true
 	}
 
-	// Re-read head and auto-merge in one response after the approval. This
-	// closes the window where a push could otherwise make an auto-merge request
-	// for newer, unreviewed code look like ours.
+	// Re-read the head after approval, then use GitHub's head-bound merge API.
 	current, err := client.PRDetails(ctx, repo, number)
 	if err != nil {
 		return result, err
 	}
-	if current.State == gh.StateMerged {
-		result.Status = Merged
-		return result, nil
-	}
-	if current.State != gh.StateOpen {
-		return result, fmt.Errorf("pull request %s#%d is %s, not open", repo, number, strings.ToLower(current.State))
-	}
-	if current.HeadRefOid != reviewedSHA {
-		return result, fmt.Errorf("refusing auto-merge: reviewed head is %s but GitHub reports %s", reviewedSHA, current.HeadRefOid)
+	if merged, err := validateHead(ctx, client, current, repo, number, reviewedSHA); merged || err != nil {
+		if merged {
+			result.Status = Merged
+		}
+		return result, err
 	}
 	if current.AutoMergeRequest != nil {
-		result.Status = Requested
-		return result, nil
+		if err := client.DisableAutoMerge(ctx, repo, number); err != nil {
+			return result, fmt.Errorf("disabling the existing auto-merge request: %w", err)
+		}
+		current, err = client.PRDetails(ctx, repo, number)
+		if err != nil {
+			return result, err
+		}
+		if merged, err := validateHead(ctx, client, current, repo, number, reviewedSHA); merged || err != nil {
+			if merged {
+				result.Status = Merged
+			}
+			return result, err
+		}
 	}
-	if err := client.EnableAutoMerge(ctx, repo, number, reviewedSHA); err != nil {
+	if err := client.MergeHead(ctx, repo, number, reviewedSHA); err != nil {
 		if current, inspectErr := client.PRDetails(ctx, repo, number); inspectErr == nil {
 			if current.State == gh.StateMerged {
 				result.Status = Merged
 				return result, nil
 			}
-			if current.State == gh.StateOpen && current.HeadRefOid == reviewedSHA && current.AutoMergeRequest != nil {
-				result.Status = Requested
-				return result, nil
+		}
+		return result, fmt.Errorf("merging reviewed head: %w", err)
+	}
+	result.Status = Merged
+	return result, nil
+}
+
+func validateHead(ctx context.Context, client *gh.Client, current gh.Details, repo string, number int, reviewedSHA string) (bool, error) {
+	if current.State == gh.StateMerged {
+		return true, nil
+	}
+	if current.State != gh.StateOpen {
+		return false, fmt.Errorf("pull request %s#%d is %s, not open", repo, number, strings.ToLower(current.State))
+	}
+	if current.HeadRefOid != reviewedSHA {
+		if current.AutoMergeRequest != nil {
+			if err := client.DisableAutoMerge(ctx, repo, number); err != nil {
+				return false, fmt.Errorf("refusing auto-merge after head drift and disabling the existing request: %w", err)
 			}
 		}
-		return result, fmt.Errorf("enabling auto-merge: %w", err)
+		return false, fmt.Errorf("refusing auto-merge: reviewed head is %s but GitHub reports %s", reviewedSHA, current.HeadRefOid)
 	}
-	result.Status = Requested
-	if current, err := client.PRDetails(ctx, repo, number); err == nil && current.State == gh.StateMerged {
-		result.Status = Merged
-	}
-	return result, nil
+	return false, nil
 }

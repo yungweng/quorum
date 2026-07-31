@@ -145,7 +145,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	rep.status.Clear()
 	mergeStatus := ""
 	var mergeErr error
-	if err == nil && res != nil && a.cfg.AutoMergeBabysit && automerge.Eligible(res.LastFindings) {
+	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMergeBabysit, a.cfg.Post, res.LastFindings) {
 		mergeResult, finishErr := a.autoMerge(ctx, client, repo, res.PR.Number, res.LastFindings.HeadSHA)
 		mergeStatus, mergeErr = mergeResult.Status, finishErr
 		if mergeErr != nil {
@@ -471,8 +471,6 @@ func (l *loopTermReporter) summary(res *loop.Result, mergeStatus string, mergeEr
 		switch mergeStatus {
 		case automerge.Merged:
 			o.Row("auto-merge", o.Green("merged"))
-		case automerge.Requested:
-			o.Row("auto-merge", o.Green("requested"))
 		}
 		o.Rule()
 		l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))

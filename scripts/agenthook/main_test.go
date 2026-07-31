@@ -74,6 +74,76 @@ func TestAgentHookChecksOnlyRelevantSessionChanges(t *testing.T) {
 	}
 }
 
+func TestAgentHookChecksGoWorkspaceChanges(t *testing.T) {
+	repo := newGitRepository(t)
+	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@printf x >> .check-ran\n")
+	git(t, repo, "add", "Makefile")
+	git(t, repo, "commit", "-m", "initial")
+
+	runAgentHook(t, repo, "workspace-session", "start", false, 0)
+	writeTestFile(t, repo, "go.work", "go 1.26\n")
+	runAgentHook(t, repo, "workspace-session", "stop", false, 0)
+	assertFileContents(t, filepath.Join(repo, ".check-ran"), "x")
+
+	writeTestFile(t, repo, "go.work.sum", "example checksum\n")
+	runAgentHook(t, repo, "workspace-session", "stop", false, 0)
+	assertFileContents(t, filepath.Join(repo, ".check-ran"), "xx")
+}
+
+func TestHookCommandsExitOutsideRepository(t *testing.T) {
+	type commandHook struct {
+		Command string `json:"command"`
+	}
+	type matcher struct {
+		Hooks []commandHook `json:"hooks"`
+	}
+	var config struct {
+		Hooks map[string][]matcher `json:"hooks"`
+	}
+
+	for _, name := range []string{".claude/settings.json", ".codex/hooks.json"} {
+		contents, err := os.ReadFile(filepath.Join(projectRoot(t), filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(contents, &config); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		for event, matchers := range config.Hooks {
+			for _, matcher := range matchers {
+				for _, hook := range matcher.Hooks {
+					if event == "SessionEnd" && !strings.Contains(hook.Command, "/scripts/agenthook/end") {
+						t.Fatalf("%s SessionEnd uses a cold compiler path: %q", name, hook.Command)
+					}
+					cmd := exec.Command("/bin/sh", "-c", hook.Command)
+					cmd.Dir = t.TempDir()
+					cmd.Stdin = strings.NewReader(`{"session_id":"outside","cwd":"/"}`)
+					if output, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("%s %s failed outside a repository: %v\n%s", name, event, err, output)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestFastEndHookRemovesSessionState(t *testing.T) {
+	repo := newGitRepository(t)
+	runAgentHook(t, repo, "end-session", "start", false, 0)
+	input := `{"session_id":"end-session","cwd":"` + repo + `"}`
+	if output, err := runScript(t, repo, filepath.Join(projectRoot(t), "scripts", "agenthook", "end"), input, nil); err != nil {
+		t.Fatalf("end hook failed: %v\n%s", err, output)
+	}
+	stateDir := strings.TrimSpace(git(t, repo, "rev-parse", "--path-format=absolute", "--git-path", "quorum-hook-state"))
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("state directory still contains %d entries", len(entries))
+	}
+}
+
 func runAgentCommandHook(t *testing.T, repo, sessionID, event string, stopHookActive bool, wantCode int) (string, string) {
 	t.Helper()
 	input, err := json.Marshal(hookInput{
@@ -214,11 +284,16 @@ func newGitRepository(t *testing.T) string {
 
 func hookPath(t *testing.T, name string) string {
 	t.Helper()
+	return filepath.Join(projectRoot(t), ".githooks", name)
+}
+
+func projectRoot(t *testing.T) string {
+	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("could not locate hook test")
 	}
-	return filepath.Join(filepath.Dir(file), "..", "..", ".githooks", name)
+	return filepath.Join(filepath.Dir(file), "..", "..")
 }
 
 func runScript(t *testing.T, repo, path, stdin string, extraEnv []string) (string, error) {

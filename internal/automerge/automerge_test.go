@@ -41,23 +41,23 @@ func readArgs(t *testing.T, path string) string {
 	return string(b)
 }
 
-func TestRunApprovesExactHeadAndRequestsMerge(t *testing.T) {
+func TestRunApprovesAndMergesExactHead(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
   3) echo '[]' ;;
-  4) echo '{"state":"APPROVED"}' ;;
-  5) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
-  6) exit 0 ;;
-  7) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
+  7) echo '{"merged":true}' ;;
 esac`)
 
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.ApprovalCreated || result.Status != Requested {
+	if !result.ApprovalCreated || result.Status != Merged {
 		t.Fatalf("result = %+v", result)
 	}
 	args := readArgs(t, argsFile)
@@ -65,33 +65,37 @@ esac`)
 		"event=APPROVE",
 		"commit_id=abc123",
 		"body=" + approvalBody,
-		"pr merge 42 --repo acme/api --auto --merge --match-head-commit abc123",
+		"api --method PUT repos/acme/api/pulls/42/merge -f merge_method=merge -f sha=abc123",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("calls are missing %q:\n%s", want, args)
 		}
 	}
+	if strings.Contains(args, "--auto") {
+		t.Fatalf("merge created a persistent request:\n%s", args)
+	}
 }
 
-func TestRunReusesApprovalAndExistingAutoMerge(t *testing.T) {
+func TestRunReusesApprovalAndMerges(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
   3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
-  4) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
+  5) echo '{"merged":true}' ;;
 esac`)
 
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ApprovalCreated || result.Status != Requested {
+	if result.ApprovalCreated || result.Status != Merged {
 		t.Fatalf("result = %+v", result)
 	}
 	args := readArgs(t, argsFile)
-	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pr merge") {
-		t.Fatalf("an idempotent rerun repeated a side effect:\n%s", args)
+	if strings.Contains(args, "event=APPROVE") {
+		t.Fatalf("an idempotent rerun repeated the approval:\n%s", args)
 	}
 }
 
@@ -101,8 +105,10 @@ case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
   3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}},{"state":"CHANGES_REQUESTED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
-  4) echo '{"state":"APPROVED"}' ;;
-  5) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
+  7) echo '{"merged":true}' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err != nil {
@@ -113,6 +119,26 @@ esac`)
 	}
 	if args := readArgs(t, argsFile); !strings.Contains(args, "event=APPROVE") {
 		t.Fatalf("approval was not renewed:\n%s", args)
+	}
+}
+
+func TestRunRejectsHeadDriftImmediatelyBeforeApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"new-head","state":"OPEN","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.ApprovalAttempted {
+		t.Fatalf("moved head reached approval: %+v", result)
+	}
+	if args := readArgs(t, argsFile); strings.Contains(args, "event=APPROVE") {
+		t.Fatalf("moved head reached approval:\n%s", args)
 	}
 }
 
@@ -127,14 +153,30 @@ func TestRunRejectsHeadDriftBeforeApproval(t *testing.T) {
 	}
 }
 
+func TestRunCancelsExistingAutoMergeOnHeadDrift(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"new-head","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  2) exit 0 ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "reviewed-head")
+	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
+		t.Fatalf("err = %v", err)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "--disable-auto") {
+		t.Fatalf("head drift left auto-merge enabled:\n%s", args)
+	}
+}
+
 func TestRunRejectsHeadDriftAfterApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
   3) echo '[]' ;;
-  4) echo '{"state":"APPROVED"}' ;;
-  5) echo '{"headRefOid":"new-head","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"new-head","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
@@ -143,7 +185,7 @@ esac`)
 	if !result.ApprovalCreated {
 		t.Fatalf("partial result lost the approval: %+v", result)
 	}
-	if args := readArgs(t, argsFile); strings.Contains(args, "pr merge") {
+	if args := readArgs(t, argsFile); strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("a moved head reached merge:\n%s", args)
 	}
 }
@@ -159,7 +201,7 @@ esac`)
 		t.Fatalf("err = %v", err)
 	}
 	args := readArgs(t, argsFile)
-	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pr merge") {
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("own PR reached a side effect:\n%s", args)
 	}
 }
@@ -170,12 +212,13 @@ case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
   3) echo '[]' ;;
-  4) echo '{"state":"APPROVED"}' ;;
-  5) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
-  6) echo 'auto-merge is disabled' >&2; exit 1 ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
+  7) echo 'branch protection rejected the merge' >&2; exit 1 ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
-	if err == nil || !strings.Contains(err.Error(), "enabling auto-merge") {
+	if err == nil || !strings.Contains(err.Error(), "merging reviewed head") {
 		t.Fatalf("err = %v", err)
 	}
 	if !result.ApprovalCreated {
@@ -183,7 +226,7 @@ esac`)
 	}
 }
 
-func TestRunAcceptsMergeRequestAfterAmbiguousCommandFailure(t *testing.T) {
+func TestRunAcceptsMergeAfterAmbiguousCommandFailure(t *testing.T) {
 	client, _ := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
@@ -193,14 +236,38 @@ case "$n" in
   5) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
   6) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
   7) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
-  8) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  8) echo '{"headRefOid":"abc123","state":"MERGED","author":{"login":"example-user"}}' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != Requested {
+	if result.Status != Merged {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRunDisablesExistingAutoMergeBeforeMerging(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
+  5) exit 0 ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
+  7) echo '{"merged":true}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Merged {
+		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if !strings.Contains(args, "pr merge 42 --repo acme/api --disable-auto") {
+		t.Fatalf("existing auto-merge was not disabled:\n%s", args)
 	}
 }
 
@@ -217,5 +284,18 @@ func TestEligibleAllowsSuggestionsAndQuestionsOnly(t *testing.T) {
 		if Eligible(findings) {
 			t.Errorf("ineligible findings were accepted: %+v", findings)
 		}
+	}
+}
+
+func TestAllowedRequiresPostingAndSourceOption(t *testing.T) {
+	findings := review.Findings{PR: 42, Posted: true}
+	if !Allowed(true, true, findings) {
+		t.Fatal("posted clean review was rejected")
+	}
+	if Allowed(true, false, findings) {
+		t.Fatal("POST=0 allowed auto-merge")
+	}
+	if Allowed(false, true, findings) {
+		t.Fatal("disabled source allowed auto-merge")
 	}
 }

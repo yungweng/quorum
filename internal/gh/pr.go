@@ -174,12 +174,19 @@ func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, 
 	return err
 }
 
-// EnableAutoMerge asks GitHub to merge with a merge commit once every branch
-// rule passes. match-head-commit is the final guard against acting on code the
-// review did not inspect.
-func (c *Client) EnableAutoMerge(ctx context.Context, repo string, number int, sha string) error {
-	_, err := c.run(ctx, "pr", "merge", fmt.Sprint(number), "--repo", repo,
-		"--auto", "--merge", "--match-head-commit", sha)
+// MergeHead asks GitHub to merge one exact head. Unlike a persistent
+// auto-merge request, the REST operation cannot survive a later push.
+func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha string) error {
+	_, err := c.run(ctx, "api", "--method", "PUT",
+		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
+		"-f", "merge_method=merge", "-f", "sha="+sha)
+	return err
+}
+
+// DisableAutoMerge removes a request created by an older quorum version
+// before the head-bound merge is attempted.
+func (c *Client) DisableAutoMerge(ctx context.Context, repo string, number int) error {
+	_, err := c.run(ctx, "pr", "merge", fmt.Sprint(number), "--repo", repo, "--disable-auto")
 	return err
 }
 

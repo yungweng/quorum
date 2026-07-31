@@ -20,6 +20,8 @@ var relevantPathspecs = []string{
 	":(glob)**/*.go",
 	"go.mod",
 	"go.sum",
+	"go.work",
+	"go.work.sum",
 	"Makefile",
 	".golangci.yml",
 	".github/workflows/ci.yml",
