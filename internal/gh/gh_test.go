@@ -118,6 +118,17 @@ func TestRunDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 }
 
+func TestApproveDoesNotRetryAmbiguousPost(t *testing.T) {
+	bin, countFile := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
+	err := testClient(bin).ApproveHead(context.Background(), "acme/api", 42, "abc123", "approved")
+	if err == nil {
+		t.Fatal("a timed-out approval was reported as success")
+	}
+	if got := calls(t, countFile); got != 1 {
+		t.Fatalf("approval POST ran %d times, want one", got)
+	}
+}
+
 // An empty body is not an empty result: gh prints [] when a search found
 // nothing, so silence means the call did not really work.
 func TestSearchEmptyOutputIsTransient(t *testing.T) {
@@ -238,6 +249,19 @@ func TestLatestReviewRequestReportsFailure(t *testing.T) {
 	}
 }
 
+func TestReviewsReadsConcatenatedPages(t *testing.T) {
+	bin, _ := fakeGH(t, `printf '%s\n%s\n' \
+  '[{"state":"APPROVED","commit_id":"head-1","user":{"login":"example-user"}}]' \
+  '[{"state":"DISMISSED","commit_id":"head-2","user":{"login":"other-user"}}]'`)
+	reviews, err := testClient(bin).Reviews(context.Background(), "acme/api", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviews) != 2 || reviews[0].CommitID != "head-1" || reviews[1].State != "DISMISSED" {
+		t.Fatalf("reviews = %+v", reviews)
+	}
+}
+
 func TestTeamSlugsFor(t *testing.T) {
 	teams := []string{"crumbtray/bread-council", "Crumb-GmbH/dev-admins"}
 	got := TeamSlugsFor("crumbtray", teams)
@@ -263,7 +287,7 @@ func TestPRStatesReadsABatch(t *testing.T) {
 cat <<'JSON'
 {"data":{
   "p0":{"pullRequest":{"state":"MERGED"}},
-  "p1":{"pullRequest":{"state":"OPEN"}},
+  "p1":{"pullRequest":{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-07-31T08:00:00Z"},"mergeQueueEntry":null}},
   "p2":{"pullRequest":{"state":"CLOSED"}}
 }}
 JSON`)
@@ -274,7 +298,7 @@ JSON`)
 	}
 	want := map[string]string{
 		"crumbtray/toaster-api#2035": StateMerged,
-		"crumbtray/bagel-bot#392":    StateOpen,
+		"crumbtray/bagel-bot#392":    StateAutoMerge,
 		"acme/api#7":                 StateClosed,
 	}
 	for k, v := range want {
@@ -286,6 +310,17 @@ JSON`)
 	// requests are on screen.
 	if n := calls(t, countFile); n != 1 {
 		t.Errorf("made %d calls for %d pull requests, want 1", n, len(keys))
+	}
+}
+
+func TestPRStatesRecognisesMergeQueueEntry(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"data":{"p0":{"pullRequest":{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"position":2}}}}}'`)
+	got, err := testClient(bin).PRStates(context.Background(), []string{"acme/api#42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["acme/api#42"] != StateAutoMerge {
+		t.Errorf("state = %q, want %q", got["acme/api#42"], StateAutoMerge)
 	}
 }
 

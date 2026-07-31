@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
@@ -124,10 +125,11 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 	rep.status = a.out.Status()
 
+	client := a.newGH(t.GH)
 	pipe := &loop.Pipeline{
-		GH:     a.newGH(t.GH),
+		GH:     client,
 		Git:    a.newGit(t.Git),
-		Review: &review.Runner{GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: review.NopReporter{}},
+		Review: &review.Runner{GH: client, Git: a.newGit(t.Git), Rep: review.NopReporter{}},
 		Rep:    rep,
 	}
 	// Interactive gates need a real terminal. Handing them a closed or piped
@@ -141,10 +143,19 @@ func (a *app) cmdBabysit(argv []string) int {
 	started := time.Now()
 	res, err := pipe.Run(ctx, o)
 	rep.status.Clear()
+	mergeStatus := ""
+	var mergeErr error
+	if err == nil && res != nil && a.cfg.AutoMergeBabysit && automerge.Eligible(res.LastFindings) {
+		mergeResult, finishErr := a.autoMerge(ctx, client, repo, res.PR.Number, res.LastFindings.HeadSHA)
+		mergeStatus, mergeErr = mergeResult.Status, finishErr
+		if mergeErr != nil {
+			err = mergeErr
+		}
+	}
 
 	a.logRun(babysitHistory(repo, number, started, res, err))
 	if res != nil {
-		rep.summary(res)
+		rep.summary(res, mergeStatus, mergeErr)
 	}
 	if err != nil {
 		return a.babysitExit(err)
@@ -185,7 +196,7 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 			run.Suggestions = res.LastFindings.Suggestions
 			run.Questions = res.LastFindings.Questions
 		}
-		if res.Converged {
+		if res.Converged && err == nil {
 			run.Outcome = history.Converged
 			run.Reason = ""
 		}
@@ -402,7 +413,7 @@ func (l *loopTermReporter) Notify(title, body string) {
 }
 
 // summary prints the closing block of a run.
-func (l *loopTermReporter) summary(res *loop.Result) {
+func (l *loopTermReporter) summary(res *loop.Result, mergeStatus string, mergeErr error) {
 	o := l.out
 	fmt.Println()
 	o.Rule()
@@ -424,6 +435,10 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 		}
 	}
 	switch {
+	case mergeErr != nil:
+		o.Row("result", o.Red(mergeErr.Error()))
+		o.Rule()
+		l.Notify("Auto-merge failed", fmt.Sprintf("%s ist sauber, konnte aber nicht gemerged werden", babysitTargetLabel(res)))
 	case res.Converged && res.DisputeAccepted:
 		result := "remaining findings disputed by Codex and accepted"
 		if !res.BranchOnly {
@@ -453,6 +468,12 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 			result += ", CI green"
 		}
 		o.Row("result", o.Green(result))
+		switch mergeStatus {
+		case automerge.Merged:
+			o.Row("auto-merge", o.Green("merged"))
+		case automerge.Requested:
+			o.Row("auto-merge", o.Green("requested"))
+		}
 		o.Rule()
 		l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
 	default:

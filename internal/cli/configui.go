@@ -252,6 +252,18 @@ func (a *app) settings() []setting {
 			}, nil)
 		}},
 
+		autoMergeSetting("agent auto-merge", "Auto-merge after an agent run?",
+			func(c config.Config) bool { return c.AutoMergeAgent },
+			func(c *config.Config, v bool) { c.AutoMergeAgent = v }),
+
+		autoMergeSetting("review auto-merge", "Auto-merge after a manual quorum review?",
+			func(c config.Config) bool { return c.AutoMergeReview },
+			func(c *config.Config, v bool) { c.AutoMergeReview = v }),
+
+		autoMergeSetting("babysit auto-merge", "Auto-merge after a manual quorum babysit?",
+			func(c config.Config) bool { return c.AutoMergeBabysit },
+			func(c *config.Config, v bool) { c.AutoMergeBabysit = v }),
+
 		{"fix sessions", func(c config.Config) string {
 			model := c.FixModel
 			if model == "" {
@@ -275,6 +287,22 @@ func (a *app) settings() []setting {
 			return nil
 		}},
 	}
+}
+
+func autoMergeSetting(name, title string, enabled func(config.Config) bool, set func(*config.Config, bool)) setting {
+	return setting{name, func(c config.Config) string {
+		if enabled(c) {
+			return "approve clean PRs and ask GitHub to merge them"
+		}
+		return "off"
+	}, func(a *app, in *bufio.Reader, c *config.Config) error {
+		return a.pick(in, title, c, []option{
+			{"off", "leave the pull request open", func(c *config.Config) { set(c, false) },
+				func(c config.Config) bool { return !enabled(c) }},
+			{"on", "approve the reviewed head and use GitHub auto-merge", func(c *config.Config) { set(c, true) },
+				func(c config.Config) bool { return enabled(c) }},
+		}, nil)
+	}}
 }
 
 // cmdConfig shows every setting with its current value and lets one be changed

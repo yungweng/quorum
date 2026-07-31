@@ -69,6 +69,13 @@ type Config struct {
 	// Only possible now that both live in one binary.
 	AgentAction string
 
+	// Auto-merge is opt-in per source. An agent run uses AutoMergeAgent even
+	// when AgentAction is "babysit"; the other two fields only affect commands
+	// started explicitly in a terminal.
+	AutoMergeAgent   bool
+	AutoMergeReview  bool
+	AutoMergeBabysit bool
+
 	Notify bool
 
 	// ReviewArgs is the retired pass-through string. It is still read so an
@@ -309,6 +316,12 @@ func (c *Config) set(key, value string) {
 		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
 			c.AgentAction = v
 		}
+	case "AUTO_MERGE_AGENT":
+		c.AutoMergeAgent = truthy(value)
+	case "AUTO_MERGE_REVIEW":
+		c.AutoMergeReview = truthy(value)
+	case "AUTO_MERGE_BABYSIT":
+		c.AutoMergeBabysit = truthy(value)
 	case "REVIEW_ARGS":
 		// Retired: it was passed verbatim to a separate binary that no longer
 		// exists. The only flag anyone used through it was --dry-run, so that
@@ -439,6 +452,12 @@ func (c Config) Render() string {
 	w("# What the agent does with a pull request that asks for your review:\n")
 	w("# \"review\" posts a review and stops, \"babysit\" runs the full fix loop.\n")
 	w("AGENT_ACTION=%q\n\n", c.AgentAction)
+
+	w("# Approve a clean reviewed head and ask GitHub to merge it with a merge\n")
+	w("# commit once its branch rules pass. Each source is opt-in.\n")
+	w("AUTO_MERGE_AGENT=%s\n", bit(c.AutoMergeAgent))
+	w("AUTO_MERGE_REVIEW=%s\n", bit(c.AutoMergeReview))
+	w("AUTO_MERGE_BABYSIT=%s\n\n", bit(c.AutoMergeBabysit))
 
 	w("NOTIFY=%s\n", bit(c.Notify))
 

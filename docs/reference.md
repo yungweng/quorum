@@ -199,6 +199,9 @@ FIX_TIMEOUT="2h"         # per fix step; keep it above your CI runtime
 SANDBOXED=0
 
 AGENT_ACTION="review"    # or "babysit"
+AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects
+AUTO_MERGE_REVIEW=0      # manual quorum review runs
+AUTO_MERGE_BABYSIT=0     # manual quorum babysit runs
 NOTIFY=1
 ```
 
@@ -207,6 +210,29 @@ Zero disables the timeout it belongs to.
 
 `REVIEW_ARGS` and `MAX_CODEX` are retired. A `REVIEW_ARGS` that contains
 `--dry-run` still turns posting off; nothing else in it is read.
+
+### Auto-merge
+
+The three `AUTO_MERGE_*` settings are independent and default to `0`. The agent
+uses only `AUTO_MERGE_AGENT`, even when `AGENT_ACTION="babysit"`; terminal
+commands use the setting named after their command.
+
+After a posted review with zero Blockers and zero Critical findings, quorum:
+
+1. confirms that GitHub still reports the exact reviewed head;
+2. submits an approval tied to that commit, unless the same user already
+   approved it; and
+3. runs `gh pr merge --auto --merge --match-head-commit SHA`.
+
+Suggestions and Questions do not block. GitHub branch rules, required checks
+and merge queues still apply; quorum never passes `--admin`. It does not merge
+an own PR, a moved head, a branch-only run, `POST=0`, `--dry-run`, or an accepted
+dispute whose last review still contains Blockers or Critical findings.
+
+If GitHub accepts the request but requirements are pending, the dashboard marks
+the PR `auto-merge queued`. An Auto-Merge failure returns exit code 1. Agent
+runs record the review request as handled, so a failure after a successful
+review does not spend tokens repeating that review.
 
 ### Keeping the machine usable
 
@@ -229,24 +255,25 @@ shared dependency cache removed.
 `status` draws it once, `watch` redraws it every three seconds. Three sections,
 in the order the questions get asked:
 
-- **OPEN** is what is waiting for a person: pull requests with a finished
-  review that are still open, newest first, at most ten of them, with what the
-  review found and a link to the comment. A pull request drops out when GitHub
-  reports it merged or closed, while it is being reviewed again, and two weeks
-  after its last review. The two weeks matter because the state file keeps two
-  hundred records and most of them describe pull requests that were merged long
-  ago; where GitHub has not been asked, age is the only thing the dashboard
-  knows.
+- **OPEN** lists pull requests with a finished review that are still open,
+  newest first, at most ten of them, with what the review found and a link to
+  the comment. `auto-merge queued` means GitHub is waiting on branch rules or a
+  merge queue; the other entries still need a person. A pull request drops out
+  when GitHub reports it merged or closed, while it is being reviewed again,
+  and two weeks after its last review. The two weeks matter because the state
+  file keeps two hundred records and most of them describe pull requests that
+  were merged long ago; where GitHub has not been asked, age is the only thing
+  the dashboard knows.
 - **ACTIVE** is everything in flight, agent and terminal alike. Its count covers
   agent slots only.
 - **HISTORY** is one line per finished run, described below.
 
-Whether a pull request has been merged or closed is the one thing on this
-screen that has to come from GitHub. `watch` asks in the background, once for
-every visible pull request at a time, and keeps the previous answer when the
-call fails. `status` asks once before it draws, with a single attempt and a
-five second deadline, and falls back to listing everything recent when there is
-no answer: this is the only network call either command makes.
+Whether a pull request is open, queued for Auto-Merge, merged or closed has to
+come from GitHub. `watch` asks in the background, once for every visible pull
+request at a time, and keeps the previous answer when the call fails. `status`
+asks once before it draws, with a single attempt and a five second deadline,
+and falls back to listing everything recent when there is no answer: this is
+the only network call either command makes.
 
 ## The history log
 

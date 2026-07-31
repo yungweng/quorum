@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
@@ -119,8 +120,9 @@ func (a *app) cmdReview(argv []string) int {
 	live := review.TrackLive(rep, a.p.ManualDir)
 	defer live.Close()
 
+	client := a.newGH(t.GH)
 	runner := &review.Runner{
-		GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: live,
+		GH: client, Git: a.newGit(t.Git), Rep: live,
 	}
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 
@@ -135,6 +137,19 @@ func (a *app) cmdReview(argv []string) int {
 		return a.reviewExit(err)
 	}
 	number = res.Findings.PR
+	mergeStatus := ""
+	if a.cfg.AutoMergeReview && automerge.Eligible(res.Findings) {
+		mergeResult, mergeErr := a.autoMerge(ctx, client, repo, number, res.Findings.HeadSHA)
+		if mergeErr != nil {
+			a.logRun(rep.historyRun(repo, started, history.Failed, mergeErr.Error(), res))
+			if notify {
+				a.out.Notify("quorum: auto-merge failed", fmt.Sprintf("PR #%d: %s", number, mergeErr))
+			}
+			return a.reviewExit(mergeErr)
+		}
+		mergeStatus = mergeResult.Status
+		a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus))
+	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
 	if notify {
 		rep.mu.Lock()
@@ -150,6 +165,12 @@ func (a *app) cmdReview(argv []string) int {
 			body += " Comment posted."
 		} else {
 			body += " Report written to disk."
+		}
+		switch mergeStatus {
+		case automerge.Merged:
+			body += " Merged."
+		case automerge.Requested:
+			body += " Auto-merge requested."
 		}
 		a.out.Notify("quorum: review complete", body)
 	}

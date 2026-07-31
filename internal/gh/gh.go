@@ -226,7 +226,10 @@ type Details struct {
 	IsCrossRepository bool   `json:"isCrossRepository"`
 	State             string `json:"state"`
 	Title             string `json:"title"`
-	Author            struct {
+	AutoMergeRequest  *struct {
+		EnabledAt string `json:"enabledAt"`
+	} `json:"autoMergeRequest"`
+	Author struct {
 		Login string `json:"login"`
 		IsBot bool   `json:"is_bot"`
 	} `json:"author"`
@@ -236,7 +239,7 @@ type Details struct {
 func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Details, error) {
 	var d Details
 	out, err := c.run(ctx, "pr", "view", fmt.Sprint(number), "--repo", repo,
-		"--json", "headRefOid,isDraft,isCrossRepository,author,state,title")
+		"--json", "headRefOid,isDraft,isCrossRepository,author,state,title,autoMergeRequest")
 	if err != nil {
 		return d, err
 	}
@@ -251,9 +254,10 @@ func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Detail
 
 // The states a pull request can be in, as GitHub spells them.
 const (
-	StateOpen   = "OPEN"
-	StateClosed = "CLOSED"
-	StateMerged = "MERGED"
+	StateOpen      = "OPEN"
+	StateAutoMerge = "AUTO_MERGE"
+	StateClosed    = "CLOSED"
+	StateMerged    = "MERGED"
 )
 
 // safeRepo matches the owner/name shapes GitHub actually allows. Repository
@@ -291,7 +295,7 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		owner, name, _ := strings.Cut(repo, "/")
 		alias := fmt.Sprintf("p%d", len(targets))
 		targets = append(targets, target{alias, key, owner, name, number})
-		fmt.Fprintf(&q, " %s: repository(owner: %q, name: %q) { pullRequest(number: %d) { state } }",
+		fmt.Fprintf(&q, " %s: repository(owner: %q, name: %q) { pullRequest(number: %d) { state autoMergeRequest { enabledAt } mergeQueueEntry { position } } }",
 			alias, owner, name, number)
 	}
 	q.WriteString(" }")
@@ -306,7 +310,9 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 	var resp struct {
 		Data map[string]*struct {
 			PullRequest *struct {
-				State string `json:"state"`
+				State            string          `json:"state"`
+				AutoMergeRequest json.RawMessage `json:"autoMergeRequest"`
+				MergeQueueEntry  json.RawMessage `json:"mergeQueueEntry"`
 			} `json:"pullRequest"`
 		} `json:"data"`
 	}
@@ -318,10 +324,18 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		// A repository that has gone away answers null, which is not an error
 		// worth failing the whole batch over: the other pull requests are fine.
 		if node := resp.Data[t.alias]; node != nil && node.PullRequest != nil {
-			states[t.key] = node.PullRequest.State
+			state := node.PullRequest.State
+			if state == StateOpen && (present(node.PullRequest.AutoMergeRequest) || present(node.PullRequest.MergeQueueEntry)) {
+				state = StateAutoMerge
+			}
+			states[t.key] = state
 		}
 	}
 	return states, nil
+}
+
+func present(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 // timelineEvent is the subset of the timeline API this needs.

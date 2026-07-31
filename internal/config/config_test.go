@@ -155,6 +155,9 @@ func TestRoundTrip(t *testing.T) {
 	want.FixTimeout = 90 * time.Minute
 	want.Sandboxed = true
 	want.AgentAction = ActionBabysit
+	want.AutoMergeAgent = true
+	want.AutoMergeReview = true
+	want.AutoMergeBabysit = true
 	want.Unknown = map[string]string{"FUTURE_KEY": "keep me"}
 
 	path := filepath.Join(t.TempDir(), "config")

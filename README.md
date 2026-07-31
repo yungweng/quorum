@@ -119,6 +119,26 @@ Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.
 All fix rounds share one Codex session, so context carries across rounds.
 
+## Auto-merge
+
+Auto-merge is off by default and enabled separately for each source:
+
+```text
+AUTO_MERGE_AGENT=0
+AUTO_MERGE_REVIEW=0
+AUTO_MERGE_BABYSIT=0
+```
+
+A clean posted PR review has no Blockers or Critical findings; Suggestions and
+Questions are allowed. Quorum approves the exact reviewed commit, then asks
+GitHub to merge it with a merge commit after the repository's branch rules
+pass. It never uses administrator privileges. A moved head, an own PR, a local
+report (`POST=0` or `--dry-run`) and a branch without a PR are not merged.
+
+The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
+The other two settings apply only to the matching command started in a
+terminal. Change them with `quorum config` or in the config file.
+
 **The fix sessions run with the Codex sandbox bypassed**, which gives them full
 file and network access on your machine. `--sandboxed` opts out. Read
 [what that means](docs/reference.md#it-runs-unattended) before the first run.
@@ -181,18 +201,18 @@ HISTORY
   ✓ 18:42  toaster-api #2002          0B 1C 0S  comment ↗
   ✗ 29 Jul toaster-api #1993          failed, reviewer-2 timed out after 45m
 
-every repo that asks you · 2 at a time, 6 reviewers each · 5.0 GB cache
+every repo that asks you · 2 at a time, 6 reviewers each · auto-merge off · 5.0 GB cache
 ```
 
 The status bar under the version answers "what is this machine doing" before
 anything else has to be read.
 
-OPEN is what is waiting for a person: pull requests quorum has reviewed that
-are still open, newest first, with what the review found. The bullet is red for
-blockers, yellow for critical findings and green for neither, so the one that
-needs you is the one the eye lands on. A pull request leaves the section when
-it is merged or closed, when it is being reviewed again (ACTIVE has it then),
-and two weeks after its last review.
+OPEN lists pull requests quorum has reviewed that are still open, newest first,
+with what the review found. The bullet is red for blockers, yellow for critical
+findings and green for neither. A PR waiting on GitHub's Auto-Merge or merge
+queue says `auto-merge queued`; the others still need a person. A pull request
+leaves the section when it is merged or closed, when it is being reviewed again
+(ACTIVE has it then), and two weeks after its last review.
 
 ACTIVE is everything in flight: reviews the agent started, reviews you started
 in a terminal, fix loops, and what is waiting for a slot. The symbol and the

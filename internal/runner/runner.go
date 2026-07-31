@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
@@ -91,6 +92,23 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	}
 
 	if runErr == nil {
+		mergeStatus := ""
+		if r.Cfg.AutoMergeAgent && automerge.Eligible(findings) {
+			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA)
+			mergeStatus = mergeResult.Status
+			if mergeErr != nil {
+				reason := fmt.Sprintf("auto-merge failed: %v", mergeErr)
+				if mergeResult.ApprovalCreated {
+					reason = fmt.Sprintf("auto-merge failed after the approval was posted: %v", mergeErr)
+				} else if mergeResult.ApprovalAttempted {
+					reason = fmt.Sprintf("auto-merge failed and GitHub's approval result is unknown: %v", mergeErr)
+				}
+				r.Log.Printf("%s: FAILED, %s", key, reason)
+				r.recordAutoMergeFailure(key, reqAt, runDir, findings, reason)
+				r.notify(fmt.Sprintf("Auto-merge failed: %s#%d", nameOf(repo), number), reason, urlOf(findings))
+				return fmt.Errorf("%s: %s", key, reason)
+			}
+		}
 		r.Log.Printf("%s: done, %s -> %s", key, findings.Summary(), orDash(urlOf(findings)))
 		r.mutate(key, func(rec *state.Record) {
 			rec.Mark(state.OK, "")
@@ -105,8 +123,14 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			// Recording the request timestamp is what marks it as handled.
 			rec.ReqAt = reqAt
 		})
-		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number),
-			summaryLine(findings), urlOf(findings))
+		note := summaryLine(findings)
+		switch mergeStatus {
+		case automerge.Merged:
+			note += "; merged"
+		case automerge.Requested:
+			note += "; auto-merge requested"
+		}
+		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
 		return nil
 	}
 
@@ -117,6 +141,24 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	r.recordFailureWith(key, sha, runDir, reason, runLog)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
+}
+
+// recordAutoMergeFailure preserves the successful review but marks its failed
+// final action. ReqAt is recorded so the next poll does not spend tokens
+// repeating a review whose exact head was already inspected.
+func (r *Runner) recordAutoMergeFailure(key, reqAt, runDir string, findings review.Findings, reason string) {
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.Failed, reason)
+		rec.SHA = findings.HeadSHA
+		rec.RunDir = runDir
+		rec.CommentURL = urlOf(findings)
+		rec.Blockers = state.Num(findings.Blockers)
+		rec.Critical = state.Num(findings.Critical)
+		rec.Suggestions = state.Num(findings.Suggestions)
+		rec.Questions = state.Num(findings.Questions)
+		rec.ReqAt = reqAt
+		rec.Fails++
+	})
 }
 
 // reviewOnce posts one review and stops.

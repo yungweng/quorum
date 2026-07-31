@@ -866,6 +866,7 @@ func (a *app) footer(w *ui.Writer) {
 	parts := []string{
 		scope,
 		fmt.Sprintf("%d at a time, %d reviewers each", a.cfg.MaxConcurrent, a.cfg.Reviewers),
+		autoMergeSummary(a.cfg),
 	}
 	if a.cfg.LoadLimit > 0 {
 		parts = append(parts, fmt.Sprintf("held back above load %.0f", a.cfg.LoadLimit))
@@ -875,6 +876,23 @@ func (a *app) footer(w *ui.Writer) {
 	}
 	fmt.Fprintln(w.Out)
 	w.Printf("%s\n", w.Dim(ui.Truncate(strings.Join(parts, " · "), w.Cols())))
+}
+
+func autoMergeSummary(cfg config.Config) string {
+	var sources []string
+	if cfg.AutoMergeAgent {
+		sources = append(sources, "agent")
+	}
+	if cfg.AutoMergeReview {
+		sources = append(sources, "review")
+	}
+	if cfg.AutoMergeBabysit {
+		sources = append(sources, "babysit")
+	}
+	if len(sources) == 0 {
+		return "auto-merge off"
+	}
+	return "auto-merge " + strings.Join(sources, "+") + " (merge commit)"
 }
 
 func runLabelText(run history.Run) string {
@@ -993,6 +1011,8 @@ func endWord(end string) string {
 	case gh.StateClosed:
 		// Closed without merging is not a success, so it is never struck out.
 		return "closed unmerged"
+	case gh.StateAutoMerge:
+		return "auto-merge queued"
 	}
 	return ""
 }

@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/state"
 )
 
 // The scanner must find the run directory in a stream that arrives in
@@ -130,6 +132,30 @@ func TestSummaryLine(t *testing.T) {
 	// A run that only raised questions still has something to report.
 	if got := summaryLine(review.Findings{Questions: 2}); got == "nothing found" {
 		t.Error("questions were reported as nothing found")
+	}
+}
+
+func TestAutoMergeFailureMarksRequestHandled(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{P: paths.P{
+		StateFile:   filepath.Join(dir, "state.json"),
+		HistoryFile: filepath.Join(dir, "history.jsonl"),
+	}}
+	url := "https://example.invalid/comment/42"
+	r.recordAutoMergeFailure("acme/api#42", "2026-07-31T09:00:00Z", "/run/42", review.Findings{
+		PR: 42, HeadSHA: "abc123", Posted: true, CommentURL: &url, Suggestions: 2, Questions: 1,
+	}, "auto-merge failed after the approval was posted")
+
+	file, err := state.Read(r.P.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := file.PRs["acme/api#42"]
+	if rec.Status != state.Failed || rec.ReqAt != "2026-07-31T09:00:00Z" || rec.SHA != "abc123" {
+		t.Fatalf("record = %+v", rec)
+	}
+	if rec.CommentURL != url || rec.Suggestions != 2 || rec.Questions != 1 || rec.Fails != 1 {
+		t.Fatalf("review result was not preserved: %+v", rec)
 	}
 }
 

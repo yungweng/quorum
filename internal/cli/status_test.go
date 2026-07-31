@@ -390,6 +390,21 @@ func TestDashboardDoesNotMeasureCache(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsAutoMergeConfiguration(t *testing.T) {
+	a := testApp(t)
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(ui.StripANSI(screen), "auto-merge off") {
+		t.Fatalf("dashboard did not show the safe default:\n%s", screen)
+	}
+
+	a.cfg.AutoMergeAgent = true
+	a.cfg.AutoMergeBabysit = true
+	screen, _ = render(t, a, nil)
+	if !strings.Contains(ui.StripANSI(screen), "auto-merge agent+babysit (merge commit)") {
+		t.Fatalf("dashboard did not name the enabled sources:\n%s", screen)
+	}
+}
+
 // A fix loop started from a terminal never touches the state file and never
 // takes a review slot. The run cache is the only place it exists, so a
 // dashboard that only reads the state file shows nothing while one runs for
@@ -571,7 +586,7 @@ func TestDashboardCrossesOutMergedPullRequests(t *testing.T) {
 
 	screen, _ := render(t, a, map[string]string{
 		"acme/api#1": gh.StateMerged,
-		"acme/api#2": gh.StateOpen,
+		"acme/api#2": gh.StateAutoMerge,
 		"acme/api#3": gh.StateClosed,
 	})
 
@@ -589,6 +604,9 @@ func TestDashboardCrossesOutMergedPullRequests(t *testing.T) {
 	}
 	if strings.Contains(open, "merged") {
 		t.Errorf("an open pull request was labelled merged: %q", open)
+	}
+	if !strings.Contains(open, "auto-merge queued") {
+		t.Errorf("an auto-merge request was not marked: %q", open)
 	}
 
 	// Closed without merging is not a success and must not read like one.

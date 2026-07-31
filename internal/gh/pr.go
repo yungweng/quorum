@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -125,6 +126,61 @@ func (c *Client) CommentBody(ctx context.Context, dir string, number int, body s
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// PRReview is the part of a submitted GitHub review needed to make approval
+// idempotent. GitHub changes State to DISMISSED when an approval no longer
+// counts, so only APPROVED reviews are reusable.
+type PRReview struct {
+	State    string `json:"state"`
+	CommitID string `json:"commit_id"`
+	User     struct {
+		Login string `json:"login"`
+	} `json:"user"`
+}
+
+// Reviews lists every submitted review. The endpoint is paginated because a
+// long-running pull request may have more reviews than one page.
+func (c *Client) Reviews(ctx context.Context, repo string, number int) ([]PRReview, error) {
+	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number), "--paginate")
+	if err != nil {
+		return nil, err
+	}
+	var reviews []PRReview
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var page []PRReview
+		if err := dec.Decode(&page); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("gh api pull request reviews: %w", err)
+		}
+		reviews = append(reviews, page...)
+	}
+	return reviews, nil
+}
+
+// ApproveHead approves one exact commit rather than whichever head happens to
+// be current when GitHub receives the request.
+func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, body string) error {
+	// A timed-out POST may have reached GitHub. Do not retry it blindly and
+	// create duplicate reviews; a later AutoMerge run lists reviews first and
+	// can tell whether this one landed.
+	once := *c
+	once.Attempts = 1
+	_, err := once.run(ctx, "api", "--method", "POST",
+		fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number),
+		"-f", "event=APPROVE", "-f", "commit_id="+sha, "-f", "body="+body)
+	return err
+}
+
+// EnableAutoMerge asks GitHub to merge with a merge commit once every branch
+// rule passes. match-head-commit is the final guard against acting on code the
+// review did not inspect.
+func (c *Client) EnableAutoMerge(ctx context.Context, repo string, number int, sha string) error {
+	_, err := c.run(ctx, "pr", "merge", fmt.Sprint(number), "--repo", repo,
+		"--auto", "--merge", "--match-head-commit", sha)
+	return err
 }
 
 // CheckState is the outcome of one CI observation.
