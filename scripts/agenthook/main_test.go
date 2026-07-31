@@ -90,6 +90,19 @@ func TestAgentHookChecksGoWorkspaceChanges(t *testing.T) {
 	assertFileContents(t, filepath.Join(repo, ".check-ran"), "xx")
 }
 
+func TestAgentHookChecksIgnoredGoChanges(t *testing.T) {
+	repo := newGitRepository(t)
+	writeTestFile(t, repo, ".gitignore", "generated.go\n")
+	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@printf x >> .check-ran\n")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+
+	runAgentHook(t, repo, "ignored-go-session", "start", false, 0)
+	writeTestFile(t, repo, "generated.go", "package generated\n")
+	runAgentHook(t, repo, "ignored-go-session", "stop", false, 0)
+	assertFileContents(t, filepath.Join(repo, ".check-ran"), "x")
+}
+
 func TestWorktreeFingerprintHashesSymlinkTextWithoutFollowingIt(t *testing.T) {
 	repo := newGitRepository(t)
 	external := filepath.Join(t.TempDir(), "outside.go")

@@ -422,6 +422,22 @@ func TestRunRejectsMergedDifferentHead(t *testing.T) {
 	}
 }
 
+func TestRunRejectsExistingAutoMergeBeforeApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+	echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}'`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "already has an auto-merge request") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.ApprovalAttempted {
+		t.Fatalf("existing auto-merge request reached approval: %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") || strings.Contains(args, "--disable-auto") {
+		t.Fatalf("existing auto-merge request reached a side effect:\n%s", args)
+	}
+}
+
 func TestRunPreservesExistingAutoMergeOnHeadDrift(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 	echo '{"headRefOid":"new-head","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}'`)
@@ -758,26 +774,32 @@ esac`)
 	}
 }
 
-func TestRunPreservesExistingAutoMergeWhenDirectMergeFails(t *testing.T) {
+func TestRunStopsForAutoMergeRequestCreatedDuringApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
-  3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
-  4) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
-  5) echo 'branch protection rejected the merge' >&2; exit 1 ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":{"enabledAt":"now"},"author":{"login":"example-user"}}' ;;
 esac`)
-	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
-	if err == nil || !strings.Contains(err.Error(), "merging reviewed head") {
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "already has an auto-merge request") {
 		t.Fatalf("err = %v", err)
+	}
+	if !result.ApprovalCreated || result.approvalReviewID != 0 {
+		t.Fatalf("approval was not cleaned up: %+v", result)
 	}
 	args := readArgs(t, argsFile)
 	if strings.Contains(args, "--disable-auto") {
-		t.Fatalf("failed direct merge cancelled an existing request:\n%s", args)
+		t.Fatalf("run cancelled an existing request:\n%s", args)
 	}
-	if !strings.Contains(args, "pulls/42/merge") {
-		t.Fatalf("direct merge was not attempted:\n%s", args)
+	if strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("existing request reached direct merge:\n%s", args)
+	}
+	if !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("created approval was not dismissed:\n%s", args)
 	}
 }
 

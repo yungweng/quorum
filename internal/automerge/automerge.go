@@ -422,6 +422,9 @@ func validateHead(current gh.Details, repo string, number int, reviewedSHA strin
 	if current.State != gh.StateOpen {
 		return false, fmt.Errorf("pull request %s#%d is %s, not open", repo, number, strings.ToLower(current.State))
 	}
+	if current.AutoMergeRequest != nil {
+		return false, fmt.Errorf("refusing auto-merge: pull request %s#%d already has an auto-merge request", repo, number)
+	}
 	if current.IsDraft {
 		return false, fmt.Errorf("refusing auto-merge: pull request %s#%d is a draft", repo, number)
 	}

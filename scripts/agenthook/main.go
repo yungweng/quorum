@@ -186,7 +186,7 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 }
 
 func worktreeFingerprint(repo string) ([]byte, error) {
-	args := []string{"ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate", "-z", "--"}
+	args := []string{"ls-files", "--cached", "--others", "--deduplicate", "-z", "--"}
 	args = append(args, relevantPathspecs...)
 	listed, err := gitBytes(repo, args...)
 	if err != nil {
