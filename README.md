@@ -38,6 +38,7 @@ brew install --cask codex     # Homebrew formulas cannot depend on a cask
 From a checkout, which needs Go 1.25 or newer:
 
 ```bash
+make install-hooks
 make dev
 ```
 
@@ -49,6 +50,17 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 
 Requires `gh` (authenticated), `git` and `codex`. `direnv` is optional and only
 needed for projects that have an `.envrc`.
+
+`make install-hooks` is needed once per clone and after a tracked hook changes.
+It copies the reviewed hooks into the clone's untracked Git directory and sets
+an absolute `core.hooksPath`. Pre-commit rejects whitespace errors and
+unformatted staged Go files, while pre-push runs the full check against the
+commits being pushed. Run the same format, race-test, build and lint checks
+directly with `make check`.
+
+Claude Code also loads the project hooks from `.claude/`. After it changes Go
+or check configuration, its Stop hook runs `make check` and returns failures to
+the session. Review new or changed hooks when the client asks.
 
 ## quorum review
 
@@ -108,6 +120,48 @@ Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.
 All fix rounds share one Codex session, so context carries across rounds.
 
+An opt-in divergence scan can explain why a run still has findings at its round
+limit:
+
+```text
+DIVERGENCE_SCAN=1
+DIVERGENCE_ESCALATE_TO="example-user acme/platform"
+```
+
+The normal rounds do not change. After the final fix and CI wait, one read-only
+analysis compares the current run's review comments, fix responses, disputes
+and commits using the configured review model, effort and timeout. It reports
+whether the history contains incompatible decisions, only cumulative findings,
+or too little evidence to decide, then always stops.
+For a one-off run, use `quorum babysit --divergence-scan`. Reports are kept in
+the run directory; PR reports mention the author and configured escalation
+targets only when a manual decision may be needed.
+
+## Auto-merge
+
+Auto-merge is off by default and enabled separately for each source:
+
+```text
+AUTO_MERGE_AGENT=0
+AUTO_MERGE_REVIEW=0
+AUTO_MERGE_BABYSIT=0
+AUTO_MERGE_TIMEOUT="2h"
+```
+
+A clean posted PR review has no Blockers or Critical findings; Suggestions and
+Questions are allowed. Quorum approves the exact reviewed commit, then asks
+GitHub to merge it with a merge commit after the repository's branch rules
+pass. It never uses administrator privileges. A moved head, an own PR, a local
+report (`POST=0` or `--dry-run`), a branch without a PR, and a target branch
+that requires a merge queue are not merged. Repositories with merge commits
+disabled are rejected before approval.
+
+The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
+The other two settings apply only to the matching command started in a
+terminal. The wait for protected checks and mergeability defaults to two hours;
+set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these
+settings with `quorum config` or in the config file.
+
 **The fix sessions run with the Codex sandbox bypassed**, which gives them full
 file and network access on your machine. `--sandboxed` opts out. Read
 [what that means](docs/reference.md#it-runs-unattended) before the first run.
@@ -120,17 +174,18 @@ Three situations that used to need a human are decided automatically. Pass
   back for it to answer itself; after three rounds of that the run gives up.
 - **Disputed findings.** Review findings can be wrong, so a dispute is never
   accepted on first sight: the session must survive one forced re-check where it
-  actively tries to reproduce each finding. **A dispute it upholds still appears
-  on the PR as a review finding, so read the run summary before merging.**
+  actively tries to reproduce each finding. If the dispute survives, the
+  pipeline posts the final rebuttal with a link to the review comment. The
+  original review stays unchanged, so the PR conversation preserves both sides.
 - **Changed `.envrc` files.** A run stops before loading an `.envrc` changed by
   the target unless you pass `--allow-envrc-change` after reading it. Changes
   made during a fix round are printed before `direnv allow` runs; with the
   sandbox bypassed the session can execute anything anyway.
 
-Every fix round ends with a comment on the PR describing what was fixed and what
-was left alone as intended. The session writes the text, in the language of the
-PR description; the pipeline posts it, so it appears as an ordinary comment from
-you.
+Every pushed review fix and CI fix ends with a comment on the PR describing what
+failed, what changed and which checks ran. The session writes the text, in the
+language of the PR description; the pipeline posts it, so it appears as an
+ordinary comment from you.
 
 **Do not push to the PR branch while a run is active.** The pipeline also
 refuses dirty or diverged checkouts and fork PRs;
@@ -164,23 +219,22 @@ ACTIVE  1 / 2
       queued · waiting for a free slot
 
 HISTORY
-  ✓ 21:02  payments #98               2B 1C 3S  comment ↗
-  ✓ 19:42  toaster-api #2002          fix, 2 rounds · nothing found
-  ✓ 18:42  toaster-api #2002          0B 1C 0S  comment ↗
-  ✗ 29 Jul toaster-api #1993          failed, reviewer-2 timed out after 45m
+  ✓  21:02   payments #98       @robin     2B 1C 3S       comment ↗
+  ✓  19:42   toaster-api #2002  @sam       2 runs         nothing found  comment ↗  merged
+  ✗  29 Jul  toaster-api #1993  @robin     failed         reviewer-2 timed out after 45m
 
-every repo that asks you · 2 at a time, 6 reviewers each · 5.0 GB cache
+every repo that asks you · 2 at a time, 6 reviewers each · auto-merge off · 5.0 GB cache
 ```
 
 The status bar under the version answers "what is this machine doing" before
 anything else has to be read.
 
-OPEN is what is waiting for a person: pull requests quorum has reviewed that
-are still open, newest first, with what the review found. The bullet is red for
-blockers, yellow for critical findings and green for neither, so the one that
-needs you is the one the eye lands on. A pull request leaves the section when
-it is merged or closed, when it is being reviewed again (ACTIVE has it then),
-and two weeks after its last review.
+OPEN lists pull requests quorum has reviewed that are still open, newest first,
+with what the review found. The bullet is red for blockers, yellow for critical
+findings and green for neither. A PR waiting on GitHub's Auto-Merge or merge
+queue says `auto-merge queued`; the others still need a person. A pull request
+leaves the section when it is merged or closed, when it is being reviewed again
+(ACTIVE has it then), and two weeks after its last review.
 
 ACTIVE is everything in flight: reviews the agent started, reviews you started
 in a terminal, fix loops, and what is waiting for a slot. The symbol and the
@@ -188,11 +242,17 @@ label under each line say which is which. Its count covers agent slots only, so
 a review or a fix loop you ran yourself does not spend one. On an idle machine
 the whole section is one line saying so.
 
-HISTORY is one line per finished run, newest first, however it was started.
-Note the two entries for `toaster-api #2002`: a review and then a fix loop, as
-two runs rather than one overwriting the other. `HISTORY=20` in the config sets
-how many are listed. The log behind it is described in
+HISTORY is one line per pull request, newest first, however its runs were
+started. `toaster-api #2002` says `2 runs`, a review and then a fix loop: the
+log keeps every run, and the line says how many there were and how many of them
+failed rather than spending a row on each. `HISTORY=20` in the config sets how
+many are listed. The log behind it is described in
 [the reference](docs/reference.md#the-history-log).
+
+Every section draws the same columns at the same widths, measured from what is
+actually on screen. On a narrow terminal the columns give way in a fixed order,
+whole rather than shortened to a stub: the author first, then the explanation
+behind a result, and the repository and number last.
 
 `quorum watch` redraws the same screen as it changes and marks pull requests
 that have since been merged or closed.

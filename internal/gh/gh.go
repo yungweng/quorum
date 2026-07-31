@@ -220,13 +220,28 @@ func (c *Client) searchPRs(ctx context.Context, args []string) ([]PR, error) {
 }
 
 // Details are the fields the search API does not carry.
+type LatestReview struct {
+	State  string `json:"state"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
 type Details struct {
-	HeadRefOid        string `json:"headRefOid"`
-	IsDraft           bool   `json:"isDraft"`
-	IsCrossRepository bool   `json:"isCrossRepository"`
-	State             string `json:"state"`
-	Title             string `json:"title"`
-	Author            struct {
+	BaseRefName       string         `json:"baseRefName"`
+	HeadRefOid        string         `json:"headRefOid"`
+	IsDraft           bool           `json:"isDraft"`
+	IsCrossRepository bool           `json:"isCrossRepository"`
+	State             string         `json:"state"`
+	Title             string         `json:"title"`
+	Mergeable         string         `json:"mergeable"`
+	MergeStateStatus  string         `json:"mergeStateStatus"`
+	ReviewDecision    string         `json:"reviewDecision"`
+	LatestReviews     []LatestReview `json:"latestReviews"`
+	AutoMergeRequest  *struct {
+		EnabledAt string `json:"enabledAt"`
+	} `json:"autoMergeRequest"`
+	Author struct {
 		Login string `json:"login"`
 		IsBot bool   `json:"is_bot"`
 	} `json:"author"`
@@ -236,7 +251,7 @@ type Details struct {
 func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Details, error) {
 	var d Details
 	out, err := c.run(ctx, "pr", "view", fmt.Sprint(number), "--repo", repo,
-		"--json", "headRefOid,isDraft,isCrossRepository,author,state,title")
+		"--json", "baseRefName,headRefOid,isDraft,isCrossRepository,author,state,title,mergeable,mergeStateStatus,reviewDecision,latestReviews,autoMergeRequest")
 	if err != nil {
 		return d, err
 	}
@@ -249,11 +264,54 @@ func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Detail
 	return d, nil
 }
 
+// MergePolicy reports the repository settings that select a safe merge path
+// and confirms that the queried pull request still has headSHA.
+func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headSHA string) (queueEnabled, mergeCommitAllowed bool, err error) {
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || number <= 0 || headSHA == "" {
+		return false, false, fmt.Errorf("merge policy check needs owner/repository, pull request number, and head sha")
+	}
+	const query = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    mergeCommitAllowed
+    pullRequest(number: $number) { headRefOid isMergeQueueEnabled }
+  }
+}`
+	out, err := c.run(ctx, "api", "graphql", "-f", "query="+query,
+		"-F", "owner="+owner, "-F", "name="+name, "-F", "number="+fmt.Sprint(number))
+	if err != nil {
+		return false, false, err
+	}
+	var response struct {
+		Data struct {
+			Repository struct {
+				MergeCommitAllowed bool `json:"mergeCommitAllowed"`
+				PullRequest        *struct {
+					HeadRefOid        string `json:"headRefOid"`
+					MergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return false, false, fmt.Errorf("gh api merge policy check: %w", err)
+	}
+	pr := response.Data.Repository.PullRequest
+	if pr == nil || pr.HeadRefOid == "" {
+		return false, false, fmt.Errorf("%w: GitHub returned no pull request head during merge policy check", ErrTransient)
+	}
+	if pr.HeadRefOid != headSHA {
+		return false, false, fmt.Errorf("pull request head moved from %s to %s during merge policy check", headSHA, pr.HeadRefOid)
+	}
+	return pr.MergeQueueEnabled, response.Data.Repository.MergeCommitAllowed, nil
+}
+
 // The states a pull request can be in, as GitHub spells them.
 const (
-	StateOpen   = "OPEN"
-	StateClosed = "CLOSED"
-	StateMerged = "MERGED"
+	StateOpen      = "OPEN"
+	StateAutoMerge = "AUTO_MERGE"
+	StateClosed    = "CLOSED"
+	StateMerged    = "MERGED"
 )
 
 // safeRepo matches the owner/name shapes GitHub actually allows. Repository
@@ -291,7 +349,7 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		owner, name, _ := strings.Cut(repo, "/")
 		alias := fmt.Sprintf("p%d", len(targets))
 		targets = append(targets, target{alias, key, owner, name, number})
-		fmt.Fprintf(&q, " %s: repository(owner: %q, name: %q) { pullRequest(number: %d) { state } }",
+		fmt.Fprintf(&q, " %s: repository(owner: %q, name: %q) { pullRequest(number: %d) { state autoMergeRequest { enabledAt } mergeQueueEntry { position } } }",
 			alias, owner, name, number)
 	}
 	q.WriteString(" }")
@@ -306,7 +364,9 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 	var resp struct {
 		Data map[string]*struct {
 			PullRequest *struct {
-				State string `json:"state"`
+				State            string          `json:"state"`
+				AutoMergeRequest json.RawMessage `json:"autoMergeRequest"`
+				MergeQueueEntry  json.RawMessage `json:"mergeQueueEntry"`
 			} `json:"pullRequest"`
 		} `json:"data"`
 	}
@@ -318,10 +378,18 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		// A repository that has gone away answers null, which is not an error
 		// worth failing the whole batch over: the other pull requests are fine.
 		if node := resp.Data[t.alias]; node != nil && node.PullRequest != nil {
-			states[t.key] = node.PullRequest.State
+			state := node.PullRequest.State
+			if state == StateOpen && (present(node.PullRequest.AutoMergeRequest) || present(node.PullRequest.MergeQueueEntry)) {
+				state = StateAutoMerge
+			}
+			states[t.key] = state
 		}
 	}
 	return states, nil
+}
+
+func present(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 // timelineEvent is the subset of the timeline API this needs.

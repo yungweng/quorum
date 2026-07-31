@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/envexec"
@@ -41,6 +42,9 @@ var (
 	// ErrNoProgress is exit 5: a fix round changed nothing while findings
 	// remain, and did not dispute them either.
 	ErrNoProgress = errors.New("fix round produced no changes although findings remain")
+	// ErrDiverged is exit 6: the bounded analysis found incompatible review/fix
+	// decisions and produced a report for manual resolution.
+	ErrDiverged = errors.New("review loop diverged")
 )
 
 // Defaults for a run.
@@ -77,6 +81,12 @@ type Options struct {
 	MaxIter    int
 	MaxCIFixes int
 	FixTimeout time.Duration
+
+	DivergenceScan       bool
+	DivergenceEscalateTo []string
+	DivergenceTimeout    time.Duration
+	// Post controls every pull request comment produced by the run.
+	Post bool
 
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
 	// sandbox. They must run tests, use gh and push, unattended, and a
@@ -115,10 +125,18 @@ type Result struct {
 	Converged       bool
 	DisputeAccepted bool
 	DisputeText     string
-	RoundLog        []RoundEntry
-	RunDir          string
-	Duration        time.Duration
-	LastFindings    review.Findings
+	// DisputeCommentURL is the linked rebuttal posted after an accepted dispute.
+	// DisputeCommentPosted distinguishes a successful post with no URL in gh's
+	// output from a failed post.
+	DisputeCommentURL    string
+	DisputeCommentPosted bool
+	RoundLog             []RoundEntry
+	RunDir               string
+	Duration             time.Duration
+	LastFindings         review.Findings
+	Divergence           *DivergenceReport
+	DivergenceReportPath string
+	DivergenceCommentURL string
 }
 
 // Pipeline runs the review-fix cycle.
@@ -197,6 +215,7 @@ type run struct {
 	ciFixTotal      int
 	disputeAccepted bool
 	disputeText     string
+	divergenceTrace DivergenceTrace
 
 	// prog is what this run publishes about itself for a watcher to read. It
 	// is the run's own copy; publish writes it out.
@@ -308,6 +327,7 @@ func (r *run) prepare() error {
 		Repo:       r.o.Repo,
 		Number:     pr.Number,
 		Title:      pr.Title,
+		Author:     pr.Author.Login,
 		Branch:     r.branch,
 		StartedAt:  time.Now(),
 		MaxIter:    r.o.MaxIter,
@@ -341,7 +361,8 @@ func (r *run) prepare() error {
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
-		FixTimeout: r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
+		DivergenceScan: r.o.DivergenceScan,
+		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
 	})
 	if tgt.BranchOnly {
 		r.rep.Warn("no open PR: GitHub PR checks and PR comments are skipped; fix steps still run repository tests")
@@ -352,6 +373,9 @@ func (r *run) prepare() error {
 // execute is the main loop.
 func (r *run) execute() (*Result, error) {
 	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, RunDir: r.root}
+	if r.o.DivergenceScan {
+		r.startDivergenceTrace()
+	}
 
 	r.startReview(1)
 	if !r.target.BranchOnly {
@@ -385,6 +409,9 @@ func (r *run) execute() (*Result, error) {
 		// acting on them would fix the wrong code.
 		if findings.HeadSHA != currentSHA {
 			return res, fmt.Errorf("the review is for %s but the branch is at %s", findings.HeadSHA, currentSHA)
+		}
+		if r.o.DivergenceScan {
+			r.traceReview(iteration, findings, comment)
 		}
 
 		r.rep.RoundResult(iteration, findings, findings.Blocking() == 0)
@@ -426,19 +453,39 @@ func (r *run) execute() (*Result, error) {
 				return res, err
 			}
 			if r.disputeAccepted {
+				if r.o.DivergenceScan {
+					r.traceFix(iteration, preFixSHA, afterSHA, tag)
+				}
+				commentURL, commentPosted, err := r.postDisputeComment(
+					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
+				if err != nil {
+					return res, err
+				}
 				res.Converged = true
 				res.DisputeAccepted = true
 				res.DisputeText = r.disputeText
+				res.DisputeCommentURL = commentURL
+				res.DisputeCommentPosted = commentPosted
 				break
 			}
 			// The dispute gate only returns unaccepted once new commits exist.
+			afterSHA, err = r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+			if err != nil {
+				return res, err
+			}
+		}
+		if r.o.DivergenceScan {
+			r.traceFix(iteration, preFixSHA, afterSHA, tag)
 		}
 
 		r.recordRound(fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
 		if err := r.pushBranch(); err != nil {
 			return res, err
 		}
-		r.postFixComment(iteration, preFixSHA)
+		if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
+			fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA); err != nil {
+			return res, err
+		}
 
 		// Overlap the next review with this round's CI wait.
 		if iteration < r.o.MaxIter {
@@ -454,6 +501,15 @@ func (r *run) execute() (*Result, error) {
 
 	res.RoundLog = r.roundLog
 	if !res.Converged {
+		if r.o.DivergenceScan {
+			if err := r.runDivergenceScan(res); err != nil {
+				return res, fmt.Errorf("%w after %d review rounds; divergence scan failed: %v",
+					ErrNotConverged, r.o.MaxIter, err)
+			}
+			if res.Divergence != nil && res.Divergence.Verdict == DivergenceDiverged {
+				return res, fmt.Errorf("%w after %d review rounds", ErrDiverged, r.o.MaxIter)
+			}
+		}
 		r.rep.Notify("Nicht konvergiert", fmt.Sprintf("%s hat nach %d Runden weiter Findings", r.targetLabel(), r.o.MaxIter))
 		return res, fmt.Errorf("%w after %d review rounds", ErrNotConverged, r.o.MaxIter)
 	}
@@ -626,40 +682,155 @@ func (r *run) recordRound(label, preSHA string) {
 	}
 }
 
-// postFixComment posts the round's fix log to the PR.
+// postFixComment posts one pushed fix step's log to the PR.
 //
 // The text comes from the session's PR COMMENT block. A later gate step may
-// have produced the newest message, so the round's own message is checked as
+// have produced the newest message, so the step's own message is checked as
 // well; the commit list is the fallback. The pipeline posts it rather than the
 // session, which is what keeps it a normal comment from the user.
-func (r *run) postFixComment(round int, preSHA string) {
-	if r.target.BranchOnly {
-		return
+func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) error {
+	if r.target.BranchOnly || !r.o.Post {
+		return nil
 	}
-	body := section(r.lastMsg, MarkerComment)
+	commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
+	if commits == "" {
+		return nil
+	}
+	currentSHA, err := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+	if err != nil {
+		return fmt.Errorf("checking the pull request head before posting the fix log: %w", err)
+	}
+	if currentSHA != r.headSHA {
+		return fmt.Errorf("the pushed fix is for %s but GitHub reports %s; refusing to post the fix log",
+			r.headSHA, currentSHA)
+	}
+	var original string
+	if data, err := os.ReadFile(filepath.Join(r.msgDir, tag+".md")); err == nil {
+		original = string(data)
+	}
+	body := fixCommentBody(label, reviewLabel, reviewURL, r.lastMsg, original, commits)
+	r.postPRComment("fix-log comment", body, reviewURL)
+	return nil
+}
+
+// postDisputeComment posts only the rebuttal that survived the dispute gate.
+// Earlier claims are deliberately kept off the PR because the adversarial
+// re-check may still prove them wrong.
+func (r *run) postDisputeComment(round int, reviewURL, dispute, reviewedSHA string) (string, bool, error) {
+	if r.target.BranchOnly || !r.o.Post {
+		return "", false, nil
+	}
+	body := disputeCommentBody(round, reviewURL, dispute)
 	if body == "" {
-		if data, err := os.ReadFile(filepath.Join(r.msgDir, fmt.Sprintf("fix-round-%d.md", round))); err == nil {
-			body = section(string(data), MarkerComment)
-		}
+		url, posted := r.postPRComment("rebuttal", body, "")
+		return url, posted, nil
 	}
-	if body != "" {
-		// Drop the marker line itself.
-		if _, rest, ok := strings.Cut(body, "\n"); ok {
-			body = rest
-		} else {
-			body = ""
-		}
+	currentSHA, err := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+	if err != nil {
+		return "", false, fmt.Errorf("checking the pull request head before posting the rebuttal: %w", err)
+	}
+	if currentSHA != reviewedSHA {
+		return "", false, fmt.Errorf("the review is for %s but GitHub reports %s; refusing to post the rebuttal",
+			reviewedSHA, currentSHA)
+	}
+	if reviewURL == "" {
+		r.rep.Warn(fmt.Sprintf("review round %d has no comment URL; posting the rebuttal without a backlink", round))
+	}
+	url, posted := r.postPRComment("rebuttal", body, reviewURL)
+	return url, posted, nil
+}
+
+func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {
+	if !r.o.Post {
+		return "", false
 	}
 	if strings.TrimSpace(body) == "" {
-		commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
-		if commits == "" {
-			return
+		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment body is empty", kind, r.pr.Number))
+		return "", false
+	}
+	if term := prohibitedPRCommentTermExcept(body, generatedURL); term != "" {
+		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment contains prohibited term %q", kind, r.pr.Number, term))
+		return "", false
+	}
+	url, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, body)
+	if err != nil {
+		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: %v", kind, r.pr.Number, err))
+		return "", false
+	}
+	return url, true
+}
+
+func prohibitedPRCommentTerm(text string) string {
+	return prohibitedPRCommentTermExcept(text, "")
+}
+
+func prohibitedPRCommentTermExcept(text, generatedURL string) string {
+	if generatedURL != "" {
+		text = strings.ReplaceAll(text, generatedURL, " ")
+	}
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for i, word := range words {
+		switch strings.ToLower(word) {
+		case "ai", "openai", "agent", "agents", "codex", "automation":
+			return word
 		}
-		body = fmt.Sprintf("Review round %d:\n\n```\n%s\n```", round, commits)
+		if i+1 < len(words) && strings.EqualFold(word, "artificial") &&
+			strings.EqualFold(words[i+1], "intelligence") {
+			return word + " " + words[i+1]
+		}
 	}
-	if _, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, body); err != nil {
-		r.rep.Warn(fmt.Sprintf("could not post the fix-log comment to PR #%d: %v", r.pr.Number, err))
+	return ""
+}
+
+func fixCommentBody(label, reviewLabel, reviewURL, current, original, commits string) string {
+	body := markerContent(current, MarkerComment)
+	if body == "" {
+		body = markerContent(original, MarkerComment)
 	}
+	if body == "" {
+		body = fmt.Sprintf("Commits:\n\n```text\n%s\n```", strings.TrimSpace(commits))
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "### %s", label)
+	if reviewURL != "" && reviewLabel != "" {
+		fmt.Fprintf(&b, "\n\n[%s](%s)", reviewLabel, reviewURL)
+	}
+	fmt.Fprintf(&b, "\n\n%s", body)
+	return b.String()
+}
+
+func disputeCommentBody(round int, reviewURL, dispute string) string {
+	body := markerContent(dispute, MarkerDisputed)
+	if body == "" {
+		return ""
+	}
+	title := fmt.Sprintf("review round %d", round)
+	if reviewURL != "" {
+		title = fmt.Sprintf("[%s](%s)", title, reviewURL)
+	}
+	return fmt.Sprintf("### Rebuttal to %s\n\n%s", title, body)
+}
+
+func markerContent(text, marker string) string {
+	block := section(text, marker)
+	if block == "" {
+		return ""
+	}
+	_, body, ok := strings.Cut(block, "\n")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(body)
+}
+
+func findingsCommentURL(findings review.Findings) string {
+	if findings.CommentURL == nil {
+		return ""
+	}
+	return *findings.CommentURL
 }
 
 // gcOldRuns drops run directories nothing has looked at for a week.
@@ -720,11 +891,21 @@ func (o Options) validate() error {
 	if o.MaxIter < 1 {
 		return fmt.Errorf("max-iter must be >= 1")
 	}
+	if o.DivergenceScan {
+		for _, target := range o.DivergenceEscalateTo {
+			if !validDivergenceTarget(target) {
+				return fmt.Errorf("invalid divergence escalation target %q; expected user or org/team without @", target)
+			}
+		}
+	}
 	if !codex.ValidEffort(o.Effort) {
 		return fmt.Errorf("effort must be one of: %s", strings.Join(codex.Efforts, ", "))
 	}
 	if !codex.ValidEffort(o.ReviewEffort) {
 		return fmt.Errorf("review-effort must be one of: %s", strings.Join(codex.Efforts, ", "))
+	}
+	if o.DivergenceTimeout < 0 {
+		return fmt.Errorf("divergence timeout must not be negative")
 	}
 	if o.Repo == "" || o.RepoRoot == "" {
 		return fmt.Errorf("repo and repo root are required")

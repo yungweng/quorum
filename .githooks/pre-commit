@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+git diff --cached --check
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/quorum-pre-commit.XXXXXX")
+trap 'rm -f "$tmp_dir"/*; rmdir "$tmp_dir"' EXIT
+
+unformatted=()
+counter=0
+while IFS= read -r -d '' path; do
+	counter=$((counter + 1))
+	staged="$tmp_dir/$counter.go"
+	formatted="$tmp_dir/$counter.formatted.go"
+
+	git cat-file blob ":$path" >"$staged"
+	if ! gofmt "$staged" >"$formatted"; then
+		printf 'gofmt could not parse staged file %q\n' "$path" >&2
+		exit 1
+	fi
+	if ! cmp -s "$staged" "$formatted"; then
+		unformatted+=("$path")
+	fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.go')
+
+if ((${#unformatted[@]} > 0)); then
+	printf '%s\n' 'Commit blocked: run gofmt and stage these files again:' >&2
+	printf '  %s\n' "${unformatted[@]}" >&2
+	exit 1
+fi

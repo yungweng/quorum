@@ -1,11 +1,20 @@
 package runner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/history"
+	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/state"
 )
 
 // The scanner must find the run directory in a stream that arrives in
@@ -130,6 +139,228 @@ func TestSummaryLine(t *testing.T) {
 	// A run that only raised questions still has something to report.
 	if got := summaryLine(review.Findings{Questions: 2}); got == "nothing found" {
 		t.Error("questions were reported as nothing found")
+	}
+}
+
+func TestAutoMergeSettingFollowsInvocationSource(t *testing.T) {
+	r := &Runner{Cfg: config.Config{AutoMergeAgent: true}}
+	if !r.autoMergeEnabled(InvocationAgent) {
+		t.Fatal("agent invocation ignored AUTO_MERGE_AGENT")
+	}
+	if r.autoMergeEnabled(InvocationManual) {
+		t.Fatal("manual invocation used AUTO_MERGE_AGENT")
+	}
+
+	r.Cfg.AutoMergeAgent = false
+	r.Cfg.AutoMergeReview = true
+	if r.autoMergeEnabled(InvocationAgent) {
+		t.Fatal("agent invocation used AUTO_MERGE_REVIEW")
+	}
+	if !r.autoMergeEnabled(InvocationManual) {
+		t.Fatal("manual invocation ignored AUTO_MERGE_REVIEW")
+	}
+	if r.autoMergeEnabled(InvocationSource(99)) {
+		t.Fatal("unknown invocation source enabled auto-merge")
+	}
+}
+
+func TestAutoMergeFailurePreservesSuccessfulReview(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{P: paths.P{
+		StateFile:   filepath.Join(dir, "state.json"),
+		HistoryFile: filepath.Join(dir, "history.jsonl"),
+	}}
+	if err := state.Mutate(r.P.StateFile, "acme/api#42", func(rec *state.Record) {
+		rec.Fails = 2
+	}); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://example.invalid/comment/42"
+	reason := "auto-merge failed after the approval was posted"
+	r.recordAutoMergeFailure("acme/api#42", "2026-07-31T09:00:00Z", "/run/42", review.Findings{
+		PR: 42, HeadSHA: "abc123", Posted: true, CommentURL: &url, Suggestions: 2, Questions: 1,
+	}, reason)
+
+	file, err := state.Read(r.P.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := file.PRs["acme/api#42"]
+	if rec.Status != state.OK || rec.Reason != reason || rec.ReqAt != "2026-07-31T09:00:00Z" || rec.SHA != "abc123" {
+		t.Fatalf("record = %+v", rec)
+	}
+	if rec.CommentURL != url || rec.Suggestions != 2 || rec.Questions != 1 || rec.Fails != 0 {
+		t.Fatalf("review result was not preserved: %+v", rec)
+	}
+	runs := history.Read(r.P.HistoryFile, 0)
+	if len(runs) != 1 || runs[0].Outcome != history.OK || !runs[0].Reviewed || runs[0].Reason != reason {
+		t.Fatalf("history = %+v", runs)
+	}
+}
+
+func TestDivergenceResultStopsAgentRetries(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{P: paths.P{
+		StateFile:   filepath.Join(dir, "state.json"),
+		HistoryFile: filepath.Join(dir, "history.jsonl"),
+	}}
+	if err := state.Mutate(r.P.StateFile, "acme/api#42", func(rec *state.Record) {
+		rec.Fails = 2
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reviewURL := "https://example.invalid/review"
+	r.recordDivergenceResult(
+		"acme/api#42", "abc123", "2026-07-31T09:00:00Z", "/run/42", "/log/42",
+		"https://example.invalid/divergence",
+		review.Findings{Critical: 1, CommentURL: &reviewURL},
+		"review loop diverged after 12 review rounds",
+	)
+
+	file, err := state.Read(r.P.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := file.PRs["acme/api#42"]
+	if rec.Status != state.Failed || rec.ReqAt != "2026-07-31T09:00:00Z" || rec.Fails != 0 {
+		t.Fatalf("divergence did not stop retries: %+v", rec)
+	}
+	if rec.CommentURL != "https://example.invalid/divergence" || rec.Critical != 1 ||
+		rec.RunDir != "/run/42" || rec.RunLog != "/log/42" {
+		t.Fatalf("divergence result was not preserved: %+v", rec)
+	}
+}
+
+func TestAutoMergePendingPreservesReviewWithoutHandlingRequest(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{P: paths.P{
+		StateFile:   filepath.Join(dir, "state.json"),
+		HistoryFile: filepath.Join(dir, "history.jsonl"),
+	}}
+	r.recordAutoMergePending("acme/api#42", "/run/42", review.Findings{
+		PR: 42, HeadSHA: "abc123", Posted: true, Suggestions: 2,
+	})
+
+	file, err := state.Read(r.P.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := file.PRs["acme/api#42"]
+	if rec.Status != state.Running || rec.ReqAt != "" || rec.SHA != "abc123" {
+		t.Fatalf("record = %+v", rec)
+	}
+	if rec.Reason != "waiting for required checks before merge" || rec.Suggestions != 2 {
+		t.Fatalf("review result was not preserved: %+v", rec)
+	}
+}
+
+func mergeRetryGH(t *testing.T, cases string) (*gh.Client, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gh")
+	count := filepath.Join(dir, "count")
+	args := filepath.Join(dir, "args")
+	script := "#!/bin/bash\n" +
+		"n=$(cat " + count + " 2>/dev/null || echo 0)\n" +
+		"n=$((n+1)); echo $n > " + count + "\n" +
+		"printf '%s\\n' \"$*\" >> " + args + "\n" +
+		cases + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := gh.New(bin)
+	client.Backoff = time.Millisecond
+	client.Timeout = 5 * time.Second
+	return client, dir, args
+}
+
+func TestRetryAutoMergeAfterChecksPass(t *testing.T) {
+	client, dir, args := mergeRetryGH(t, `case "$n" in
+  1|3|4|7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'all checks passed' ;;
+  5) echo 'reviewer' ;;
+  6) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  8) echo '{"merged":true}' ;;
+esac
+`)
+	r := &Runner{GH: client}
+
+	result, err := r.retryAutoMergeAfterChecks(context.Background(), dir, "acme/api", 42, "abc123", automerge.Result{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != automerge.Merged {
+		t.Fatalf("result = %+v", result)
+	}
+	calls, err := os.ReadFile(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"pr checks 42 --watch --fail-fast --required", "pulls/42/merge", "sha=abc123"} {
+		if !strings.Contains(string(calls), want) {
+			t.Errorf("calls are missing %q:\n%s", want, calls)
+		}
+	}
+}
+
+func TestRetryAutoMergeGivesChecksTimeToRegister(t *testing.T) {
+	client, dir, args := mergeRetryGH(t, `case "$n" in
+  1|3|4|7|10|12|13|16) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'no required checks reported on the topic branch' >&2; exit 1 ;;
+  5|14) echo 'reviewer' ;;
+  6|15) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  8) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  9) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
+  11) echo 'all checks passed' ;;
+  17) echo '{"merged":true}' ;;
+esac`)
+	r := &Runner{GH: client}
+
+	result, err := r.retryAutoMergeAfterChecksWithin(
+		context.Background(), dir, "acme/api", 42, "abc123", automerge.Result{}, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != automerge.Merged {
+		t.Fatalf("result = %+v", result)
+	}
+	calls, err := os.ReadFile(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "pr checks 42 --watch --fail-fast --required"); got != 2 {
+		t.Fatalf("check calls = %d, want 2:\n%s", got, calls)
+	}
+}
+
+func TestRetryAutoMergeWaitsForMergeabilityAfterGreenChecks(t *testing.T) {
+	client, dir, args := mergeRetryGH(t, `case "$n" in
+  1|3|4|7|10|12|13|16) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2|11) echo 'all checks passed' ;;
+  5|14) echo 'reviewer' ;;
+  6|15) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  8) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  9) echo '{"headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
+  17) echo '{"merged":true}' ;;
+esac`)
+	r := &Runner{GH: client}
+
+	result, err := r.retryAutoMergeAfterChecksWithin(
+		context.Background(), dir, "acme/api", 42, "abc123", automerge.Result{}, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != automerge.Merged {
+		t.Fatalf("result = %+v", result)
+	}
+	calls, err := os.ReadFile(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "pulls/42/merge"); got != 2 {
+		t.Fatalf("merge calls = %d, want 2:\n%s", got, calls)
 	}
 }
 

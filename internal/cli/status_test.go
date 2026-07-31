@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -28,15 +29,16 @@ func testApp(t *testing.T) *app {
 	t.Helper()
 	dir := t.TempDir()
 	p := paths.P{
-		StateDir:    dir,
-		StateFile:   filepath.Join(dir, "state.json"),
-		HistoryFile: filepath.Join(dir, "history.jsonl"),
-		Log:         filepath.Join(dir, "log"),
-		RunningDir:  filepath.Join(dir, "running"),
-		ManualDir:   filepath.Join(dir, "manual-reviews"),
-		ReviewRuns:  filepath.Join(dir, "runs"),
-		BabysitRuns: filepath.Join(dir, "babysit"),
-		DepsCache:   filepath.Join(dir, "deps"),
+		StateDir:     dir,
+		StateFile:    filepath.Join(dir, "state.json"),
+		PRStatesFile: filepath.Join(dir, "pr-states.json"),
+		HistoryFile:  filepath.Join(dir, "history.jsonl"),
+		Log:          filepath.Join(dir, "log"),
+		RunningDir:   filepath.Join(dir, "running"),
+		ManualDir:    filepath.Join(dir, "manual-reviews"),
+		ReviewRuns:   filepath.Join(dir, "runs"),
+		BabysitRuns:  filepath.Join(dir, "babysit"),
+		DepsCache:    filepath.Join(dir, "deps"),
 	}
 	cfg := config.Config{MaxConcurrent: 6, Reviewers: 6, PollInterval: 120, History: 20}
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}
@@ -77,7 +79,10 @@ func TestOpenSectionIncludesSuccessfulManualRuns(t *testing.T) {
 		}
 	}
 
-	screen, tracked := render(t, a, nil)
+	screen, tracked := render(t, a, map[string]string{
+		"acme/api#42": gh.StateOpen,
+		"acme/web#43": gh.StateOpen,
+	})
 	open := sectionOf(t, screen, "OPEN")
 	for _, want := range []string{"api #42", "manual review", "2B 1C 0S", "web #43", "manual fix loop"} {
 		if !strings.Contains(open, want) {
@@ -87,6 +92,61 @@ func TestOpenSectionIncludesSuccessfulManualRuns(t *testing.T) {
 	for _, key := range []string{"acme/api#42", "acme/web#43"} {
 		if !slices.Contains(tracked, key) {
 			t.Errorf("tracked = %v, want manual run %s", tracked, key)
+		}
+	}
+}
+
+func TestOpenSectionKeepsManualResultsWhenMergeFails(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{
+			Key: "acme/api#42", Title: "review result", Kind: history.KindReview,
+			Source: history.SourceManual, Outcome: history.OK, Reviewed: true,
+			Reason: "auto-merge failed: permission denied", EndedAt: now,
+		},
+		{
+			Key: "acme/web#43", Title: "fix-loop result", Kind: history.KindBabysit,
+			Source: history.SourceManual, Outcome: history.Converged, Reviewed: true,
+			Reason: "auto-merge failed: permission denied", EndedAt: now.Add(-time.Minute),
+		},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, _ := render(t, a, map[string]string{
+		"acme/api#42": gh.StateOpen,
+		"acme/web#43": gh.StateOpen,
+	})
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "review result", "web #43", "fix-loop result", "merge failed", "permission denied"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("OPEN is missing %q after a merge failure:\n%s", want, screen)
+		}
+	}
+	if historySection := sectionOf(t, screen, "HISTORY"); !strings.Contains(historySection, "merge failed") {
+		t.Errorf("HISTORY hides the merge failure:\n%s", screen)
+	}
+}
+
+func TestDashboardSurfacesRecordedMergeFailure(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "review result"
+		r.Status = state.OK
+		r.Reason = "auto-merge failed: permission denied"
+		r.At = time.Now().Format(time.RFC3339)
+	})
+
+	screen, _ := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
+	for _, section := range []string{"OPEN", "HISTORY"} {
+		text := sectionOf(t, screen, section)
+		for _, want := range []string{"merge failed", "permission denied"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s is missing %q:\n%s", section, want, screen)
+			}
 		}
 	}
 }
@@ -202,7 +262,7 @@ func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
 		StartedAt: time.Now().Add(-2 * time.Minute), Reviewers: 2,
 	}, "start\nok 1 30 1\n")
 
-	screen, shown := render(t, a, nil)
+	screen, shown := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
 	if got := sectionBadge(t, screen, "ACTIVE"); got != "0 / 6" {
 		t.Errorf("a manual review took an agent slot: heading says %q", got)
 	}
@@ -240,7 +300,7 @@ func TestOpenSectionListsReviewedPullRequestsThatAreStillOpen(t *testing.T) {
 		r.Mark(state.OK, "")
 	})
 
-	screen, shown := render(t, a, nil)
+	screen, shown := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
 	open := sectionOf(t, screen, "OPEN")
 	for _, want := range []string{"api #42", "tenant scoping", "0B 2C 0S", "comment"} {
 		if !strings.Contains(open, want) {
@@ -249,6 +309,60 @@ func TestOpenSectionListsReviewedPullRequestsThatAreStillOpen(t *testing.T) {
 	}
 	if !slices.Contains(shown, "acme/api#42") {
 		t.Errorf("shown = %v, an open pull request must be looked up", shown)
+	}
+}
+
+func TestOpenSectionKeepsReviewedPullRequestAfterMergeFailure(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "protected merge"
+		r.CommentURL = "https://example.invalid/comment/42"
+		r.Suggestions = 1
+		r.Mark(state.OK, "auto-merge failed: permission denied")
+	})
+
+	screen, _ := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "protected merge", "0B 0C 1S", "comment"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("OPEN is missing %q after a merge failure:\n%s", want, screen)
+		}
+	}
+}
+
+func TestDashboardShowsPRAuthorInEverySection(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/open#42", func(r *state.Record) {
+		r.Title = "open review"
+		r.Author = "open-author"
+		r.Mark(state.OK, "")
+	})
+	manualReview(t, a, review.LiveRun{
+		PID: os.Getpid(), Repo: "acme/active", Number: 43, Title: "active review",
+		Author: "active-author", StartedAt: time.Now(), Reviewers: 2,
+	}, "start\n")
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/history#44", Title: "finished review", Author: "history-author",
+		Kind: history.KindReview, Source: history.SourceManual, Outcome: history.OK,
+		Reviewed: true, EndedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	screen, _ := render(t, a, map[string]string{
+		"acme/open#42":    gh.StateOpen,
+		"acme/history#44": gh.StateMerged,
+	})
+	// The author is a column of its own, so how much space sits between it and
+	// the label is whatever the widest row on screen needed.
+	for _, want := range []string{
+		`open #42 +@open-author`,
+		`active #43 +@active-author`,
+		`history #44 +@history-author`,
+	} {
+		if !regexp.MustCompile(want).MatchString(ui.StripANSI(screen)) {
+			t.Errorf("dashboard is missing %q:\n%s", want, screen)
+		}
 	}
 }
 
@@ -304,11 +418,14 @@ func TestOpenSectionStopsAtTheWindowAndTheLimit(t *testing.T) {
 		r.Mark(state.OK, "")
 		r.At = old
 	})
+	ends := map[string]string{}
 	for i := range openLimit + 5 {
-		record(t, a, fmt.Sprintf("acme/web#%d", i+1), func(r *state.Record) { r.Mark(state.OK, "") })
+		key := fmt.Sprintf("acme/web#%d", i+1)
+		record(t, a, key, func(r *state.Record) { r.Mark(state.OK, "") })
+		ends[key] = gh.StateOpen
 	}
 
-	screen, _ := render(t, a, nil)
+	screen, _ := render(t, a, ends)
 	open := sectionOf(t, screen, "OPEN")
 	if strings.Contains(open, "api #1") {
 		t.Errorf("a month old review is still listed as open:\n%s", screen)
@@ -359,6 +476,21 @@ func TestDashboardDoesNotMeasureCache(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsAutoMergeConfiguration(t *testing.T) {
+	a := testApp(t)
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(ui.StripANSI(screen), "auto-merge off") {
+		t.Fatalf("dashboard did not show the safe default:\n%s", screen)
+	}
+
+	a.cfg.AutoMergeAgent = true
+	a.cfg.AutoMergeBabysit = true
+	screen, _ = render(t, a, nil)
+	if !strings.Contains(ui.StripANSI(screen), "auto-merge agent+babysit (merge commit)") {
+		t.Fatalf("dashboard did not name the enabled sources:\n%s", screen)
+	}
+}
+
 // A fix loop started from a terminal never touches the state file and never
 // takes a review slot. The run cache is the only place it exists, so a
 // dashboard that only reads the state file shows nothing while one runs for
@@ -400,6 +532,22 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	}
 	if len(shown) != 1 || shown[0] != "acme/api#42" {
 		t.Errorf("shown = %v, want the fix loop key for end-state tracking", shown)
+	}
+}
+
+func TestDashboardShowsDivergenceAnalysisPhase(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	babysit(t, a, loop.Progress{
+		PID: 999999, Repo: "acme/api", Number: 42, Title: "tenant scoping",
+		StartedAt: now.Add(-90 * time.Minute), MaxIter: 12, MaxCIFixes: 3,
+		Round: 12, Phase: loop.PhaseDivergence, Since: now.Add(-2 * time.Minute),
+		CI: loop.CIGreen, Reviewed: true, Blockers: 1, Critical: 0, Commits: 5,
+	})
+
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(screen, "analyzing divergence") {
+		t.Fatalf("divergence phase is missing from dashboard:\n%s", screen)
 	}
 }
 
@@ -540,7 +688,7 @@ func TestDashboardCrossesOutMergedPullRequests(t *testing.T) {
 
 	screen, _ := render(t, a, map[string]string{
 		"acme/api#1": gh.StateMerged,
-		"acme/api#2": gh.StateOpen,
+		"acme/api#2": gh.StateAutoMerge,
 		"acme/api#3": gh.StateClosed,
 	})
 
@@ -559,6 +707,9 @@ func TestDashboardCrossesOutMergedPullRequests(t *testing.T) {
 	if strings.Contains(open, "merged") {
 		t.Errorf("an open pull request was labelled merged: %q", open)
 	}
+	if !strings.Contains(open, "auto-merge queued") {
+		t.Errorf("an auto-merge request was not marked: %q", open)
+	}
 
 	// Closed without merging is not a success and must not read like one.
 	closed := lineWith(t, screen, "api #3")
@@ -570,8 +721,8 @@ func TestDashboardCrossesOutMergedPullRequests(t *testing.T) {
 	}
 }
 
-// Nothing may depend on the lookup having happened: watch draws its first frame
-// before GitHub has answered, and the answer never arrives when gh is missing.
+// A cache miss is not evidence that a pull request is open. The first frame
+// must say that GitHub is being checked without inventing work for the user.
 func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 	a := testApp(t)
 	record(t, a, "acme/api#1", func(r *state.Record) {
@@ -582,8 +733,12 @@ func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 	if strings.Contains(screen, "\x1b[9m") {
 		t.Errorf("something was struck out without a known state:\n%s", screen)
 	}
-	if !strings.Contains(screen, "api #1") {
-		t.Errorf("the pull request went missing:\n%s", screen)
+	open := sectionOf(t, screen, "OPEN")
+	if strings.Contains(open, "api #1") {
+		t.Errorf("an unknown pull request was reported as open:\n%s", screen)
+	}
+	if !strings.Contains(open, "checking GitHub for 1 reviewed PR") {
+		t.Errorf("the unknown state was not explained:\n%s", screen)
 	}
 }
 
@@ -609,17 +764,21 @@ func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
 	}
 
 	screen, shown := render(t, a, nil)
-	historySection := sectionOf(t, screen, "HISTORY")
-	if got := strings.Count(historySection, "api #42"); got != 2 {
+	historySection := ui.StripANSI(sectionOf(t, screen, "HISTORY"))
+	// The runs on one pull request share a line, and that line says how many
+	// they were: the log keeps them apart, the screen just does not spend a row
+	// each on eight reviews of the same branch.
+	if got := strings.Count(historySection, "api #42"); got != 1 {
 		t.Errorf("two runs on one pull request produced %d lines:\n%s", got, screen)
 	}
 	// Newest first.
 	if strings.Index(historySection, "web #7") > strings.Index(historySection, "api #42") {
 		t.Errorf("the history is not newest first:\n%s", screen)
 	}
-	for _, want := range []string{"fix, 3 rounds", "0B 2C 0S", "reviewer-2 timed out"} {
-		if !strings.Contains(screen, want) {
-			t.Errorf("history is missing %q:\n%s", want, screen)
+	// The group reports its newest run, which is the fix loop, and the count.
+	for _, want := range []string{"2 runs", "nothing found", "reviewer-2 timed out"} {
+		if !strings.Contains(historySection, want) {
+			t.Errorf("history is missing %q:\n%s", want, historySection)
 		}
 	}
 	if !slices.Contains(shown, "acme/web#7") {
@@ -672,6 +831,37 @@ func TestDashboardHonoursTheConfiguredHistorySize(t *testing.T) {
 	}
 }
 
+func TestDashboardAppliesHistorySizeAfterGroupingRuns(t *testing.T) {
+	a := testApp(t)
+	a.cfg.History = 3
+	now := time.Now()
+	for i, key := range []string{
+		"acme/oldest#1",
+		"acme/older#2",
+		"acme/repeated#3",
+		"acme/repeated#3",
+		"acme/repeated#3",
+		"acme/repeated#3",
+	} {
+		if err := history.Append(a.p.HistoryFile, history.Run{
+			Key: key, Kind: history.KindReview, Outcome: history.OK,
+			Reviewed: true, EndedAt: now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	historySection := sectionOf(t, mustRender(t, a, 140, nil), "HISTORY")
+	for _, want := range []string{"repeated #3", "older #2", "oldest #1"} {
+		if !strings.Contains(historySection, want) {
+			t.Errorf("history is missing %q:\n%s", want, historySection)
+		}
+	}
+	if got := strings.Count(historySection, " #"); got != 3 {
+		t.Errorf("HISTORY=3 listed %d pull requests:\n%s", got, historySection)
+	}
+}
+
 // Upgrading to a build that keeps a log must not show an empty screen for
 // everything the agent did before it existed.
 func TestDashboardFallsBackToTheStateFileWhileTheLogIsEmpty(t *testing.T) {
@@ -694,7 +884,10 @@ func TestDashboardFallsBackToTheStateFileWhileTheLogIsEmpty(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	screen, _ = render(t, a, nil)
+	screen, _ = render(t, a, map[string]string{
+		"acme/api#42": gh.StateOpen,
+		"acme/web#7":  gh.StateMerged,
+	})
 	if !strings.Contains(screen, "web #7") {
 		t.Errorf("the logged run is missing:\n%s", screen)
 	}
@@ -756,6 +949,7 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	longKey := "acme/" + strings.Repeat("r", 100) + "#1"
 	record(t, a, longKey, func(r *state.Record) {
 		r.Title = strings.Repeat("a very long german pull request title ", 6)
+		r.Author = strings.Repeat("a", 39)
 		r.Mark(state.Running, "")
 	})
 	record(t, a, "acme/api#2", func(r *state.Record) {
@@ -767,7 +961,7 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	now := time.Now()
 	babysit(t, a, loop.Progress{
 		PID: 999999, Repo: "acme/api", Number: 3,
-		Title:     strings.Repeat("ein sehr langer deutscher Titel ", 6),
+		Title: strings.Repeat("ein sehr langer deutscher Titel ", 6), Author: strings.Repeat("b", 39),
 		StartedAt: now.Add(-25 * time.Hour), MaxIter: 12, MaxCIFixes: 3,
 		Round: 12, Phase: loop.PhaseCIFix, Since: now.Add(-25 * time.Hour),
 		CI: loop.CIRed, CIFix: 3, Reviewed: true, Blockers: 12, Critical: 12,
@@ -778,8 +972,15 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	// every column to its right out past the edge of the screen.
 	record(t, a, "acme/web#4", func(r *state.Record) {
 		r.Title = "✨ " + strings.Repeat("日本語のタイトル ", 8)
+		r.Author = "example-user"
 		r.Mark(state.Pending, "waiting")
 	})
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/history#5", Author: strings.Repeat("h", 39), Kind: history.KindReview,
+		Outcome: history.Failed, Reason: strings.Repeat("failure detail ", 8), EndedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Both sides of the two column threshold, and a terminal wider than the
 	// layout cap, where lines must stop at the cap rather than at the edge.
@@ -846,4 +1047,137 @@ func lineWith(t *testing.T, screen, want string) string {
 	}
 	t.Fatalf("no line contains %q:\n%s", want, screen)
 	return ""
+}
+
+// columnOf is the screen column want starts in, which is what alignment is
+// judged by. Byte offsets say nothing about it: the marks and the ellipsis are
+// multi byte, and a title in Japanese is half as many runes as columns.
+func columnOf(line, want string) int {
+	plain := ui.StripANSI(line)
+	i := strings.Index(plain, want)
+	if i < 0 {
+		return -1
+	}
+	return ui.Cells(plain[:i])
+}
+
+// The bug this table replaced: the identity column was sized per line, wide
+// when GitHub had told us who opened the pull request and eighteen columns
+// narrower when it had not, so a result landed at one of two offsets depending
+// on something the result has nothing to do with.
+func TestHistoryColumnsDoNotMoveWithTheAuthor(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for i, author := range []string{"example-user", "", "other-user", ""} {
+		if err := history.Append(a.p.HistoryFile, history.Run{
+			Key: fmt.Sprintf("acme/api#%d", 40+i), Author: author,
+			Kind: history.KindReview, Outcome: history.OK, Reviewed: true,
+			EndedAt: now.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	section := sectionOf(t, mustRender(t, a, 140, nil), "HISTORY")
+	var offsets []int
+	for _, line := range strings.Split(section, "\n")[1:] {
+		offsets = append(offsets, columnOf(line, "nothing found"))
+	}
+	if len(offsets) != 4 {
+		t.Fatalf("expected four history lines, got %d:\n%s", len(offsets), section)
+	}
+	for _, got := range offsets {
+		if got != offsets[0] {
+			t.Errorf("the result column moves between lines, offsets %v:\n%s", offsets, section)
+			break
+		}
+	}
+}
+
+// Every section draws the same two leading columns at the same width, so a run
+// in flight and a run that finished can be read as one list.
+func TestSectionsShareTheIdentityColumns(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/open#42", func(r *state.Record) {
+		r.Title = "still open"
+		r.Author = "example-user"
+		r.Mark(state.OK, "")
+	})
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/a-much-longer-repository#7", Author: "other-user",
+		Kind: history.KindReview, Outcome: history.OK, Reviewed: true, EndedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	screen := mustRender(t, a, 140, map[string]string{"acme/open#42": gh.StateOpen})
+	open := columnOf(lineWith(t, screen, "open #42"), "@example-user")
+	past := columnOf(lineWith(t, screen, "a-much-longer-repository #7"), "@other-user")
+	if open < 0 || past < 0 {
+		t.Fatalf("an author column is missing:\n%s", screen)
+	}
+	// The history line carries a time column the open line does not, so the two
+	// start at different offsets; what has to match is the width the label
+	// column was given, which is the distance from the label to the author.
+	openLabel := columnOf(lineWith(t, screen, "open #42"), "open #42")
+	pastLabel := columnOf(lineWith(t, screen, "a-much-longer-repository #7"), "a-much-longer-repository #7")
+	if open-openLabel != past-pastLabel {
+		t.Errorf("the label column is %d wide in OPEN and %d in HISTORY:\n%s",
+			open-openLabel, past-pastLabel, screen)
+	}
+}
+
+// Repeated runs on one pull request share a line, and that line still says a
+// run failed. Losing that is how the state file's one record per pull request
+// used to present a branch that failed twice as a clean review.
+func TestHistoryGroupsRunsAndKeepsFailuresVisible(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for i, run := range []history.Run{
+		{Outcome: history.Failed, Reason: "reviewer-2 timed out"},
+		{Outcome: history.Failed, Reason: "reviewer-1 timed out"},
+		{Outcome: history.OK, Reviewed: true},
+	} {
+		run.Key, run.Kind = "acme/api#42", history.KindReview
+		run.EndedAt = now.Add(time.Duration(i) * time.Minute)
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	section := ui.StripANSI(sectionOf(t, mustRender(t, a, 140, nil), "HISTORY"))
+	if got := strings.Count(section, "api #42"); got != 1 {
+		t.Fatalf("three runs on one pull request produced %d lines:\n%s", got, section)
+	}
+	if !strings.Contains(section, "3 runs, 2 failed") {
+		t.Errorf("the group does not say what it collapsed:\n%s", section)
+	}
+	// The newest run succeeded, so that is what the mark reports.
+	if !strings.Contains(section, "nothing found") {
+		t.Errorf("the group does not report its newest run:\n%s", section)
+	}
+}
+
+func mustRender(t *testing.T, a *app, width int, ends map[string]string) string {
+	t.Helper()
+	var b strings.Builder
+	a.dashboard(&ui.Writer{Out: &b, Width: width}, ends)
+	return b.String()
+}
+
+// A fix loop on a branch has no number and no author, but it does sit in the
+// label column, so it has to be measured with everything else. Left out, it
+// was cut to a width taken from rows it has nothing to do with, and on a frame
+// holding nothing else there was no width to be cut to at all.
+func TestBranchRunKeepsItsLabel(t *testing.T) {
+	a := testApp(t)
+	babysit(t, a, loop.Progress{
+		PID: os.Getpid(), Repo: "acme/api", Branch: "feature/crumb-tray",
+		StartedAt: time.Now(), MaxIter: 4,
+	})
+
+	active := ui.StripANSI(sectionOf(t, mustRender(t, a, 140, nil), "ACTIVE"))
+	if !strings.Contains(active, "api feature/crumb-tray") {
+		t.Errorf("the branch label was cut away:\n%s", active)
+	}
 }

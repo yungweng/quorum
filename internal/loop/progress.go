@@ -19,11 +19,12 @@ const ProgressFile = "progress.json"
 // not always the only thing happening: the first review runs in the background
 // while the pipeline waits out the initial CI.
 const (
-	PhaseStarting = "starting"
-	PhaseCI       = "ci"
-	PhaseReview   = "review"
-	PhaseFix      = "fix"
-	PhaseCIFix    = "ci-fix"
+	PhaseStarting   = "starting"
+	PhaseCI         = "ci"
+	PhaseReview     = "review"
+	PhaseFix        = "fix"
+	PhaseCIFix      = "ci-fix"
+	PhaseDivergence = "divergence"
 )
 
 // Check states the progress file records. Empty means nothing is known yet.
@@ -54,6 +55,7 @@ type Progress struct {
 	Repo   string `json:"repo"`
 	Number int    `json:"number"`
 	Title  string `json:"title,omitempty"`
+	Author string `json:"author,omitempty"`
 	Branch string `json:"branch,omitempty"`
 
 	StartedAt time.Time `json:"started_at"`

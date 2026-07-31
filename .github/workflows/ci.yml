@@ -36,19 +36,13 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Check formatting
-        run: |
-          UNFORMATTED=$(gofmt -l .)
-          if [[ -n "$UNFORMATTED" ]]; then
-            echo "::error::Run gofmt on these files:"
-            echo "$UNFORMATTED"
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: Test with race detector
-        run: go test -race ./...
+        run: make test
 
       - name: Build
-        run: go build ./...
+        run: make build
 
       - name: Smoke-test CLI
         run: |

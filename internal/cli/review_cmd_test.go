@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/history"
+	"github.com/yungweng/quorum/internal/review"
 )
 
 func TestResolveReviewNumber(t *testing.T) {
@@ -112,5 +113,21 @@ func TestBranchReviewCreatesAHistoryRun(t *testing.T) {
 	if run.Key != "acme/api#branch:feature/crumb-tray" ||
 		run.Branch != "feature/crumb-tray" {
 		t.Fatalf("history run = %+v", run)
+	}
+}
+
+func TestManualReviewMergeFailureKeepsReviewedHistory(t *testing.T) {
+	rep := &termReporter{number: 42, title: "reviewed change", author: "example-user"}
+	reason := "auto-merge failed: permission denied"
+	run := rep.historyRun("acme/api", time.Now(), history.OK, reason, &review.Result{
+		CommentURL: "https://example.invalid/comment/42",
+		Findings:   review.Findings{PR: 42, Suggestions: 2},
+	})
+
+	if run.Outcome != history.OK || !run.Reviewed || run.Reason != reason {
+		t.Fatalf("history run = %+v", run)
+	}
+	if run.CommentURL == "" || run.Suggestions != 2 {
+		t.Fatalf("review result was not preserved: %+v", run)
 	}
 }

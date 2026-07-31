@@ -58,6 +58,10 @@ type Config struct {
 	MaxIter    int
 	MaxCIFixes int
 	FixTimeout time.Duration
+	// DivergenceScan runs one read-only analysis after MaxIter is exhausted.
+	// Escalation targets are GitHub users or org/team slugs without a leading @.
+	DivergenceScan       bool
+	DivergenceEscalateTo []string
 	// Sandboxed opts the fix sessions out of
 	// --dangerously-bypass-approvals-and-sandbox. They then run under the
 	// user's own codex config, which must allow commands, network and push or
@@ -68,6 +72,15 @@ type Config struct {
 	// review: "review" posts one and stops, "babysit" runs the full fix loop.
 	// Only possible now that both live in one binary.
 	AgentAction string
+
+	// Auto-merge is opt-in per source. An agent run uses AutoMergeAgent even
+	// when AgentAction is "babysit"; the other two fields only affect commands
+	// started explicitly in a terminal. AutoMergeTimeout bounds the wait for
+	// checks and mergeability; zero leaves it bounded only by the run context.
+	AutoMergeAgent   bool
+	AutoMergeReview  bool
+	AutoMergeBabysit bool
+	AutoMergeTimeout time.Duration
 
 	Notify bool
 
@@ -115,7 +128,8 @@ func Default() Config {
 		MaxCIFixes: 3,
 		FixTimeout: 2 * time.Hour,
 
-		AgentAction: ActionReview,
+		AgentAction:      ActionReview,
+		AutoMergeTimeout: 2 * time.Hour,
 
 		Notify:  true,
 		Unknown: map[string]string{},
@@ -303,12 +317,24 @@ func (c *Config) set(key, value string) {
 		c.MaxCIFixes = intOr(value, c.MaxCIFixes)
 	case "FIX_TIMEOUT":
 		c.FixTimeout = durationOr(value, c.FixTimeout)
+	case "DIVERGENCE_SCAN":
+		c.DivergenceScan = truthy(value)
+	case "DIVERGENCE_ESCALATE_TO":
+		c.DivergenceEscalateTo = fields(value)
 	case "SANDBOXED":
 		c.Sandboxed = truthy(value)
 	case "AGENT_ACTION":
 		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
 			c.AgentAction = v
 		}
+	case "AUTO_MERGE_AGENT":
+		c.AutoMergeAgent = truthy(value)
+	case "AUTO_MERGE_REVIEW":
+		c.AutoMergeReview = truthy(value)
+	case "AUTO_MERGE_BABYSIT":
+		c.AutoMergeBabysit = truthy(value)
+	case "AUTO_MERGE_TIMEOUT":
+		c.AutoMergeTimeout = durationOr(value, c.AutoMergeTimeout)
 	case "REVIEW_ARGS":
 		// Retired: it was passed verbatim to a separate binary that no longer
 		// exists. The only flag anyone used through it was --dry-run, so that
@@ -434,11 +460,21 @@ func (c Config) Render() string {
 	w("MAX_ITER=%d\t\t# review -> fix rounds before giving up\n", c.MaxIter)
 	w("MAX_CI_FIXES=%d\t\t# CI fix attempts per green-CI phase\n", c.MaxCIFixes)
 	w("FIX_TIMEOUT=%q\t\t# per codex fix step; keep above your CI runtime\n", FormatDuration(c.FixTimeout))
+	w("DIVERGENCE_SCAN=%s\t# analyze the round history after MAX_ITER\n", bit(c.DivergenceScan))
+	w("DIVERGENCE_ESCALATE_TO=%q\t# users or org/team slugs, without @\n",
+		strings.Join(c.DivergenceEscalateTo, " "))
 	w("SANDBOXED=%s\t\t# 1 uses your codex sandbox defaults instead of bypassing them\n\n", bit(c.Sandboxed))
 
 	w("# What the agent does with a pull request that asks for your review:\n")
 	w("# \"review\" posts a review and stops, \"babysit\" runs the full fix loop.\n")
 	w("AGENT_ACTION=%q\n\n", c.AgentAction)
+
+	w("# Approve a clean reviewed head and ask GitHub to merge it with a merge\n")
+	w("# commit once its branch rules pass. Each source is opt-in.\n")
+	w("AUTO_MERGE_AGENT=%s\n", bit(c.AutoMergeAgent))
+	w("AUTO_MERGE_REVIEW=%s\n", bit(c.AutoMergeReview))
+	w("AUTO_MERGE_BABYSIT=%s\n", bit(c.AutoMergeBabysit))
+	w("AUTO_MERGE_TIMEOUT=%q\t# wait for checks and mergeability; 0 disables timeout\n\n", FormatDuration(c.AutoMergeTimeout))
 
 	w("NOTIFY=%s\n", bit(c.Notify))
 

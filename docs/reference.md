@@ -59,6 +59,7 @@ PR CI and PR comments.
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
 | `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
+| `--divergence-scan` | Analyze all rounds after the limit, write a report, then stop | off |
 | `--sandboxed` | Use your codex sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
@@ -151,6 +152,7 @@ from the tools they replace.
 3  CI still red after --max-ci-fixes attempts
 4  not converged after --max-iter rounds
 5  a fix round produced no changes although findings remain
+6  the review/fix history contains incompatible decisions
 ```
 
 ## Configuration
@@ -196,9 +198,15 @@ FIX_EFFORT=""
 MAX_ITER=12
 MAX_CI_FIXES=3
 FIX_TIMEOUT="2h"         # per fix step; keep it above your CI runtime
+DIVERGENCE_SCAN=0        # analyze the current run after MAX_ITER, then stop
+DIVERGENCE_ESCALATE_TO="" # users or org/team slugs to mention, without @
 SANDBOXED=0
 
 AGENT_ACTION="review"    # or "babysit"
+AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects
+AUTO_MERGE_REVIEW=0      # manual quorum review runs
+AUTO_MERGE_BABYSIT=0     # manual quorum babysit runs
+AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
 NOTIFY=1
 ```
 
@@ -207,6 +215,40 @@ Zero disables the timeout it belongs to.
 
 `REVIEW_ARGS` and `MAX_CODEX` are retired. A `REVIEW_ARGS` that contains
 `--dry-run` still turns posting off; nothing else in it is read.
+
+### Auto-merge
+
+The three `AUTO_MERGE_*` settings are independent and default to `0`. The agent
+uses only `AUTO_MERGE_AGENT`, even when `AGENT_ACTION="babysit"`; `quorum
+review` and `quorum run` use `AUTO_MERGE_REVIEW`, and `quorum babysit` uses
+`AUTO_MERGE_BABYSIT`.
+
+`AUTO_MERGE_TIMEOUT` defaults to two hours. Set it above the longest protected
+check or merge queue wait in the repository. A value of `0` waits until the run
+is stopped.
+
+After a posted review with zero Blockers and zero Critical findings, quorum:
+
+1. confirms that GitHub still reports the exact reviewed head;
+2. submits an approval tied to that commit, unless the same user already
+   approved it; and
+3. calls GitHub's merge API with `merge_method=merge` and `sha=SHA`.
+
+Suggestions and Questions do not block. GitHub branch rules and required checks
+still apply; optional check failures do not block the merge wait. The merge is
+one atomic request for the reviewed SHA, so it fails rather than leaving a new
+request that could survive a later push. Target branches that require a merge
+queue are rejected before approval. Quorum never
+disables an existing auto-merge or merge-queue request because it cannot prove
+who created it. Repositories with merge commits disabled are also rejected
+before approval. It does not merge an own PR, a moved head, a branch-only run,
+`POST=0`, `--dry-run`, or an accepted dispute whose last review still contains
+Blockers or Critical findings.
+
+If branch requirements are still pending, Auto-Merge fails instead of queuing a
+persistent request. An Auto-Merge failure returns exit code 1. Agent runs record
+the review request as handled, so a failure after a successful review does not
+spend tokens repeating that review.
 
 ### Keeping the machine usable
 
@@ -221,32 +263,44 @@ shared dependency cache removed.
 - `NICE` lowers the priority of the whole review process tree.
 - `LOAD_LIMIT` is off by default. Turned on, it holds new reviews back while the
   machine is busy; they start on a later poll.
-- `HISTORY` is how many finished runs the dashboard lists. It counts runs, not
-  pull requests, so four reviews of the same one take four lines.
+- `HISTORY` is how many finished runs the dashboard reads. It counts runs, not
+  pull requests, so four reviews of the same one are four of the twenty; they
+  share one line on screen, which says how many they were.
 
 ## The dashboard
 
 `status` draws it once, `watch` redraws it every three seconds. Three sections,
 in the order the questions get asked:
 
-- **OPEN** is what is waiting for a person: pull requests with a finished
-  review that are still open, newest first, at most ten of them, with what the
-  review found and a link to the comment. A pull request drops out when GitHub
-  reports it merged or closed, while it is being reviewed again, and two weeks
-  after its last review. The two weeks matter because the state file keeps two
-  hundred records and most of them describe pull requests that were merged long
-  ago; where GitHub has not been asked, age is the only thing the dashboard
-  knows.
+- **OPEN** lists pull requests with a finished review that are still open,
+  newest first, at most ten of them, with what the review found and a link to
+  the comment. `auto-merge queued` means GitHub is waiting on branch rules or a
+  merge queue; the other entries still need a person. A pull request drops out
+  when GitHub reports it merged or closed, while it is being reviewed again,
+  and two weeks after its last review. The two weeks matter because the state
+  file keeps two hundred records and most of them describe pull requests that
+  were merged long ago; where GitHub has not been asked, age is the only thing
+  the dashboard knows.
 - **ACTIVE** is everything in flight, agent and terminal alike. Its count covers
   agent slots only.
-- **HISTORY** is one line per finished run, described below.
+- **HISTORY** is one line per pull request, newest first, reporting its newest
+  run. Where more than one run went into it, the line says how many there were
+  and how many failed, so a failure a later run fixed is not hidden by it. The
+  log behind the section is described below.
 
-Whether a pull request has been merged or closed is the one thing on this
-screen that has to come from GitHub. `watch` asks in the background, once for
-every visible pull request at a time, and keeps the previous answer when the
-call fails. `status` asks once before it draws, with a single attempt and a
-five second deadline, and falls back to listing everything recent when there is
-no answer: this is the only network call either command makes.
+All three sections draw the same columns at the same widths, measured from
+every row of the frame before any of it is printed. What a narrow terminal
+costs is fixed rather than shared out: the author column goes first and goes
+whole, then the explanation behind a result, and the repository and number
+last. A column that cannot keep a useful width is dropped rather than cut to a
+stub, on the grounds that a column which is gone is understood as gone.
+
+Whether a pull request is open, queued for Auto-Merge, merged or closed has to
+come from GitHub. `watch` asks in the background, once for every visible pull
+request at a time, and keeps the previous answer when the call fails. `status`
+asks once before it draws, with a single attempt and a five second deadline,
+and falls back to listing everything recent when there is no answer: this is
+the only network call either command makes.
 
 ## The history log
 

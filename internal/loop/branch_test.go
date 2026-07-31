@@ -59,6 +59,21 @@ func TestBranchReviewPinsThePipelineWorktreeHead(t *testing.T) {
 	}
 }
 
+func TestReviewPostingHonorsRunOptionAndBranchTarget(t *testing.T) {
+	r := &run{o: Options{Post: false}}
+	if r.reviewOptions().Post {
+		t.Fatal("disabled posting was enabled for a pull request review")
+	}
+	r.o.Post = true
+	if !r.reviewOptions().Post {
+		t.Fatal("enabled posting was disabled for a pull request review")
+	}
+	r.target.BranchOnly = true
+	if r.reviewOptions().Post {
+		t.Fatal("posting was enabled for a branch-only review")
+	}
+}
+
 func TestBranchDirenvRequiresAnExplicitOverrideForTargetChanges(t *testing.T) {
 	for _, allow := range []bool{false, true} {
 		t.Run(map[bool]string{false: "refused", true: "allowed"}[allow], func(t *testing.T) {

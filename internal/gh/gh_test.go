@@ -118,6 +118,112 @@ func TestRunDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 }
 
+func TestApproveDoesNotRetryAmbiguousPost(t *testing.T) {
+	bin, countFile := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
+	_, err := testClient(bin).ApproveHead(context.Background(), "acme/api", 42, "abc123", "approved")
+	if err == nil {
+		t.Fatal("a timed-out approval was reported as success")
+	}
+	if got := calls(t, countFile); got != 1 {
+		t.Fatalf("approval POST ran %d times, want one", got)
+	}
+}
+
+func TestApproveReturnsReviewID(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"id":99,"state":"APPROVED"}'`)
+	review, err := testClient(bin).ApproveHead(context.Background(), "acme/api", 42, "abc123", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.ID != 99 || review.State != "APPROVED" {
+		t.Fatalf("review = %+v", review)
+	}
+}
+
+func TestMergeHeadRejectsUnmergedResponse(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"merged":false,"message":"Base branch was modified"}'`)
+	err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "Base branch was modified") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMergePolicyChecksTheExactHead(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"mergeCommitAllowed"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
+  echo "unexpected arguments: $*" >&2
+  exit 1
+fi
+echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
+	required, allowed, err := testClient(bin).MergePolicy(context.Background(), "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !required {
+		t.Fatal("required merge queue was not detected")
+	}
+	if !allowed {
+		t.Fatal("allowed merge commits were not detected")
+	}
+}
+
+func TestWatchChecksClassifiesTransientFailure(t *testing.T) {
+	bin, _ := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
+	state, _, err := testClient(bin).WatchChecks(context.Background(), t.TempDir(), 42)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("err = %v, want ErrTransient", err)
+	}
+	if state != ChecksPending {
+		t.Fatalf("state = %v, want ChecksPending", state)
+	}
+}
+
+func TestWatchRequiredChecksFiltersOptionalChecks(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != "pr checks 42 --watch --fail-fast --required" ]]; then
+  echo "unexpected arguments: $*" >&2
+  exit 1
+fi
+echo 'required checks passed'`)
+	state, _, err := testClient(bin).WatchRequiredChecks(context.Background(), t.TempDir(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != ChecksPass {
+		t.Fatalf("state = %v, want ChecksPass", state)
+	}
+}
+
+func TestWatchRequiredChecksClassifiesNoRequiredChecks(t *testing.T) {
+	bin, _ := fakeGH(t, `echo "no required checks reported on the 'topic' branch" >&2; exit 1`)
+	state, _, err := testClient(bin).WatchRequiredChecks(context.Background(), t.TempDir(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != ChecksNone {
+		t.Fatalf("state = %v, want ChecksNone", state)
+	}
+}
+
+func TestWatchRequiredChecksDoesNotTreatFailedCheckTextAsTransient(t *testing.T) {
+	for _, output := range []string{
+		"integration timeout\tfail\t1m",
+		"HTTP 503 coverage\tfail\t1m",
+		"connection refused test\tcancel\t1m",
+	} {
+		t.Run(output, func(t *testing.T) {
+			bin, _ := fakeGH(t, "echo '"+output+"' >&2; exit 1")
+			state, _, err := testClient(bin).WatchRequiredChecks(context.Background(), t.TempDir(), 42)
+			if err != nil {
+				t.Fatalf("err = %v, want terminal check failure", err)
+			}
+			if state != ChecksFail {
+				t.Fatalf("state = %v, want ChecksFail", state)
+			}
+		})
+	}
+}
+
 // An empty body is not an empty result: gh prints [] when a search found
 // nothing, so silence means the call did not really work.
 func TestSearchEmptyOutputIsTransient(t *testing.T) {
@@ -238,6 +344,19 @@ func TestLatestReviewRequestReportsFailure(t *testing.T) {
 	}
 }
 
+func TestReviewsReadsConcatenatedPages(t *testing.T) {
+	bin, _ := fakeGH(t, `printf '%s\n%s\n' \
+  '[{"state":"APPROVED","commit_id":"head-1","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"example-user"}}]' \
+  '[{"state":"DISMISSED","commit_id":"head-2","user":{"login":"other-user"}}]'`)
+	reviews, err := testClient(bin).Reviews(context.Background(), "acme/api", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviews) != 2 || reviews[0].CommitID != "head-1" || reviews[0].SubmittedAt.IsZero() || reviews[1].State != "DISMISSED" {
+		t.Fatalf("reviews = %+v", reviews)
+	}
+}
+
 func TestTeamSlugsFor(t *testing.T) {
 	teams := []string{"crumbtray/bread-council", "Crumb-GmbH/dev-admins"}
 	got := TeamSlugsFor("crumbtray", teams)
@@ -257,13 +376,34 @@ func TestPRDetailsRejectsEmptyHead(t *testing.T) {
 	}
 }
 
+func TestPRDetailsReadsReviewDecision(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != *reviewDecision* || "$*" != *latestReviews* || "$*" != *baseRefName* || "$*" != *mergeStateStatus* || "$*" != *mergeable* ]]; then
+  echo 'review policy fields were not requested' >&2
+  exit 1
+fi
+echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","reviewDecision":"CHANGES_REQUESTED","latestReviews":[{"state":"CHANGES_REQUESTED","author":{"login":"example-reviewer"}}]}'`)
+	details, err := testClient(bin).PRDetails(context.Background(), "acme/api", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.ReviewDecision != "CHANGES_REQUESTED" {
+		t.Fatalf("review decision = %q", details.ReviewDecision)
+	}
+	if details.BaseRefName != "main" || len(details.LatestReviews) != 1 ||
+		details.LatestReviews[0].Author.Login != "example-reviewer" ||
+		details.Mergeable != "CONFLICTING" || details.MergeStateStatus != "DIRTY" {
+		t.Fatalf("details = %+v", details)
+	}
+}
+
 func TestPRStatesReadsABatch(t *testing.T) {
 	// One call, one alias per pull request, three different outcomes.
 	bin, countFile := fakeGH(t, `echo "$@" > `+t.TempDir()+`/args
 cat <<'JSON'
 {"data":{
   "p0":{"pullRequest":{"state":"MERGED"}},
-  "p1":{"pullRequest":{"state":"OPEN"}},
+  "p1":{"pullRequest":{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-07-31T08:00:00Z"},"mergeQueueEntry":null}},
   "p2":{"pullRequest":{"state":"CLOSED"}}
 }}
 JSON`)
@@ -274,7 +414,7 @@ JSON`)
 	}
 	want := map[string]string{
 		"crumbtray/toaster-api#2035": StateMerged,
-		"crumbtray/bagel-bot#392":    StateOpen,
+		"crumbtray/bagel-bot#392":    StateAutoMerge,
 		"acme/api#7":                 StateClosed,
 	}
 	for k, v := range want {
@@ -286,6 +426,17 @@ JSON`)
 	// requests are on screen.
 	if n := calls(t, countFile); n != 1 {
 		t.Errorf("made %d calls for %d pull requests, want 1", n, len(keys))
+	}
+}
+
+func TestPRStatesRecognisesMergeQueueEntry(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"data":{"p0":{"pullRequest":{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"position":2}}}}}'`)
+	got, err := testClient(bin).PRStates(context.Background(), []string{"acme/api#42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["acme/api#42"] != StateAutoMerge {
+		t.Errorf("state = %q, want %q", got["acme/api#42"], StateAutoMerge)
 	}
 }
 

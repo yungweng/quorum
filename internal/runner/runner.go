@@ -3,6 +3,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
@@ -42,10 +44,31 @@ type Runner struct {
 	DirenvBin string
 }
 
+// InvocationSource selects the auto-merge setting for a review run.
+type InvocationSource int
+
+const (
+	// InvocationAgent is a scheduled review started by the launchd agent.
+	InvocationAgent InvocationSource = iota
+	// InvocationManual is an explicit quorum run command.
+	InvocationManual
+)
+
+func (r *Runner) autoMergeEnabled(source InvocationSource) bool {
+	switch source {
+	case InvocationAgent:
+		return r.Cfg.AutoMergeAgent
+	case InvocationManual:
+		return r.Cfg.AutoMergeReview
+	default:
+		return false
+	}
+}
+
 // Review clones or refreshes the repository, reviews the pull request and
 // records the outcome. It runs in the detached child process that owns the
 // marker.
-func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, reqAt string) error {
+func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, author, reqAt string, source InvocationSource) error {
 	r.applyPriority()
 
 	clone, err := r.ensureClone(ctx, repo)
@@ -65,6 +88,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	r.Log.Printf("%s: reviewing %s (%s)", key, short(sha), title)
 	r.mutate(key, func(rec *state.Record) {
 		rec.Title = title
+		rec.Author = author
 		rec.Mark(state.Running, "")
 		rec.SHA = sha
 		rec.RunLog = runLog
@@ -78,18 +102,44 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	}
 
 	var (
-		findings review.Findings
-		runDir   string
-		runErr   error
+		findings          review.Findings
+		runDir            string
+		divergenceVerdict string
+		divergenceURL     string
+		runErr            error
 	)
 	switch action {
 	case config.ActionBabysit:
-		findings, runDir, runErr = r.babysit(ctx, key, clone, repo, number, runLog)
+		findings, runDir, divergenceVerdict, divergenceURL, runErr =
+			r.babysit(ctx, key, clone, repo, number, runLog)
 	default:
 		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, runLog)
 	}
 
 	if runErr == nil {
+		mergeStatus := ""
+		if automerge.Allowed(r.autoMergeEnabled(source), r.Cfg.Post, findings) {
+			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA)
+			if errors.Is(mergeErr, automerge.ErrMergeNotReady) {
+				r.Log.Printf("%s: waiting for required checks before merge", key)
+				r.recordAutoMergePending(key, runDir, findings)
+				retryResult, retryErr := r.retryAutoMergeAfterChecks(ctx, clone, repo, number, findings.HeadSHA, mergeResult)
+				mergeResult, mergeErr = retryResult, retryErr
+			}
+			mergeStatus = mergeResult.Status
+			if mergeErr != nil {
+				reason := fmt.Sprintf("auto-merge failed: %v", mergeErr)
+				if mergeResult.ApprovalCreated {
+					reason = fmt.Sprintf("auto-merge failed after the approval was posted: %v", mergeErr)
+				} else if mergeResult.ApprovalAttempted {
+					reason = fmt.Sprintf("auto-merge failed and GitHub's approval result is unknown: %v", mergeErr)
+				}
+				r.Log.Printf("%s: FAILED, %s", key, reason)
+				r.recordAutoMergeFailure(key, reqAt, runDir, findings, reason)
+				r.notify(fmt.Sprintf("Auto-merge failed: %s#%d", nameOf(repo), number), reason, urlOf(findings))
+				return fmt.Errorf("%s: %s", key, reason)
+			}
+		}
 		r.Log.Printf("%s: done, %s -> %s", key, findings.Summary(), orDash(urlOf(findings)))
 		r.mutate(key, func(rec *state.Record) {
 			rec.Mark(state.OK, "")
@@ -104,18 +154,98 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			// Recording the request timestamp is what marks it as handled.
 			rec.ReqAt = reqAt
 		})
-		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number),
-			summaryLine(findings), urlOf(findings))
+		note := summaryLine(findings)
+		switch mergeStatus {
+		case automerge.Merged:
+			note += "; merged"
+		}
+		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
 		return nil
 	}
 
 	reason := runErr.Error()
+	if divergenceVerdict != "" {
+		r.Log.Printf("%s: STOPPED, divergence analysis = %s (log: %s)", key, divergenceVerdict, runLog)
+		recordedSHA := findings.HeadSHA
+		if recordedSHA == "" {
+			recordedSHA = sha
+		}
+		r.recordDivergenceResult(key, recordedSHA, reqAt, runDir, runLog, divergenceURL, findings, reason)
+		r.notify(fmt.Sprintf("Review loop stopped: %s#%d", nameOf(repo), number),
+			"divergence analysis: "+divergenceVerdict, divergenceURL)
+		return fmt.Errorf("%s: %s", key, reason)
+	}
 	r.Log.Printf("%s: FAILED, %s (log: %s)", key, reason, runLog)
 	// The request timestamp stays unrecorded on purpose, so the next poll
 	// retries until MaxRetries is reached.
 	r.recordFailureWith(key, sha, runDir, reason, runLog)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
+}
+
+func (r *Runner) recordDivergenceResult(key, sha, reqAt, runDir, runLog, reportURL string,
+	findings review.Findings, reason string,
+) {
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.Failed, reason)
+		rec.SHA = sha
+		rec.RunDir = runDir
+		rec.RunLog = runLog
+		rec.CommentURL = reportURL
+		if rec.CommentURL == "" {
+			rec.CommentURL = urlOf(findings)
+		}
+		rec.Blockers = state.Num(findings.Blockers)
+		rec.Critical = state.Num(findings.Critical)
+		rec.Suggestions = state.Num(findings.Suggestions)
+		rec.Questions = state.Num(findings.Questions)
+		rec.Fails = 0
+		// Phase 1 is report-only. Mark this request handled so the agent
+		// cannot turn it into an unbounded sequence of fresh runs.
+		rec.ReqAt = reqAt
+	})
+}
+
+// recordAutoMergePending preserves the completed review while the same
+// detached run waits for protected-branch checks. ReqAt remains unset until
+// the merge either succeeds or reaches a terminal failure.
+func (r *Runner) recordAutoMergePending(key, runDir string, findings review.Findings) {
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.Running, "waiting for required checks before merge")
+		rec.SHA = findings.HeadSHA
+		rec.RunDir = runDir
+		rec.CommentURL = urlOf(findings)
+		rec.Blockers = state.Num(findings.Blockers)
+		rec.Critical = state.Num(findings.Critical)
+		rec.Suggestions = state.Num(findings.Suggestions)
+		rec.Questions = state.Num(findings.Questions)
+	})
+}
+
+func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result) (automerge.Result, error) {
+	return r.retryAutoMergeAfterChecksWithin(ctx, clone, repo, number, sha, initial, r.Cfg.AutoMergeTimeout)
+}
+
+func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result, waitTimeout time.Duration) (automerge.Result, error) {
+	return automerge.RetryWhenReady(ctx, r.GH, clone, repo, number, sha, initial, waitTimeout)
+}
+
+// recordAutoMergeFailure preserves the successful review and records the
+// failed final action as its reason. ReqAt marks this request handled, while
+// resetting Fails keeps merge errors out of the review retry budget.
+func (r *Runner) recordAutoMergeFailure(key, reqAt, runDir string, findings review.Findings, reason string) {
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.OK, reason)
+		rec.SHA = findings.HeadSHA
+		rec.RunDir = runDir
+		rec.CommentURL = urlOf(findings)
+		rec.Blockers = state.Num(findings.Blockers)
+		rec.Critical = state.Num(findings.Critical)
+		rec.Suggestions = state.Num(findings.Suggestions)
+		rec.Questions = state.Num(findings.Questions)
+		rec.ReqAt = reqAt
+		rec.Fails = 0
+	})
 }
 
 // reviewOnce posts one review and stops.
@@ -147,10 +277,10 @@ func (r *Runner) reviewOnce(ctx context.Context, key, clone, repo string, number
 // This is what the three separate tools could not do: the daemon knew how to
 // start a review but had no way to reach the fix pipeline, because that was a
 // different binary with its own idea of where things live.
-func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, error) {
+func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, string, string, error) {
 	logFile, err := os.Create(runLog)
 	if err != nil {
-		return review.Findings{}, "", err
+		return review.Findings{}, "", "", "", err
 	}
 	defer logFile.Close()
 
@@ -165,30 +295,38 @@ func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number in
 		In: nil,
 	}
 	res, err := pipe.Run(ctx, loop.Options{
-		Repo:          repo,
-		RepoRoot:      clone,
-		Number:        number,
-		Model:         r.Cfg.FixModel,
-		Effort:        r.Cfg.FixEffort,
-		Reviewers:     r.Cfg.Reviewers,
-		ReviewModel:   r.Cfg.ReviewModel,
-		ReviewEffort:  r.Cfg.ReviewEffort,
-		MaxIter:       r.Cfg.MaxIter,
-		MaxCIFixes:    r.Cfg.MaxCIFixes,
-		FixTimeout:    r.Cfg.FixTimeout,
-		Bypass:        !r.Cfg.Sandboxed,
-		Interactive:   false,
-		UseDirenv:     true,
-		RunsDir:       r.P.BabysitRuns,
-		ReviewRunsDir: r.P.ReviewRuns,
-		DepsDir:       r.P.DepsCache,
-		CodexBin:      r.CodexBin,
-		DirenvBin:     r.DirenvBin,
+		Repo:                 repo,
+		RepoRoot:             clone,
+		Number:               number,
+		Model:                r.Cfg.FixModel,
+		Effort:               r.Cfg.FixEffort,
+		Reviewers:            r.Cfg.Reviewers,
+		ReviewModel:          r.Cfg.ReviewModel,
+		ReviewEffort:         r.Cfg.ReviewEffort,
+		MaxIter:              r.Cfg.MaxIter,
+		MaxCIFixes:           r.Cfg.MaxCIFixes,
+		FixTimeout:           r.Cfg.FixTimeout,
+		DivergenceScan:       r.Cfg.DivergenceScan,
+		DivergenceEscalateTo: append([]string(nil), r.Cfg.DivergenceEscalateTo...),
+		DivergenceTimeout:    r.Cfg.ReviewTimeout,
+		Post:                 r.Cfg.Post,
+		Bypass:               !r.Cfg.Sandboxed,
+		Interactive:          false,
+		UseDirenv:            true,
+		RunsDir:              r.P.BabysitRuns,
+		ReviewRunsDir:        r.P.ReviewRuns,
+		DepsDir:              r.P.DepsCache,
+		CodexBin:             r.CodexBin,
+		DirenvBin:            r.DirenvBin,
 	})
 	if res == nil {
-		return review.Findings{}, "", err
+		return review.Findings{}, "", "", "", err
 	}
-	return res.LastFindings, res.RunDir, err
+	verdict := ""
+	if res.Divergence != nil {
+		verdict = res.Divergence.Verdict
+	}
+	return res.LastFindings, res.RunDir, verdict, res.DivergenceCommentURL, err
 }
 
 // reviewOptions maps the daemon's configuration onto a review run.

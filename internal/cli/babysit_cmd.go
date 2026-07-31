@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
@@ -21,7 +23,7 @@ import (
 
 var babysitBoolFlags = map[string]bool{
 	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
-	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true,
+	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true, "divergence-scan": true,
 	"h": true, "help": true,
 }
 
@@ -69,19 +71,23 @@ func (a *app) cmdBabysit(argv []string) int {
 
 	o := loop.Options{
 		Repo: repo, RepoRoot: repoRoot, Number: number,
-		Context:       strings.Join(extraContext, " "),
-		Model:         a.cfg.FixModel,
-		Effort:        a.cfg.FixEffort,
-		Reviewers:     a.cfg.Reviewers,
-		ReviewModel:   a.cfg.ReviewModel,
-		ReviewEffort:  a.cfg.ReviewEffort,
-		Bypass:        !a.cfg.Sandboxed,
-		UseDirenv:     t.Direnv != "",
-		RunsDir:       a.p.BabysitRuns,
-		ReviewRunsDir: a.p.ReviewRuns,
-		DepsDir:       a.p.DepsCache,
-		CodexBin:      t.Codex,
-		DirenvBin:     t.Direnv,
+		Context:              strings.Join(extraContext, " "),
+		Model:                a.cfg.FixModel,
+		Effort:               a.cfg.FixEffort,
+		Reviewers:            a.cfg.Reviewers,
+		ReviewModel:          a.cfg.ReviewModel,
+		ReviewEffort:         a.cfg.ReviewEffort,
+		Bypass:               !a.cfg.Sandboxed,
+		UseDirenv:            t.Direnv != "",
+		RunsDir:              a.p.BabysitRuns,
+		ReviewRunsDir:        a.p.ReviewRuns,
+		DepsDir:              a.p.DepsCache,
+		CodexBin:             t.Codex,
+		DirenvBin:            t.Direnv,
+		Post:                 a.cfg.Post,
+		DivergenceScan:       a.cfg.DivergenceScan || args.boolean("divergence-scan"),
+		DivergenceEscalateTo: slices.Clone(a.cfg.DivergenceEscalateTo),
+		DivergenceTimeout:    a.cfg.ReviewTimeout,
 	}
 	if o.MaxIter, err = args.intVal(a.cfg.MaxIter, "max-iter"); err != nil {
 		return a.die("%v", err)
@@ -124,10 +130,11 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 	rep.status = a.out.Status()
 
+	client := a.newGH(t.GH)
 	pipe := &loop.Pipeline{
-		GH:     a.newGH(t.GH),
+		GH:     client,
 		Git:    a.newGit(t.Git),
-		Review: &review.Runner{GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: review.NopReporter{}},
+		Review: &review.Runner{GH: client, Git: a.newGit(t.Git), Rep: review.NopReporter{}},
 		Rep:    rep,
 	}
 	// Interactive gates need a real terminal. Handing them a closed or piped
@@ -141,10 +148,19 @@ func (a *app) cmdBabysit(argv []string) int {
 	started := time.Now()
 	res, err := pipe.Run(ctx, o)
 	rep.status.Clear()
+	mergeStatus := ""
+	var mergeErr error
+	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMergeBabysit, a.cfg.Post, res.LastFindings) {
+		mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
+		mergeStatus, mergeErr = mergeResult.Status, finishErr
+		if mergeErr != nil {
+			err = mergeErr
+		}
+	}
 
 	a.logRun(babysitHistory(repo, number, started, res, err))
 	if res != nil {
-		rep.summary(res)
+		rep.summary(res, mergeStatus, mergeErr)
 	}
 	if err != nil {
 		return a.babysitExit(err)
@@ -169,6 +185,7 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 	if res != nil {
 		number = res.PR.Number
 		run.Title = res.PR.Title
+		run.Author = res.PR.Author.Login
 		if res.BranchOnly {
 			run.Branch = res.PR.HeadRefName
 		}
@@ -183,10 +200,18 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 			run.Critical = res.LastFindings.Critical
 			run.Suggestions = res.LastFindings.Suggestions
 			run.Questions = res.LastFindings.Questions
+			if res.LastFindings.CommentURL != nil {
+				run.CommentURL = *res.LastFindings.CommentURL
+			}
+			if res.DivergenceCommentURL != "" {
+				run.CommentURL = res.DivergenceCommentURL
+			}
 		}
 		if res.Converged {
 			run.Outcome = history.Converged
-			run.Reason = ""
+			if err == nil {
+				run.Reason = ""
+			}
 		}
 	}
 	if repo == "" || number == 0 && run.Branch == "" {
@@ -230,6 +255,8 @@ func (a *app) babysitExit(err error) int {
 		return exitNotConverged
 	case errors.Is(err, loop.ErrNoProgress):
 		return exitNoProgress
+	case errors.Is(err, loop.ErrDiverged):
+		return exitDiverged
 	default:
 		return exitError
 	}
@@ -257,6 +284,7 @@ Options:
   --max-iter N           Max review->fix rounds. Default: %d
   --max-ci-fixes N       Max PR CI fix attempts per green-CI phase. Default: %d
   --fix-timeout DUR      Kill a fix step that runs longer. Default: %s
+  --divergence-scan      Analyze the round history after --max-iter, then stop
   --sandboxed            Use your codex sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line
@@ -271,6 +299,7 @@ Exit codes:
   3  CI still red after --max-ci-fixes attempts
   4  review not converged after --max-iter rounds
   5  a fix round produced no changes although findings remain
+  6  the review/fix history contains incompatible decisions
 `, a.cfg.Reviewers, a.cfg.ReviewModel, a.cfg.ReviewEffort,
 		a.cfg.MaxIter, a.cfg.MaxCIFixes, durationText(a.cfg.FixTimeout))
 }
@@ -309,6 +338,9 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	limits := fmt.Sprintf("%d review rounds", h.MaxIter)
 	if !h.BranchOnly {
 		limits += fmt.Sprintf(", %d CI fixes", h.MaxCIFixes)
+	}
+	if h.DivergenceScan {
+		limits += ", divergence report at limit"
 	}
 	o.Row("limits", limits+o.Dim(fmt.Sprintf("  ·  %s per fix step", durationText(h.FixTimeout))))
 	o.Row("run dir", o.Link(o.Dim(filepath.Base(h.RunDir)), "file://"+h.RunDir))
@@ -401,7 +433,7 @@ func (l *loopTermReporter) Notify(title, body string) {
 }
 
 // summary prints the closing block of a run.
-func (l *loopTermReporter) summary(res *loop.Result) {
+func (l *loopTermReporter) summary(res *loop.Result, mergeStatus string, mergeErr error) {
 	o := l.out
 	fmt.Println()
 	o.Rule()
@@ -422,7 +454,20 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 			}
 		}
 	}
+	if res.Divergence != nil {
+		o.Row("analysis", res.Divergence.Verdict)
+		switch {
+		case res.DivergenceCommentURL != "":
+			o.Row("report", o.Link(o.Blue(res.DivergenceCommentURL), res.DivergenceCommentURL))
+		case res.DivergenceReportPath != "":
+			o.Row("report", o.Link(o.Blue(res.DivergenceReportPath), "file://"+res.DivergenceReportPath))
+		}
+	}
 	switch {
+	case mergeErr != nil:
+		o.Row("result", o.Red(mergeErr.Error()))
+		o.Rule()
+		l.Notify("Auto-merge failed", fmt.Sprintf("%s ist sauber, konnte aber nicht gemerged werden", babysitTargetLabel(res)))
 	case res.Converged && res.DisputeAccepted:
 		result := "remaining findings disputed by Codex and accepted"
 		if !res.BranchOnly {
@@ -430,7 +475,14 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 		}
 		o.Row("result", o.Green(result))
 		if !res.BranchOnly {
-			fmt.Println("  Note: the review comment on the PR still lists the disputed findings.")
+			switch {
+			case res.DisputeCommentURL != "":
+				o.Row("rebuttal", o.Link(o.Blue(res.DisputeCommentURL), res.DisputeCommentURL))
+			case res.DisputeCommentPosted:
+				o.Row("rebuttal", o.Green("posted"))
+			default:
+				fmt.Println("  Note: the rebuttal could not be posted; it is included below.")
+			}
 		}
 		if res.DisputeText != "" {
 			for _, line := range strings.Split(res.DisputeText, "\n") {
@@ -445,8 +497,16 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 			result += ", CI green"
 		}
 		o.Row("result", o.Green(result))
+		switch mergeStatus {
+		case automerge.Merged:
+			o.Row("auto-merge", o.Green("merged"))
+		}
 		o.Rule()
 		l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
+	case res.Divergence != nil && res.Divergence.Verdict == loop.DivergenceDiverged:
+		o.Row("result", o.Red("diverged; manual decision required"))
+		o.Rule()
+		l.Notify("Diverged", fmt.Sprintf("%s braucht eine manuelle Designentscheidung", babysitTargetLabel(res)))
 	default:
 		o.Row("result", o.Red("not converged"))
 		o.Rule()

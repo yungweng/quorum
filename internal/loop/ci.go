@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,7 +63,7 @@ func (r *run) reviewOptions() review.Options {
 		Model:            r.o.ReviewModel,
 		Effort:           r.o.ReviewEffort,
 		BaseBranch:       r.pr.BaseRefName,
-		Post:             !r.target.BranchOnly,
+		Post:             r.o.Post && !r.target.BranchOnly,
 		UseDirenv:        r.o.UseDirenv,
 		AllowEnvrcChange: r.o.AllowEnvrcChange,
 		RunsDir:          r.o.ReviewRunsDir,
@@ -200,7 +201,8 @@ func (r *run) ensureCIGreen() error {
 		if err != nil {
 			return err
 		}
-		tag := fmt.Sprintf("ci-fix-%d", attempt)
+		fixNumber := r.ciFixTotal + 1
+		tag := fmt.Sprintf("ci-fix-%d", fixNumber)
 		r.enter(PhaseCIFix)
 		if err := r.codexCall(tag, ciFixPrompt(r.pr.Number, string(failsJSON))); err != nil {
 			return err
@@ -211,9 +213,16 @@ func (r *run) ensureCIGreen() error {
 		if err := r.ensureCommitted(tag); err != nil {
 			return err
 		}
-		r.ciFixTotal++
-		r.recordRound(fmt.Sprintf("CI fix %d", r.ciFixTotal), preSHA)
+		r.ciFixTotal = fixNumber
+		label := fmt.Sprintf("CI fix %d", fixNumber)
+		r.recordRound(label, preSHA)
 		if err := r.pushBranch(); err != nil {
+			return err
+		}
+		if r.o.DivergenceScan {
+			r.traceCIFix(preSHA, r.headSHA, tag)
+		}
+		if err := r.postFixComment(tag, label, "", "", preSHA); err != nil {
 			return err
 		}
 	}
@@ -228,10 +237,16 @@ func (r *run) watchCI() (gh.CheckState, error) {
 	deadline := time.Now().Add(noChecksTimeout)
 	for {
 		state, out, err := r.p.GH.WatchChecks(r.ctx, r.o.RepoRoot, r.pr.Number)
+		writeTail(filepath.Join(r.logDir, "ci-last.log"), out, 20)
 		if err != nil {
+			if errors.Is(err, gh.ErrTransient) {
+				if err := r.sleep(time.Second); err != nil {
+					return state, err
+				}
+				continue
+			}
 			return state, err
 		}
-		writeTail(filepath.Join(r.logDir, "ci-last.log"), out, 20)
 
 		switch state {
 		case gh.ChecksNone:

@@ -10,12 +10,12 @@ import (
 // file collapsing them is the whole reason this log exists.
 func TestEveryFinishedReviewIsRecorded(t *testing.T) {
 	before := state.Record{Status: state.OK, Blockers: 1}
-	after := state.Record{Status: state.OK, Title: "a title", At: state.Now()}
+	after := state.Record{Status: state.OK, Title: "a title", Author: "example-user", At: state.Now()}
 	run, ok := FromState("acme/api#42", before, after, SourceAgent)
 	if !ok {
 		t.Fatal("a second finished review was not recorded")
 	}
-	if run.Outcome != OK || run.Key != "acme/api#42" || !run.Reviewed {
+	if run.Outcome != OK || run.Key != "acme/api#42" || run.Author != "example-user" || !run.Reviewed {
 		t.Errorf("run = %+v", run)
 	}
 }

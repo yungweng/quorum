@@ -38,21 +38,22 @@ func (a *app) cmdStatus(args []string) int {
 // pull request that is still waiting for someone from one that was merged an
 // hour ago, and would list both. One batched query covers every candidate. It
 // is decoration on a command that has always been instant, so it gets one
-// attempt and a short deadline, and a machine with no network simply falls back
-// to showing everything recent.
+// attempt and a short deadline. A machine with no network uses the last known
+// states; uncached pull requests are labelled as still being checked.
 func (a *app) endsOnce() map[string]string {
+	cached := readEndStateCache(a.p.PRStatesFile)
 	file, err := state.Read(a.p.StateFile)
 	if err != nil {
-		return nil
+		return cached
 	}
 	runs := history.Read(a.p.HistoryFile, 0)
 	keys := recentReviewedPRKeys(reviewedPRs(file, runs), time.Now())
 	if len(keys) == 0 {
-		return nil
+		return cached
 	}
 	t, err := a.findTools()
 	if err != nil {
-		return nil
+		return cached
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -62,8 +63,9 @@ func (a *app) endsOnce() map[string]string {
 	client.Log = nil
 	states, err := client.PRStates(ctx, keys)
 	if err != nil {
-		return nil
+		return cached
 	}
+	_ = writeEndStateCache(a.p.PRStatesFile, states)
 	return states
 }
 
@@ -85,8 +87,9 @@ func recentReviewedPRKeys(reviewed []state.Entry, now time.Time) []string {
 // ends says how a pull request finished on GitHub, keyed the same way as the
 // state file and holding gh.StateMerged and friends. It is optional: status
 // asks once before drawing, while watch refreshes it in the background.
-// dashboard returns the keys it drew, which is how watch knows what is worth
-// looking up next time.
+// dashboard returns the keys watch must look up next. That includes every
+// recent review which could belong under OPEN, even when a cached terminal
+// state keeps it off screen, plus the pull requests drawn elsewhere.
 func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	file, err := state.Read(a.p.StateFile)
 	if err != nil {
@@ -178,7 +181,8 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	for _, p := range babysits {
 		busy[p.Key()] = true
 	}
-	open := openPRs(reviewedPRs(file, historyRuns), busy, ends)
+	reviewed := reviewedPRs(file, historyRuns)
+	open, checking := openPRs(reviewed, busy, ends)
 
 	// What is running gets as much room as it needs and no more, and the log of
 	// finished runs gets the rest.
@@ -188,42 +192,106 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	// the time, while the runs that had actually happened were squeezed in
 	// underneath. The counts that used to justify those headings are on the
 	// status bar, so nothing is lost by collapsing them.
-	a.sectionOpen(w, open, ends)
-	a.sectionActive(w, running, manualReviews, babysits, queued, live, ends)
-	past := a.sectionHistory(w, recent, historyRuns, ends)
+	limit := a.cfg.History
+	if limit <= 0 {
+		limit = config.Default().History
+	}
+	if len(recent) > limit {
+		recent = recent[:limit]
+	}
+	groups := groupHistory(historyRuns)
+	if len(groups) > limit {
+		groups = groups[:limit]
+	}
+	if len(groups) > 0 {
+		recent = nil
+	}
+
+	g := measure(w, open, running, manualReviews, babysits, queued, recent, groups)
+	a.sectionOpen(w, g, open, checking, ends)
+	a.sectionActive(w, g, running, manualReviews, babysits, queued, live, ends)
+	past := a.sectionHistory(w, g, recent, groups, ends)
 	a.footer(w)
 
-	shown := make([]string, 0, len(open)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
-	shownSet := make(map[string]bool, cap(shown))
+	tracked := make([]string, 0, len(reviewed)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
+	trackedSet := make(map[string]bool, cap(tracked))
+	for _, key := range recentReviewedPRKeys(reviewed, time.Now()) {
+		tracked = append(tracked, key)
+		trackedSet[key] = true
+	}
 	for _, group := range [][]state.Entry{open, running, queued} {
 		for _, e := range group {
-			if shownSet[e.Key] {
+			if trackedSet[e.Key] {
 				continue
 			}
-			shown = append(shown, e.Key)
-			shownSet[e.Key] = true
+			tracked = append(tracked, e.Key)
+			trackedSet[e.Key] = true
 		}
 	}
 	for _, key := range past {
-		if !shownSet[key] {
-			shown = append(shown, key)
-			shownSet[key] = true
+		if !trackedSet[key] {
+			tracked = append(tracked, key)
+			trackedSet[key] = true
 		}
 	}
 	for _, run := range manualReviews {
 		key := run.Key()
-		if !shownSet[key] {
-			shown = append(shown, key)
-			shownSet[key] = true
+		if !trackedSet[key] {
+			tracked = append(tracked, key)
+			trackedSet[key] = true
 		}
 	}
 	for _, p := range babysits {
-		if key := p.Key(); !shownSet[key] {
-			shown = append(shown, key)
-			shownSet[key] = true
+		if key := p.Key(); !trackedSet[key] {
+			tracked = append(tracked, key)
+			trackedSet[key] = true
 		}
 	}
-	return shown
+	return tracked
+}
+
+// measure takes the width of the shared columns from every row the frame is
+// about to draw, before any of it is printed.
+//
+// Which rows are on screen is what decides how wide the repository column has
+// to be, and that is not knowable while the first line is being written, which
+// is why this runs over all of them first. Every row that carries the columns
+// has to be counted here, runs on a branch included: what is measured is what
+// the columns are cut to, so a row left out would be cut to a width taken from
+// rows it has nothing to do with, and a frame holding nothing else would leave
+// it nothing at all.
+func measure(
+	w *ui.Writer,
+	open, running []state.Entry,
+	manual []review.LiveRun,
+	babysits []loop.Progress,
+	queued, recent []state.Entry,
+	groups []historyGroup,
+) grid {
+	var g grid
+	for _, entries := range [][]state.Entry{open, running, queued, recent} {
+		for _, e := range entries {
+			g.add(labelOf(e), authorOf(e.Author))
+		}
+	}
+	for _, run := range manual {
+		if run.Number == 0 {
+			g.add(branchLabel(run.Repo, run.Branch), "")
+			continue
+		}
+		g.add(labelOf(state.Entry{Key: run.Key()}), authorOf(run.Author))
+	}
+	for _, p := range babysits {
+		if p.Number == 0 {
+			g.add(branchLabel(p.Repo, p.Branch), "")
+			continue
+		}
+		g.add(labelOf(state.Entry{Key: p.Key()}), authorOf(p.Author))
+	}
+	for _, group := range groups {
+		g.add(runLabelText(group.run), authorOf(group.run.Author))
+	}
+	return g.fit(w)
 }
 
 func (a *app) header(w *ui.Writer) {
@@ -348,7 +416,9 @@ func reviewedPRs(file state.File, runs []history.Run) []state.Entry {
 			reviewed: succeeded,
 			entry: state.Entry{Key: run.Key, Record: state.Record{
 				Title:       run.Title,
+				Author:      run.Author,
 				Status:      state.OK,
+				Reason:      run.Reason,
 				At:          run.EndedAt.Format(time.RFC3339),
 				CommentURL:  run.CommentURL,
 				Blockers:    state.Num(run.Blockers),
@@ -379,30 +449,32 @@ func reviewedPRs(file state.File, runs []history.Run) []state.Entry {
 // to happen to it: newest first, minus everything the active section already
 // shows, minus everything GitHub says has been merged or closed.
 //
-// ends may be empty, which is what a dashboard drawn before the first lookup
-// answers looks like. An unknown pull request is treated as open, so the list
-// starts complete and shortens as answers arrive, rather than starting empty
-// and looking as though nothing had been reviewed.
-func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]string) []state.Entry {
+// A missing state is not evidence that a pull request is open. It is counted
+// separately so the dashboard can say GitHub is still being checked without
+// presenting stale reviews as work that is waiting for a person.
+func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]string) ([]state.Entry, int) {
 	cutoff := time.Now().Add(-openWindow)
 	out := make([]state.Entry, 0, openLimit)
+	checking := 0
 	for _, e := range reviewed {
 		if busy[e.Key] {
-			continue
-		}
-		switch ends[e.Key] {
-		case gh.StateMerged, gh.StateClosed:
 			continue
 		}
 		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
 			continue
 		}
-		out = append(out, e)
-		if len(out) == openLimit {
-			break
+		switch ends[e.Key] {
+		case gh.StateMerged, gh.StateClosed:
+			continue
+		case gh.StateOpen, gh.StateAutoMerge:
+			if len(out) < openLimit {
+				out = append(out, e)
+			}
+		default:
+			checking++
 		}
 	}
-	return out
+	return out, checking
 }
 
 // sectionOpen is the top of the dashboard: the pull requests quorum has
@@ -413,24 +485,41 @@ func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]strin
 // two blockers scrolls away under later runs even though nobody has done
 // anything about it yet. This section keeps it in view until the pull request
 // is merged or closed.
-func (a *app) sectionOpen(w *ui.Writer, open []state.Entry, ends map[string]string) {
-	if len(open) == 0 {
+func (a *app) sectionOpen(w *ui.Writer, g grid, open []state.Entry, checking int, ends map[string]string) {
+	if len(open) == 0 && checking == 0 {
 		fmt.Fprintln(w.Out)
 		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim("      nothing reviewed is still open"))
+		return
+	}
+	if len(open) == 0 {
+		fmt.Fprintln(w.Out)
+		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim(fmt.Sprintf("      checking GitHub for %d reviewed PR%s", checking, plural(checking))))
 		return
 	}
 	w.Section("open", len(open), 0)
 	now := time.Now()
 	for _, e := range open {
-		a.prLine(w, openMark(w, e), e, ends[e.Key])
+		a.prLine(w, g, openMark(w, e), e, ends[e.Key])
 		w.Printf("      %s\n", openDetail(w, e, now))
 	}
+	if checking > 0 {
+		w.Printf("      %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d more reviewed PR%s", checking, plural(checking))))
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // openMark colours the bullet by what the review found, so the pull request
 // that needs a person is the one the eye lands on first.
 func openMark(w *ui.Writer, e state.Entry) string {
 	switch {
+	case e.Reason != "":
+		return w.Red("●")
 	case e.Blockers > 0:
 		return w.Red("●")
 	case e.Critical > 0:
@@ -455,6 +544,9 @@ func openDetail(w *ui.Writer, e state.Entry, now time.Time) string {
 		counts = w.Dim(counts)
 	}
 	text := w.Dim("reviewed "+historyWhen(now, e.Time())+" · ") + counts
+	if e.Reason != "" {
+		text = w.Red("merge failed") + w.Dim(": "+ui.Truncate(mergeFailureReason(e.Reason), 30)+" · ") + counts
+	}
 	if e.CommentURL != "" {
 		text += w.Dim("  ") + w.Link(w.Blue("comment ↗"), e.CommentURL)
 	}
@@ -471,6 +563,7 @@ func openDetail(w *ui.Writer, e state.Entry, now time.Time) string {
 // the status bar directly above.
 func (a *app) sectionActive(
 	w *ui.Writer,
+	g grid,
 	running []state.Entry,
 	manual []review.LiveRun,
 	babysits []loop.Progress,
@@ -487,7 +580,7 @@ func (a *app) sectionActive(
 
 	for _, e := range running {
 		_, alive := live[e.Key]
-		a.prLine(w, w.Cyan("●"), e, ends[e.Key])
+		a.prLine(w, g, w.Cyan("●"), e, ends[e.Key])
 		if !alive {
 			w.Printf("      %s\n", w.Red("process gone, will be retried"))
 			continue
@@ -500,7 +593,7 @@ func (a *app) sectionActive(
 	}
 	for _, run := range manual {
 		if run.Number == 0 {
-			branchLine(w, w.Magenta("◆"), run.Repo, run.Branch)
+			branchLine(w, g, w.Magenta("◆"), run.Repo, run.Branch)
 			w.Printf("      %s\n", w.Dim("review · manual · "+ui.Duration(time.Since(run.StartedAt))+
 				" · "+reviewProgress(run.RunDir, run.Reviewers)))
 			continue
@@ -509,27 +602,28 @@ func (a *app) sectionActive(
 			Key: run.Key(),
 			Record: state.Record{
 				Title:     run.Title,
+				Author:    run.Author,
 				StartedAt: run.StartedAt.Format(time.RFC3339),
 				RunDir:    run.RunDir,
 			},
 		}
-		a.prLine(w, w.Magenta("◆"), entry, ends[entry.Key])
+		a.prLine(w, g, w.Magenta("◆"), entry, ends[entry.Key])
 		w.Printf("      %s\n", w.Dim("review · manual · "+ui.Duration(time.Since(run.StartedAt))+
 			" · "+reviewProgress(run.RunDir, run.Reviewers)))
 	}
 	now := time.Now()
 	for _, p := range babysits {
 		if p.Number == 0 {
-			branchLine(w, w.Magenta("●"), p.Repo, p.Branch)
+			branchLine(w, g, w.Magenta("●"), p.Repo, p.Branch)
 			w.Printf("      %s\n", babysitTrack(w, p, now))
 			continue
 		}
-		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
-		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
+		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title, Author: p.Author}}
+		a.prLine(w, g, w.Magenta("●"), e, ends[p.Key()])
 		w.Printf("      %s\n", babysitTrack(w, p, now))
 	}
 	for _, e := range queued {
-		a.prLine(w, w.Dim("○"), e, ends[e.Key])
+		a.prLine(w, g, w.Dim("○"), e, ends[e.Key])
 		reason := e.Reason
 		if reason == "" {
 			reason = "waiting"
@@ -539,15 +633,6 @@ func (a *app) sectionActive(
 		}
 		w.Printf("      %s\n", w.Dim("queued · "+reason))
 	}
-}
-
-func branchLine(w *ui.Writer, mark, repo, branch string) {
-	_, name, ok := strings.Cut(repo, "/")
-	if !ok {
-		name = repo
-	}
-	label := name + " " + branch
-	w.Printf("  %s %s\n", mark, w.Bold(ui.Truncate(label, max(w.Cols()-4, 1))))
 }
 
 func reviewProgress(runDir string, requested int) string {
@@ -674,6 +759,8 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 		what = "fixing"
 	case loop.PhaseCIFix:
 		what = fmt.Sprintf("CI fix %d", p.CIFix)
+	case loop.PhaseDivergence:
+		what = "analyzing divergence"
 	default:
 		return "", ""
 	}
@@ -694,71 +781,146 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 // fallback is what the state file still holds. It is used only while the log
 // is empty, so upgrading to a build that keeps a log does not start on a blank
 // screen; the first logged run takes over from it.
-func (a *app) sectionHistory(w *ui.Writer, fallback []state.Entry, runs []history.Run, ends map[string]string) []string {
-	limit := a.cfg.History
-	if limit <= 0 {
-		limit = config.Default().History
-	}
-	if len(runs) > limit {
-		runs = runs[:limit]
-	}
-
+func (a *app) sectionHistory(w *ui.Writer, g grid, fallback []state.Entry, groups []historyGroup, ends map[string]string) []string {
 	w.Section("history", 0, 0)
-	if len(runs) == 0 && len(fallback) == 0 {
+	if len(groups) == 0 && len(fallback) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing has finished yet"))
 		return nil
 	}
-	if len(runs) == 0 {
-		return a.historyFromState(w, fallback, limit, ends)
+	if len(groups) == 0 {
+		return a.historyFromState(w, g, fallback, ends)
 	}
 
-	keys := make([]string, 0, len(runs))
 	now := time.Now()
-	for _, run := range runs {
+	keys := make([]string, 0, len(groups))
+	lines := make([][]ui.Cell, 0, len(groups))
+	for _, group := range groups {
+		run := group.run
 		if run.Number() > 0 {
 			keys = append(keys, run.Key)
 		}
-		w.Printf("  %s %s %s%s %s%s\n",
-			historyMark(w, run),
-			w.Dim(ui.Pad(historyWhen(now, run.EndedAt), 6)),
-			runLabel(w, run, ends[run.Key]),
-			runLabelPad(run),
-			historyDetail(w, run),
-			endSuffix(w, ends[run.Key]))
+		result, style := historyResult(w, run)
+		line := historyLine{
+			label:      runLabelText(run),
+			url:        run.URL(),
+			when:       historyWhen(now, run.EndedAt),
+			author:     authorOf(run.Author),
+			kind:       groupKind(group),
+			result:     result,
+			resStyle:   style,
+			reason:     historyReason(run),
+			commentURL: run.CommentURL,
+			end:        ends[run.Key],
+		}
+		line.mark, line.markStyle = historyMark(w, group)
+		if group.failed > 0 && group.runs > 1 {
+			line.kindStyle = w.Red
+		}
+		lines = append(lines, line.cells(w, g))
 	}
+	printTable(w, lines)
 	return keys
 }
 
 // historyFromState draws the state file's finished records in the same shape.
-func (a *app) historyFromState(w *ui.Writer, recent []state.Entry, limit int, ends map[string]string) []string {
-	if len(recent) > limit {
-		recent = recent[:limit]
-	}
+func (a *app) historyFromState(w *ui.Writer, g grid, recent []state.Entry, ends map[string]string) []string {
 	now := time.Now()
 	keys := make([]string, 0, len(recent))
+	lines := make([][]ui.Cell, 0, len(recent))
 	for _, e := range recent {
 		keys = append(keys, e.Key)
-		var symbol, detail string
+		line := historyLine{
+			mark:      w.SymFail(),
+			markStyle: w.Red,
+			label:     labelOf(e),
+			url:       e.URL(),
+			when:      historyWhen(now, e.Time()),
+			author:    authorOf(e.Author),
+			end:       ends[e.Key],
+		}
 		switch e.Status {
 		case state.OK:
-			symbol, detail = w.Green(w.SymOK()), findingsText(w, e)
-		case state.Failed:
-			symbol = w.Red(w.SymFail())
-			detail = w.Red(fmt.Sprintf("failed after %d attempt(s)", e.Fails))
 			if e.Reason != "" {
-				detail += w.Dim(", " + ui.Truncate(e.Reason, 40))
+				line.result, line.resStyle = "merge failed", w.Red
+				line.reason = mergeFailureReason(e.Reason)
+				break
 			}
+			line.mark, line.markStyle = w.SymOK(), w.Green
+			line.result, line.resStyle = findingsText(w, e)
+			line.commentURL = e.CommentURL
+			if e.CommentURL == "" {
+				line.reason = "not posted"
+			}
+		case state.Failed:
+			line.result, line.resStyle = fmt.Sprintf("failed after %d attempt(s)", e.Fails), w.Red
+			line.reason = e.Reason
 		case state.GaveUp:
-			symbol = w.Red(w.SymFail())
-			detail = w.Red("gave up") + w.Dim(", retry: quorum run "+e.Key)
+			line.result, line.resStyle = "gave up", w.Red
+			line.reason = "retry: quorum run " + e.Key
 		default:
-			symbol, detail = w.Dim("–"), w.Dim("skipped: "+e.Reason)
+			line.mark, line.markStyle = "–", w.Dim
+			line.result, line.resStyle = "skipped", w.Dim
+			line.reason = e.Reason
 		}
-		w.Printf("  %s %s %s%s %s%s\n",
-			mark(w, symbol), w.Dim(ui.Pad(historyWhen(now, e.Time()), 6)),
-			prLabel(w, e, ends[e.Key]), labelPad(e), detail, endSuffix(w, ends[e.Key]))
+		lines = append(lines, line.cells(w, g))
 	}
+	printTable(w, lines)
 	return keys
+}
+
+// historyGroup is the runs on one pull request that the log holds, collapsed
+// into the single line the dashboard draws for it.
+//
+// The log deliberately keeps one entry per run, because the state file's one
+// record per pull request is what used to reduce four reviews of the same
+// branch to a single line showing only the last. Collapsing them again on
+// screen would give that back, so the line carries the counts: how many runs
+// there were, and how many of them failed. A failed attempt followed by a
+// successful one is still visible as a failure, which is the part that would
+// otherwise be lost.
+type historyGroup struct {
+	run    history.Run // the newest run, which is what the line reports
+	runs   int
+	failed int
+	fixes  int
+}
+
+// groupHistory collapses runs, which arrive newest first, by pull request. The
+// order of the groups is the order their newest run appears in, so the section
+// still reads newest first.
+func groupHistory(runs []history.Run) []historyGroup {
+	out := make([]historyGroup, 0, len(runs))
+	at := make(map[string]int, len(runs))
+	for _, run := range runs {
+		i, ok := -1, false
+		if run.Key != "" {
+			i, ok = at[run.Key]
+		}
+		if !ok {
+			i = len(out)
+			out = append(out, historyGroup{run: run})
+			if run.Key != "" {
+				at[run.Key] = i
+			}
+		}
+		out[i].runs++
+		if runFailed(run) {
+			out[i].failed++
+		}
+		if run.Kind == history.KindBabysit {
+			out[i].fixes++
+		}
+	}
+	return out
+}
+
+// runFailed is what puts a red mark on a run: a failure, a run that gave up,
+// and a review that produced a comment but could not be merged.
+func runFailed(run history.Run) bool {
+	if run.Reviewed && run.Reason != "" {
+		return true
+	}
+	return run.Outcome == history.Failed || run.Outcome == history.GaveUp
 }
 
 // historyWhen is the clock time for a run from today and the date for an older
@@ -774,43 +936,76 @@ func historyWhen(now, t time.Time) string {
 	return t.Format("2 Jan")
 }
 
-func historyMark(w *ui.Writer, run history.Run) string {
+// historyMark is the outcome symbol of the newest run in a group, with the
+// style it is drawn in. It reports where the pull request stands now rather
+// than the worst thing that ever happened to it, because a failure that a later
+// run fixed is not what the line is about; the run counts next to it say a
+// failure happened at all.
+func historyMark(w *ui.Writer, group historyGroup) (string, func(string) string) {
+	run := group.run
+	if run.Reviewed && run.Reason != "" {
+		return w.SymFail(), w.Red
+	}
 	switch run.Outcome {
 	case history.OK, history.Converged:
-		return mark(w, w.Green(w.SymOK()))
+		return w.SymOK(), w.Green
 	case history.Failed, history.GaveUp:
-		return mark(w, w.Red(w.SymFail()))
+		return w.SymFail(), w.Red
 	default:
-		return mark(w, w.Dim("–"))
+		return "–", w.Dim
 	}
 }
 
-// mark pads an outcome symbol to one column width.
+// groupKind is the kind column: what kind of work the line stands for, and for
+// more than one run how many there were.
 //
-// With a terminal every symbol is a single cell and this does nothing. Without
-// one they degrade to "ok:" and "FAIL:", which are three and five cells, and an
-// unpadded mark shifts every column after it on the failing lines only, which
-// is the state a piped log is read in.
-func mark(w *ui.Writer, symbol string) string {
-	return ui.Pad(symbol, max(ui.Cells(w.SymOK()), ui.Cells(w.SymFail())))
+// A single review says nothing at all, because that is what almost every line
+// is and a tag on all of them is a column of noise. Failures are named here
+// rather than left to the outcome symbol, which only ever reports the newest
+// run.
+func groupKind(group historyGroup) string {
+	if group.runs == 1 {
+		return runKind(group.run)
+	}
+	text := fmt.Sprintf("%d runs", group.runs)
+	if group.fixes == group.runs {
+		text = fmt.Sprintf("%d fix runs", group.runs)
+	}
+	if group.failed > 0 {
+		text += fmt.Sprintf(", %d failed", group.failed)
+	}
+	return text
 }
 
-// historyDetail is what the run produced, which is the column the eye lands in.
-func historyDetail(w *ui.Writer, run history.Run) string {
-	var text string
+func runKind(run history.Run) string {
+	if run.Kind != history.KindBabysit {
+		return ""
+	}
+	switch {
+	case run.Rounds == 1:
+		return "fix, 1 round"
+	case run.Rounds > 1:
+		return fmt.Sprintf("fix, %d rounds", run.Rounds)
+	}
+	return "fix"
+}
+
+// historyResult is what the run produced, which is the column the eye lands in.
+// It is only the outcome itself; whatever explains it goes to historyReason, so
+// that the outcomes of twenty runs line up under each other instead of each
+// starting wherever the line before it happened to end.
+func historyResult(w *ui.Writer, run history.Run) (string, func(string) string) {
 	switch {
 	case run.Outcome == history.Skipped:
-		return w.Dim("skipped: " + run.Reason)
+		return "skipped", w.Dim
 	case run.Outcome == history.GaveUp:
-		return w.Red("gave up") + w.Dim(", retry: quorum run "+run.Key)
+		return "gave up", w.Red
 	case run.Outcome == history.Failed:
-		text = w.Red("failed")
-		if run.Reason != "" {
-			text += w.Dim(", " + ui.Truncate(run.Reason, 44))
-		}
-		return prefixKind(w, run) + text
+		return "failed", w.Red
+	case run.Reviewed && run.Reason != "":
+		return "merge failed", w.Red
 	case !run.Reviewed:
-		return prefixKind(w, run) + w.Dim("finished")
+		return "finished", w.Dim
 	}
 
 	// Compact counts, because this is a log: a column of "0 blockers, 1
@@ -822,30 +1017,106 @@ func historyDetail(w *ui.Writer, run history.Run) string {
 	}
 	switch {
 	case run.Blockers > 0:
-		counts = w.Red(counts)
+		return counts, w.Red
 	case run.Critical > 0:
-		counts = w.Yellow(counts)
+		return counts, w.Yellow
 	}
-	text = prefixKind(w, run) + counts
-	if run.CommentURL != "" {
-		return text + "  " + w.Link(w.Blue("comment ↗"), run.CommentURL)
-	}
-	return text
+	return counts, nil
 }
 
-// prefixKind marks a fix loop. A review says nothing, because that is what
-// almost every line is and a tag on all of them is a column of noise.
-func prefixKind(w *ui.Writer, run history.Run) string {
-	if run.Kind != history.KindBabysit {
-		return ""
+// historyReason explains the result in the words the run recorded.
+func historyReason(run history.Run) string {
+	switch {
+	case run.Outcome == history.Skipped, run.Outcome == history.Failed:
+		return run.Reason
+	case run.Outcome == history.GaveUp:
+		return "retry: quorum run " + run.Key
+	case run.Reviewed && run.Reason != "":
+		return mergeFailureReason(run.Reason)
 	}
-	if run.Rounds == 1 {
-		return w.Dim("fix, 1 round · ")
+	return ""
+}
+
+func mergeFailureReason(reason string) string {
+	if strings.HasPrefix(reason, "auto-merge failed") {
+		if _, detail, ok := strings.Cut(reason, ": "); ok {
+			return detail
+		}
 	}
-	if run.Rounds > 1 {
-		return w.Dim(fmt.Sprintf("fix, %d rounds · ", run.Rounds))
+	return reason
+}
+
+// reasonWidth caps how much of a recorded reason the table asks for. Reasons
+// are a sentence and the columns behind them are a word, so an unbounded one
+// would take the room those need and give the eye nothing back for it.
+const (
+	reasonWidth = 44
+	reasonFloor = 24
+)
+
+// historyLine is one row of the history table, in the order the columns are
+// drawn: outcome, time, pull request, author, kind, result, comment, how the
+// pull request ended, and last the reason.
+//
+// The reason comes after the two columns it looks out of place before, because
+// a run either succeeded and has a comment and an end state, or failed and has
+// a reason instead. Putting the long column between them left every successful
+// line padding out forty empty cells to reach its own comment link.
+type historyLine struct {
+	mark       string
+	markStyle  func(string) string
+	when       string
+	label      string
+	url        string
+	author     string
+	kind       string
+	kindStyle  func(string) string
+	result     string
+	resStyle   func(string) string
+	reason     string
+	commentURL string
+	end        string
+}
+
+func (l historyLine) cells(w *ui.Writer, g grid) []ui.Cell {
+	kindStyle := l.kindStyle
+	if kindStyle == nil {
+		kindStyle = w.Dim
 	}
-	return w.Dim("fix · ")
+	label := ui.Cell{Text: l.label, Cut: truncateLabel, Want: g.label,
+		Flex: true, Give: giveLabel, Min: labelFloor, Style: func(s string) string {
+			styled := w.Bold(s)
+			if l.end == gh.StateMerged {
+				styled = w.Strike(styled)
+			}
+			return w.Link(styled, l.url)
+		}}
+	comment := ui.Cell{}
+	if l.commentURL != "" {
+		comment = ui.Cell{Text: "comment ↗", Style: func(s string) string {
+			return w.Link(w.Blue(s), l.commentURL)
+		}}
+	}
+	return []ui.Cell{
+		{Text: l.mark, Style: l.markStyle},
+		{Text: l.when, Style: w.Dim},
+		label,
+		{Text: l.author, Want: g.author, Flex: true, Give: giveAuthor, Style: w.Dim},
+		{Text: l.kind, Style: kindStyle},
+		{Text: l.result, Style: l.resStyle},
+		comment,
+		{Text: endWord(l.end), Style: w.Dim},
+		{Text: ui.Truncate(l.reason, reasonWidth), Style: w.Dim, Flex: true, Give: giveDetail, Min: reasonFloor},
+	}
+}
+
+// printTable lays the rows out and prints them under the two space indent every
+// section body uses.
+func printTable(w *ui.Writer, rows [][]ui.Cell) {
+	const indent = "  "
+	for _, line := range ui.Columns(rows, 2, max(w.Cols()-len(indent), 1)) {
+		w.Printf("%s%s\n", indent, line)
+	}
 }
 
 // footer is the configuration the numbers above were produced under, on one
@@ -859,6 +1130,7 @@ func (a *app) footer(w *ui.Writer) {
 	parts := []string{
 		scope,
 		fmt.Sprintf("%d at a time, %d reviewers each", a.cfg.MaxConcurrent, a.cfg.Reviewers),
+		autoMergeSummary(a.cfg),
 	}
 	if a.cfg.LoadLimit > 0 {
 		parts = append(parts, fmt.Sprintf("held back above load %.0f", a.cfg.LoadLimit))
@@ -870,23 +1142,21 @@ func (a *app) footer(w *ui.Writer) {
 	w.Printf("%s\n", w.Dim(ui.Truncate(strings.Join(parts, " · "), w.Cols())))
 }
 
-// runLabel renders the "insura #103" column for a logged run, linked to the
-// pull request and struck through once it has been merged.
-func runLabel(w *ui.Writer, run history.Run, end string) string {
-	label := runLabelText(run)
-	styled := w.Bold(label)
-	if end == gh.StateMerged {
-		styled = w.Strike(styled)
+func autoMergeSummary(cfg config.Config) string {
+	var sources []string
+	if cfg.AutoMergeAgent {
+		sources = append(sources, "agent")
 	}
-	return w.Link(styled, run.URL())
-}
-
-func runLabelPad(run history.Run) string {
-	label := runLabelText(run)
-	if n := labelWidth - ui.Cells(label); n > 0 {
-		return strings.Repeat(" ", n)
+	if cfg.AutoMergeReview {
+		sources = append(sources, "review")
 	}
-	return ""
+	if cfg.AutoMergeBabysit {
+		sources = append(sources, "babysit")
+	}
+	if len(sources) == 0 {
+		return "auto-merge off"
+	}
+	return "auto-merge " + strings.Join(sources, "+") + " (merge commit)"
 }
 
 func runLabelText(run history.Run) string {
@@ -897,64 +1167,92 @@ func runLabelText(run history.Run) string {
 }
 
 // findingsText is the one line summary of a finished review from the state
-// file, with the posted comment behind a link.
-func findingsText(w *ui.Writer, e state.Entry) string {
+// file.
+func findingsText(w *ui.Writer, e state.Entry) (string, func(string) string) {
 	counts := fmt.Sprintf("%d blockers, %d critical, %d suggestions", e.Blockers, e.Critical, e.Suggestions)
 	if e.Blockers == 0 && e.Critical == 0 && e.Suggestions == 0 && e.Questions == 0 {
 		counts = "nothing found"
 	}
 	if e.Blockers > 0 {
-		counts = w.Red(counts)
-	} else if e.Critical > 0 {
-		counts = w.Yellow(counts)
+		return counts, w.Red
 	}
-	if e.CommentURL != "" {
-		return counts + "  " + w.Link(w.Blue("comment ↗"), e.CommentURL)
+	if e.Critical > 0 {
+		return counts, w.Yellow
 	}
-	return counts + "  " + w.Dim("not posted")
+	return counts, nil
 }
 
-// labelWidth keeps the repository and number column aligned across sections.
-const labelWidth = 26
+// grid is the width of the two columns every section shares: the repository and
+// number a line is found by, and the author beside it.
+//
+// It is measured once from every row the frame is about to draw, and it is the
+// whole reason the screen reads as a table. The widths used to be two constants
+// picked per line, one for a row with an author and a wider one for a row
+// without, so every result and every title on the screen sat at one of two
+// offsets depending on whether GitHub had told us who opened the pull request.
+type grid struct {
+	label  int
+	author int
+}
+
+// labelFloor is the least a label column may be squeezed to before what is left
+// stops naming a pull request at all. The caps keep one very long repository
+// name or login from taking the room the result columns need, and both are
+// bounded again by the terminal so that a narrow one is not spent entirely on
+// the two leftmost columns.
+const (
+	labelFloor = 12
+	labelCap   = 34
+	authorCap  = 18
+)
+
+// What a narrow terminal costs, in the order it is paid. The author goes first
+// because every other column says something about the run itself, and the one
+// column that must survive is the one naming the pull request the line is
+// about.
+const (
+	giveAuthor = iota
+	giveDetail
+	giveLabel
+)
+
+func (g *grid) add(label, author string) {
+	g.label = max(g.label, ui.Cells(label))
+	g.author = max(g.author, ui.Cells(author))
+}
+
+// fit bounds the measured widths, once every row has been added.
+func (g *grid) fit(w *ui.Writer) grid {
+	cols := max(w.Cols(), 1)
+	return grid{
+		label:  min(g.label, labelCap, cols/3),
+		author: min(g.author, authorCap, cols/6),
+	}
+}
 
 func labelOf(e state.Entry) string {
 	return fmt.Sprintf("%s #%d", e.Name(), e.Number())
 }
 
-// prLabel renders the "toaster-api #2017" column, linked to the pull
-// request and crossed out once that pull request has been merged: the work
-// landed, so the line is history rather than something to look at.
-func prLabel(w *ui.Writer, e state.Entry, end string) string {
-	return styledPRLabel(w, e, labelOf(e), end)
-}
-
-func styledPRLabel(w *ui.Writer, e state.Entry, label, end string) string {
-	styled := w.Bold(label)
-	if end == gh.StateMerged {
-		styled = w.Strike(styled)
+func authorOf(author string) string {
+	if author == "" {
+		return ""
 	}
-	return w.Link(styled, e.URL())
+	return "@" + author
 }
 
-// labelPad is the spacing that keeps the column after the label aligned. It
-// stays outside prLabel so a strikethrough ends with the text instead of
-// trailing off across empty space, and because padding inside the styling
-// would be counted in escape bytes rather than in visible cells.
-func labelPad(e state.Entry) string {
-	if n := labelWidth - ui.Cells(labelOf(e)); n > 0 {
-		return strings.Repeat(" ", n)
-	}
-	return ""
-}
-
-func truncateLabel(e state.Entry, width int) string {
-	label := labelOf(e)
+// truncateLabel shortens a label to width while keeping the number, which is
+// what the label is looked up by. Losing the tail of a repository name still
+// leaves a line that can be identified; losing "#2074" does not.
+func truncateLabel(label string, width int) string {
 	if ui.Cells(label) <= width {
 		return label
 	}
-	suffix := fmt.Sprintf(" #%d", e.Number())
-	if suffixWidth := ui.Cells(suffix); suffixWidth < width {
-		return ui.Truncate(e.Name(), width-suffixWidth) + suffix
+	if name, number, ok := strings.Cut(label, " #"); ok {
+		suffix := " #" + number
+		if suffixWidth := ui.Cells(suffix); suffixWidth < width {
+			return ui.Truncate(name, width-suffixWidth) + suffix
+		}
 	}
 	return ui.Truncate(label, width)
 }
@@ -973,46 +1271,57 @@ func endWord(end string) string {
 	case gh.StateClosed:
 		// Closed without merging is not a success, so it is never struck out.
 		return "closed unmerged"
+	case gh.StateAutoMerge:
+		return "auto-merge queued"
 	}
 	return ""
 }
 
-func endSuffix(w *ui.Writer, end string) string {
-	if word := endWord(end); word != "" {
-		return w.Dim("  " + word)
-	}
-	return ""
+// prLine prints "  ● toaster-api #2017  @example-user  the title", with the
+// repository and number linking to the pull request.
+//
+// It draws the same first columns as the history table and at the same widths,
+// so what is running and what has finished can be read down the screen as one
+// list rather than as three blocks that each chose their own offsets.
+func (a *app) prLine(w *ui.Writer, g grid, mark string, e state.Entry, end string) {
+	printTable(w, [][]ui.Cell{prCells(w, g, mark, labelOf(e), e.URL(), e.Author, e.Title, end)})
 }
 
-// prLine prints "  ● toaster-api #2017  the title", with the repository and
-// number linking to the pull request.
-func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
-	endWidth := 0
-	if word := endWord(end); word != "" {
-		endWidth = 2 + ui.Cells(word)
-	}
-	if e.Title == "" {
-		// Records written before titles were stored have nothing to show, and
-		// padding to an empty column just leaves trailing whitespace.
-		label := truncateLabel(e, max(w.Cols()-4-endWidth, 1))
-		w.Printf("  %s %s%s\n", mark, styledPRLabel(w, e, label, end), endSuffix(w, end))
-		return
-	}
-	available := max(w.Cols()-6-endWidth, 1)
-	labelRoom := max(labelWidth, ui.Cells(labelOf(e)))
-	titleRoom := available - labelRoom
-	if titleRoom < 12 {
-		labelRoom = max(available-12, 1)
-		titleRoom = max(available-labelRoom, 0)
-	}
-	label := truncateLabel(e, labelRoom)
-	w.Printf("  %s %s%s  %s%s\n",
-		mark,
-		styledPRLabel(w, e, label, end),
-		strings.Repeat(" ", max(labelRoom-ui.Cells(label), 0)),
-		ui.Truncate(e.Title, titleRoom),
-		endSuffix(w, end))
+// branchLine is the same row for a run on a branch, which has no number and no
+// author to put in the columns.
+func branchLine(w *ui.Writer, g grid, mark, repo, branch string) {
+	printTable(w, [][]ui.Cell{prCells(w, g, mark, branchLabel(repo, branch), "", "", "", "")})
 }
+
+func branchLabel(repo, branch string) string {
+	_, name, ok := strings.Cut(repo, "/")
+	if !ok {
+		name = repo
+	}
+	return name + " " + branch
+}
+
+func prCells(w *ui.Writer, g grid, mark, label, url, author, title, end string) []ui.Cell {
+	return []ui.Cell{
+		{Text: mark},
+		{Text: label, Cut: truncateLabel, Want: g.label,
+			Flex: true, Give: giveLabel, Min: labelFloor, Style: func(s string) string {
+				styled := w.Bold(s)
+				if end == gh.StateMerged {
+					styled = w.Strike(styled)
+				}
+				return w.Link(styled, url)
+			}},
+		{Text: authorOf(author), Want: g.author, Flex: true, Give: giveAuthor, Style: w.Dim},
+		{Text: title, Flex: true, Give: giveDetail, Min: titleFloor},
+		{Text: endWord(end), Style: w.Dim},
+	}
+}
+
+// titleFloor is the least of a title worth printing. Below it the column says
+// nothing about the pull request and the room is better spent on the columns
+// that identify it.
+const titleFloor = 12
 
 // lastPoll reads the heartbeat the poll writes when it finishes.
 func (a *app) lastPoll() (time.Time, int, bool) {
@@ -1042,10 +1351,11 @@ type endStates struct {
 	state  map[string]string
 	keys   []string
 	change chan struct{}
+	path   string
 }
 
-func newEndStates() *endStates {
-	return &endStates{state: map[string]string{}, change: make(chan struct{}, 1)}
+func newEndStates(path string) *endStates {
+	return &endStates{state: readEndStateCache(path), change: make(chan struct{}, 1), path: path}
 }
 
 // snapshot is what the dashboard reads: a copy, so rendering never holds the
@@ -1081,16 +1391,19 @@ func (e *endStates) wanted() []string {
 
 func (e *endStates) store(states map[string]string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.state = states
+	e.state = maps.Clone(states)
+	snapshot := maps.Clone(e.state)
+	path := e.path
+	e.mu.Unlock()
+	_ = writeEndStateCache(path, snapshot)
 }
 
-// trackEnds keeps the merge state of the visible pull requests roughly current.
+// trackEnds keeps the merge state of relevant pull requests roughly current.
 //
 // It runs beside the redraw and never inside it. The dashboard repaints every
 // few seconds, and asking GitHub at that rate would make the screen wait on the
 // network and earn a rate limit for a fact that only changes when somebody
-// presses a button. One batched query covers every visible pull request.
+// presses a button. One batched query covers every tracked pull request.
 func (a *app) trackEnds(ctx context.Context, ghBin string, e *endStates) {
 	client := gh.New(ghBin)
 	// No retries and a short deadline: this is decoration, and the next pass is
@@ -1109,15 +1422,22 @@ func (a *app) trackEnds(ctx context.Context, ghBin string, e *endStates) {
 		case <-time.After(30 * time.Second):
 		}
 		keys := e.wanted()
-		if len(keys) == 0 {
-			continue
-		}
-		states, err := client.PRStates(ctx, keys)
-		if err != nil {
+		if err := refreshEndStates(ctx, client, e, keys); err != nil {
 			// Nothing on the screen depends on this, so a failed lookup keeps
 			// the previous answer rather than blanking what it already knows.
 			continue
 		}
-		e.store(states)
 	}
+}
+
+func refreshEndStates(ctx context.Context, client *gh.Client, e *endStates, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	states, err := client.PRStates(ctx, keys)
+	if err != nil {
+		return err
+	}
+	e.store(states)
+	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
@@ -119,8 +120,9 @@ func (a *app) cmdReview(argv []string) int {
 	live := review.TrackLive(rep, a.p.ManualDir)
 	defer live.Close()
 
+	client := a.newGH(t.GH)
 	runner := &review.Runner{
-		GH: a.newGH(t.GH), Git: a.newGit(t.Git), Rep: live,
+		GH: client, Git: a.newGit(t.Git), Rep: live,
 	}
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 
@@ -135,6 +137,21 @@ func (a *app) cmdReview(argv []string) int {
 		return a.reviewExit(err)
 	}
 	number = res.Findings.PR
+	mergeStatus := ""
+	if automerge.Allowed(a.cfg.AutoMergeReview, a.cfg.Post, res.Findings) {
+		mergeResult, mergeErr := a.autoMerge(ctx, client, repoRoot, repo, number, res.Findings.HeadSHA)
+		if mergeErr != nil {
+			// The review finished and was posted. Keep that result in OPEN;
+			// the merge error remains the reason and the command still fails.
+			a.logRun(rep.historyRun(repo, started, history.OK, mergeErr.Error(), res))
+			if notify {
+				a.out.Notify("quorum: auto-merge failed", fmt.Sprintf("PR #%d: %s", number, mergeErr))
+			}
+			return a.reviewExit(mergeErr)
+		}
+		mergeStatus = mergeResult.Status
+		a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus))
+	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
 	if notify {
 		rep.mu.Lock()
@@ -151,6 +168,10 @@ func (a *app) cmdReview(argv []string) int {
 		} else {
 			body += " Report written to disk."
 		}
+		switch mergeStatus {
+		case automerge.Merged:
+			body += " Merged."
+		}
 		a.out.Notify("quorum: review complete", body)
 	}
 	return exitOK
@@ -162,7 +183,7 @@ func (a *app) cmdReview(argv []string) int {
 // with an empty key and logRun drops it.
 func (t *termReporter) historyRun(repo string, started time.Time, outcome, reason string, res *review.Result) history.Run {
 	t.mu.Lock()
-	number, title, branch := t.number, t.title, t.branch
+	number, title, author, branch := t.number, t.title, t.author, t.branch
 	if t.repo != "" {
 		repo = t.repo
 	}
@@ -180,6 +201,7 @@ func (t *termReporter) historyRun(repo string, started time.Time, outcome, reaso
 		Key:       key,
 		Branch:    historyBranch,
 		Title:     title,
+		Author:    author,
 		Kind:      history.KindReview,
 		Source:    history.SourceManual,
 		Outcome:   outcome,
@@ -273,6 +295,7 @@ type termReporter struct {
 	number int
 	runs   int
 	title  string
+	author string
 	repo   string
 	branch string
 
@@ -286,6 +309,7 @@ func (t *termReporter) Header(h review.RunHeader) {
 	t.number = h.Number
 	t.runs = h.Runs
 	t.title = h.Title
+	t.author = h.Author
 	t.repo = h.Repo
 	t.branch = h.Branch
 	t.reviewer = map[int]*reviewerState{}

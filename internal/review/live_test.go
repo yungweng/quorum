@@ -32,7 +32,7 @@ func TestTrackLivePublishesUntilClosed(t *testing.T) {
 
 	rep := TrackLive(NopReporter{}, liveDir)
 	rep.Header(RunHeader{
-		Repo: "acme/api", Number: 42, Title: "tenant scoping",
+		Repo: "acme/api", Number: 42, Title: "tenant scoping", Author: "example-user",
 		Runs: 3, RunDir: runDir,
 	})
 
@@ -41,7 +41,8 @@ func TestTrackLivePublishesUntilClosed(t *testing.T) {
 		t.Fatalf("LiveRuns returned %d runs, want 1", len(runs))
 	}
 	got := runs[0]
-	if got.Key() != "acme/api#42" || got.Title != "tenant scoping" || got.Reviewers != 3 {
+	if got.Key() != "acme/api#42" || got.Title != "tenant scoping" ||
+		got.Author != "example-user" || got.Reviewers != 3 {
 		t.Errorf("published run = %+v", got)
 	}
 	if got.PID != os.Getpid() || got.RunDir != runDir || got.StartedAt.IsZero() {

@@ -66,13 +66,17 @@ func (r *run) questionGate(tagBase string) error {
 // an error.
 func (r *run) disputeGate(tagBase, preSHA string) error {
 	for n := 1; ; n++ {
-		r.rep.Dispute(section(r.lastMsg, MarkerDisputed))
+		dispute := section(r.lastMsg, MarkerDisputed)
+		if markerContent(dispute, MarkerDisputed) == "" {
+			return fmt.Errorf("%w: dispute marker has no rebuttal", ErrNoProgress)
+		}
+		r.rep.Dispute(dispute)
 		tag := fmt.Sprintf("%s-dispute-%d", tagBase, n)
 
 		if !r.o.Interactive {
 			if n >= 2 {
 				r.disputeAccepted = true
-				r.disputeText = section(r.lastMsg, MarkerDisputed)
+				r.disputeText = dispute
 				r.rep.Info("autonomous mode: dispute upheld after the forced re-check, accepting the rebuttals")
 				return nil
 			}
@@ -89,7 +93,7 @@ func (r *run) disputeGate(tagBase, preSHA string) error {
 			switch action {
 			case disputeAccept:
 				r.disputeAccepted = true
-				r.disputeText = section(r.lastMsg, MarkerDisputed)
+				r.disputeText = dispute
 				return nil
 			case disputeAbort:
 				return fmt.Errorf("%w: aborted at the dispute gate", ErrGateAborted)

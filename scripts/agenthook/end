@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+input=$(cat)
+session_id=$(printf '%s\n' "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [[ -z "$session_id" ]]; then
+	exit 0
+fi
+
+if command -v shasum >/dev/null 2>&1; then
+	key=$(printf '%s' "$session_id" | shasum -a 256 | cut -d ' ' -f 1)
+else
+	key=$(printf '%s' "$session_id" | sha256sum | cut -d ' ' -f 1)
+fi
+state_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-path quorum-hook-state)
+rm -f -- "$state_dir/$key.base" "$state_dir/$key.failed"

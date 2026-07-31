@@ -56,6 +56,7 @@ func (n Num) MarshalJSON() ([]byte, error) { return json.Marshal(int(n)) }
 // Record is everything known about one pull request.
 type Record struct {
 	Title  string `json:"title,omitempty"`
+	Author string `json:"author,omitempty"`
 	Status string `json:"status,omitempty"`
 	Reason string `json:"reason,omitempty"`
 

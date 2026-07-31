@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -127,6 +128,100 @@ func (c *Client) CommentBody(ctx context.Context, dir string, number int, body s
 	return strings.TrimSpace(string(out)), nil
 }
 
+// PRReview is the part of a submitted GitHub review needed to make approval
+// idempotent. GitHub changes State to DISMISSED when an approval no longer
+// counts, so only APPROVED reviews are reusable.
+type PRReview struct {
+	ID          int64     `json:"id"`
+	State       string    `json:"state"`
+	CommitID    string    `json:"commit_id"`
+	Body        string    `json:"body"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	User        struct {
+		Login string `json:"login"`
+	} `json:"user"`
+}
+
+// Reviews lists every submitted review. The endpoint is paginated because a
+// long-running pull request may have more reviews than one page.
+func (c *Client) Reviews(ctx context.Context, repo string, number int) ([]PRReview, error) {
+	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number), "--paginate")
+	if err != nil {
+		return nil, err
+	}
+	var reviews []PRReview
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var page []PRReview
+		if err := dec.Decode(&page); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("gh api pull request reviews: %w", err)
+		}
+		reviews = append(reviews, page...)
+	}
+	return reviews, nil
+}
+
+// ApproveHead approves one exact commit rather than whichever head happens to
+// be current when GitHub receives the request.
+func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, body string) (PRReview, error) {
+	// A timed-out POST may have reached GitHub. Do not retry it blindly and
+	// create duplicate reviews; a later AutoMerge run lists reviews first and
+	// can tell whether this one landed.
+	once := *c
+	once.Attempts = 1
+	out, err := once.run(ctx, "api", "--method", "POST",
+		fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number),
+		"-f", "event=APPROVE", "-f", "commit_id="+sha, "-f", "body="+body)
+	if err != nil {
+		return PRReview{}, err
+	}
+	var created PRReview
+	if err := json.Unmarshal(out, &created); err != nil {
+		return PRReview{}, fmt.Errorf("gh api create pull request review: %w", err)
+	}
+	if created.ID == 0 {
+		return PRReview{}, fmt.Errorf("%w: gh returned no review id after approval", ErrTransient)
+	}
+	return created, nil
+}
+
+// DismissReview revokes one exact submitted review. Callers only use IDs
+// returned by ApproveHead, so this cannot dismiss a pre-existing user review.
+func (c *Client) DismissReview(ctx context.Context, repo string, number int, reviewID int64, message string) error {
+	_, err := c.run(ctx, "api", "--method", "PUT",
+		fmt.Sprintf("repos/%s/pulls/%d/reviews/%d/dismissals", repo, number, reviewID),
+		"-f", "message="+message)
+	return err
+}
+
+// MergeHead asks GitHub to merge one exact head. Unlike a persistent
+// auto-merge request, the REST operation cannot survive a later push.
+func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha string) error {
+	out, err := c.run(ctx, "api", "--method", "PUT",
+		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
+		"-f", "merge_method=merge", "-f", "sha="+sha)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Merged  bool   `json:"merged"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return fmt.Errorf("gh api merge pull request: %w", err)
+	}
+	if !response.Merged {
+		message := strings.TrimSpace(response.Message)
+		if message == "" {
+			message = "GitHub reported merged=false"
+		}
+		return fmt.Errorf("GitHub did not merge the reviewed head: %s", message)
+	}
+	return nil
+}
+
 // CheckState is the outcome of one CI observation.
 type CheckState int
 
@@ -135,7 +230,7 @@ const (
 	ChecksPass CheckState = iota
 	// ChecksFail means at least one check failed or was cancelled.
 	ChecksFail
-	// ChecksNone means GitHub reports no checks at all for this PR.
+	// ChecksNone means GitHub reports no checks selected by the request.
 	ChecksNone
 	// ChecksPending means checks exist but have not settled yet.
 	ChecksPending
@@ -146,15 +241,28 @@ const (
 // state change that is not terminal.
 const ghChecksPendingExit = 8
 
-// WatchChecks blocks until CI settles, mirroring `gh pr checks --watch
-// --fail-fast`. It returns the state plus the tail of gh's output for logging.
+// WatchChecks blocks until every reported CI check settles.
 //
 // This deliberately bypasses the retry client: the call is expected to run for
 // as long as CI does, so the short per-call timeout and the retry policy would
-// both be wrong. Transient GitHub errors surface as ChecksFail and the caller's
-// own retry loop handles them.
+// both be wrong. Transient GitHub errors are marked so the caller's own retry
+// loop can handle them.
 func (c *Client) WatchChecks(ctx context.Context, dir string, number int) (CheckState, string, error) {
-	cmd := exec.CommandContext(ctx, c.Bin, "pr", "checks", fmt.Sprint(number), "--watch", "--fail-fast")
+	return c.watchChecks(ctx, dir, number, false)
+}
+
+// WatchRequiredChecks blocks until the checks enforced by branch rules settle.
+// Optional failures must not stop a merge that GitHub would allow.
+func (c *Client) WatchRequiredChecks(ctx context.Context, dir string, number int) (CheckState, string, error) {
+	return c.watchChecks(ctx, dir, number, true)
+}
+
+func (c *Client) watchChecks(ctx context.Context, dir string, number int, required bool) (CheckState, string, error) {
+	args := []string{"pr", "checks", fmt.Sprint(number), "--watch", "--fail-fast"}
+	if required {
+		args = append(args, "--required")
+	}
+	cmd := exec.CommandContext(ctx, c.Bin, args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	text := string(out)
@@ -165,15 +273,36 @@ func (c *Client) WatchChecks(ctx context.Context, dir string, number int) (Check
 	if err == nil {
 		return ChecksPass, text, nil
 	}
-	// gh phrases this as "no checks reported on the <sha> commit".
-	if strings.Contains(strings.ToLower(text), "no checks reported") {
+	// With --required, gh says "no required checks reported" instead.
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "no checks reported") || strings.Contains(lower, "no required checks reported") {
 		return ChecksNone, text, nil
 	}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && ee.ExitCode() == ghChecksPendingExit {
 		return ChecksPending, text, nil
 	}
+	// A failed check's name or description may contain the same words as a
+	// transport error. Prefer the status column gh printed over matching those
+	// words, or a test named "connection timeout" can be retried as pending.
+	if reportsFailedCheck(text) {
+		return ChecksFail, text, nil
+	}
+	if looksTransient(text) {
+		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstLine(text))
+	}
 	return ChecksFail, text, nil
+}
+
+func reportsFailedCheck(output string) bool {
+	for line := range strings.Lines(output) {
+		for _, field := range strings.Fields(line) {
+			if field == "fail" || field == "cancel" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FailingCheck is one red check, as handed to the Codex fix session.
