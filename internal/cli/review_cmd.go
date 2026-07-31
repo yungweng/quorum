@@ -141,7 +141,9 @@ func (a *app) cmdReview(argv []string) int {
 	if automerge.Allowed(a.cfg.AutoMergeReview, a.cfg.Post, res.Findings) {
 		mergeResult, mergeErr := a.autoMerge(ctx, client, repo, number, res.Findings.HeadSHA)
 		if mergeErr != nil {
-			a.logRun(rep.historyRun(repo, started, history.Failed, mergeErr.Error(), res))
+			// The review finished and was posted. Keep that result in OPEN;
+			// the merge error remains the reason and the command still fails.
+			a.logRun(rep.historyRun(repo, started, history.OK, mergeErr.Error(), res))
 			if notify {
 				a.out.Notify("quorum: auto-merge failed", fmt.Sprintf("PR #%d: %s", number, mergeErr))
 			}

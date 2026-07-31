@@ -198,7 +198,8 @@ func TestAutoMergePendingPreservesReviewWithoutHandlingRequest(t *testing.T) {
 	}
 }
 
-func TestRetryAutoMergeAfterChecksPass(t *testing.T) {
+func mergeRetryGH(t *testing.T, cases string) (*gh.Client, string, string) {
+	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "gh")
 	count := filepath.Join(dir, "count")
@@ -207,7 +208,18 @@ func TestRetryAutoMergeAfterChecksPass(t *testing.T) {
 		"n=$(cat " + count + " 2>/dev/null || echo 0)\n" +
 		"n=$((n+1)); echo $n > " + count + "\n" +
 		"printf '%s\\n' \"$*\" >> " + args + "\n" +
-		`case "$n" in
+		cases + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := gh.New(bin)
+	client.Backoff = time.Millisecond
+	client.Timeout = 5 * time.Second
+	return client, dir, args
+}
+
+func TestRetryAutoMergeAfterChecksPass(t *testing.T) {
+	client, dir, args := mergeRetryGH(t, `case "$n" in
   1) echo 'all checks passed' ;;
   2) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   3) echo 'reviewer' ;;
@@ -215,13 +227,7 @@ func TestRetryAutoMergeAfterChecksPass(t *testing.T) {
   5) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   6) echo '{"merged":true}' ;;
 esac
-`
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	client := gh.New(bin)
-	client.Backoff = time.Millisecond
-	client.Timeout = 5 * time.Second
+`)
 	r := &Runner{GH: client}
 
 	result, err := r.retryAutoMergeAfterChecks(context.Background(), dir, "acme/api", 42, "abc123")
@@ -239,6 +245,46 @@ esac
 		if !strings.Contains(string(calls), want) {
 			t.Errorf("calls are missing %q:\n%s", want, calls)
 		}
+	}
+}
+
+func TestRetryAutoMergeGivesChecksTimeToRegister(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		secondCheck string
+	}{
+		{name: "checks register", secondCheck: "echo 'all checks passed'"},
+		{name: "grace expires", secondCheck: "echo 'no checks reported on the abc123 commit' >&2; exit 1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, dir, args := mergeRetryGH(t, `case "$n" in
+  1) echo 'no checks reported on the abc123 commit' >&2; exit 1 ;;
+  2) `+test.secondCheck+` ;;
+  3) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  4) echo 'reviewer' ;;
+  5) echo '[{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"reviewer"}}]' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  7) echo '{"merged":true}' ;;
+esac`)
+			r := &Runner{GH: client}
+
+			result, err := r.retryAutoMergeAfterChecksWithin(
+				context.Background(), dir, "acme/api", 42, "abc123", 20*time.Millisecond,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != automerge.Merged {
+				t.Fatalf("result = %+v", result)
+			}
+			calls, err := os.ReadFile(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(calls), "pr checks 42 --watch --fail-fast"); got != 2 {
+				t.Fatalf("check calls = %d, want 2:\n%s", got, calls)
+			}
+		})
 	}
 }
 

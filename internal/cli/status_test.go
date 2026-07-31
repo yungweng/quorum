@@ -91,6 +91,35 @@ func TestOpenSectionIncludesSuccessfulManualRuns(t *testing.T) {
 	}
 }
 
+func TestOpenSectionKeepsManualResultsWhenMergeFails(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{
+			Key: "acme/api#42", Title: "review result", Kind: history.KindReview,
+			Source: history.SourceManual, Outcome: history.OK, Reviewed: true,
+			Reason: "auto-merge failed: permission denied", EndedAt: now,
+		},
+		{
+			Key: "acme/web#43", Title: "fix-loop result", Kind: history.KindBabysit,
+			Source: history.SourceManual, Outcome: history.Converged, Reviewed: true,
+			Reason: "auto-merge failed: permission denied", EndedAt: now.Add(-time.Minute),
+		},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, _ := render(t, a, nil)
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "review result", "web #43", "fix-loop result"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("OPEN is missing %q after a merge failure:\n%s", want, screen)
+		}
+	}
+}
+
 func TestNewerFailedManualRunHidesStaleReview(t *testing.T) {
 	a := testApp(t)
 	now := time.Now()

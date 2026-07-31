@@ -195,10 +195,15 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 			run.Critical = res.LastFindings.Critical
 			run.Suggestions = res.LastFindings.Suggestions
 			run.Questions = res.LastFindings.Questions
+			if res.LastFindings.CommentURL != nil {
+				run.CommentURL = *res.LastFindings.CommentURL
+			}
 		}
-		if res.Converged && err == nil {
+		if res.Converged {
 			run.Outcome = history.Converged
-			run.Reason = ""
+			if err == nil {
+				run.Reason = ""
+			}
 		}
 	}
 	if repo == "" || number == 0 && run.Branch == "" {

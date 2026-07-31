@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
+	"github.com/yungweng/quorum/internal/review"
 )
 
 func TestManualCommandsDefaultToCurrentBranchPR(t *testing.T) {
@@ -90,5 +93,27 @@ func TestBranchBabysitCreatesAHistoryRun(t *testing.T) {
 	if run.Key != "acme/api#branch:feature/crumb-tray" ||
 		run.Branch != "feature/crumb-tray" {
 		t.Fatalf("history run = %+v", run)
+	}
+}
+
+func TestConvergedBabysitMergeFailureKeepsConvergedHistory(t *testing.T) {
+	mergeErr := errors.New("auto-merge failed: permission denied")
+	commentURL := "https://example.invalid/comment/42"
+	result := &loop.Result{
+		PR: gh.FullPR{
+			Number: 42,
+			Title:  "fixed change",
+		},
+		Rounds: 2, Converged: true,
+		LastFindings: review.Findings{PR: 42, Questions: 1, CommentURL: &commentURL},
+	}
+	result.PR.Author.Login = "example-user"
+	run := babysitHistory("acme/api", 42, time.Now(), result, mergeErr)
+
+	if run.Outcome != history.Converged || !run.Reviewed || run.Reason != mergeErr.Error() {
+		t.Fatalf("history run = %+v", run)
+	}
+	if run.Rounds != 2 || run.Questions != 1 || run.CommentURL != commentURL {
+		t.Fatalf("fix-loop result was not preserved: %+v", run)
 	}
 }
