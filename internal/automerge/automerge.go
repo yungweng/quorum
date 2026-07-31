@@ -90,6 +90,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		return reviews[i].SubmittedAt.Before(reviews[j].SubmittedAt)
 	})
 	approved := false
+	var reusableApprovalID int64
 	var createdReview gh.PRReview
 	for _, review := range reviews {
 		if !strings.EqualFold(review.User.Login, login) {
@@ -98,9 +99,17 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		switch review.State {
 		case "APPROVED":
 			approved = review.CommitID == reviewedSHA
+			reusableApprovalID = 0
+			if approved && review.Body == approvalBody {
+				reusableApprovalID = review.ID
+			}
 		case "CHANGES_REQUESTED", "DISMISSED":
 			approved = false
+			reusableApprovalID = 0
 		}
+	}
+	if approved {
+		result.approvalReviewID = reusableApprovalID
 	}
 	if !approved {
 		current, err := client.PRDetails(ctx, repo, number)

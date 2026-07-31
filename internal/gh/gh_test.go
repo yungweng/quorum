@@ -140,6 +140,14 @@ func TestApproveReturnsReviewID(t *testing.T) {
 	}
 }
 
+func TestMergeHeadRejectsUnmergedResponse(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"merged":false,"message":"Base branch was modified"}'`)
+	err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "Base branch was modified") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestWatchChecksClassifiesTransientFailure(t *testing.T) {
 	bin, _ := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
 	state, _, err := testClient(bin).WatchChecks(context.Background(), t.TempDir(), 42)

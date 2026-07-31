@@ -199,10 +199,27 @@ func (c *Client) DismissReview(ctx context.Context, repo string, number int, rev
 // MergeHead asks GitHub to merge one exact head. Unlike a persistent
 // auto-merge request, the REST operation cannot survive a later push.
 func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha string) error {
-	_, err := c.run(ctx, "api", "--method", "PUT",
+	out, err := c.run(ctx, "api", "--method", "PUT",
 		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
 		"-f", "merge_method=merge", "-f", "sha="+sha)
-	return err
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Merged  bool   `json:"merged"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return fmt.Errorf("gh api merge pull request: %w", err)
+	}
+	if !response.Merged {
+		message := strings.TrimSpace(response.Message)
+		if message == "" {
+			message = "GitHub reported merged=false"
+		}
+		return fmt.Errorf("GitHub did not merge the reviewed head: %s", message)
+	}
+	return nil
 }
 
 // CheckState is the outcome of one CI observation.
