@@ -18,6 +18,7 @@ const approvalProvenance = "<!-- quorum:auto-merge-approval:v1 -->"
 const approvalBody = approvalText + " " + approvalProvenance
 const driftDismissalBody = "The pull request head changed after this approval was submitted."
 const failureDismissalBody = "Automatic merge did not complete, so this approval is no longer active."
+const approvalCleanupTimeout = 30 * time.Second
 
 const (
 	Merged = "merged"
@@ -396,7 +397,9 @@ func dismissCreatedApprovalWith(ctx context.Context, client *gh.Client, repo str
 		return cause
 	}
 	reviewID := result.approvalReviewID
-	if err := client.DismissReview(ctx, repo, number, reviewID, message); err != nil {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), approvalCleanupTimeout)
+	defer cancel()
+	if err := client.DismissReview(cleanupCtx, repo, number, reviewID, message); err != nil {
 		return errors.Join(cause, fmt.Errorf("dismissing approval %d %s: %w", reviewID, reason, err))
 	}
 	result.approvalReviewID = 0

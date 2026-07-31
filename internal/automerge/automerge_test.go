@@ -495,6 +495,25 @@ esac`)
 	}
 }
 
+func TestDismissApprovalUsesFreshContextAfterCancellation(t *testing.T) {
+	client, argsFile := fakeGH(t, ``)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cause := errors.New("auto-merge canceled")
+	result := Result{ApprovalCreated: true, approvalReviewID: 99}
+
+	err := dismissCreatedApprovalAfterFailure(ctx, client, "acme/api", 42, &result, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want original cause", err)
+	}
+	if result.approvalReviewID != 0 {
+		t.Fatalf("canceled run left the approval active: %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("canceled run did not dismiss the approval:\n%s", args)
+	}
+}
+
 func TestRetryRetriesTransientChecksWatchFailure(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
