@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo=$(git rev-parse --show-toplevel)
+tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/quorum-pre-push.XXXXXX")
+worktrees=()
+
+cleanup() {
+	local worktree
+	for worktree in "${worktrees[@]}"; do
+		git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+	done
+	rmdir "$tmp_root" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+checked=()
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_oid _ _; do
+	if [[ "$local_oid" == "$zero" || "$local_ref" == '(delete)' ]]; then
+		continue
+	fi
+
+	commit=$(git -C "$repo" rev-parse --verify "$local_oid^{commit}")
+	already_checked=false
+	for checked_commit in "${checked[@]}"; do
+		if [[ "$checked_commit" == "$commit" ]]; then
+			already_checked=true
+			break
+		fi
+	done
+	if [[ "$already_checked" == true ]]; then
+		continue
+	fi
+	checked+=("$commit")
+
+	worktree="$tmp_root/check-${#checked[@]}"
+	worktrees+=("$worktree")
+	printf 'Checking %s at %.12s before push...\n' "$local_ref" "$commit"
+	git -C "$repo" worktree add --detach --quiet "$worktree" "$commit"
+	if ! make -C "$worktree" check; then
+		printf 'Push blocked: checks failed for %s at %s.\n' "$local_ref" "$commit" >&2
+		exit 1
+	fi
+	git -C "$repo" worktree remove --force "$worktree"
+done

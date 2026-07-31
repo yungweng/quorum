@@ -123,12 +123,22 @@ at `/opt/homebrew/bin/quorum`.
 
 ## Checks before committing
 
+Enable the tracked Git hooks once per clone:
+
 ```bash
-gofmt -l .
-go test -race ./...
-golangci-lint run ./...
+make install-hooks
+```
+
+Run the shared format, race-test, build and lint checks with:
+
+```bash
+make check
 go run . --help && go run . review --help && go run . babysit --help
 ```
+
+Project-local Claude Code and Codex Stop hooks run `make check` after an agent
+changes Go or check configuration. Their session state lives under `.git` and
+must not be moved into the working tree.
 
 ## Test data
 

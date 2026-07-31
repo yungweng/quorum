@@ -38,6 +38,7 @@ brew install --cask codex     # Homebrew formulas cannot depend on a cask
 From a checkout, which needs Go 1.25 or newer:
 
 ```bash
+make install-hooks
 make dev
 ```
 
@@ -49,6 +50,16 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 
 Requires `gh` (authenticated), `git` and `codex`. `direnv` is optional and only
 needed for projects that have an `.envrc`.
+
+`make install-hooks` is needed once per clone. It enables the tracked Git hooks:
+pre-commit rejects whitespace errors and unformatted staged Go files, while
+pre-push runs the full check against the commits being pushed. Run the same
+format, race-test, build and lint checks directly with `make check`.
+
+Claude Code and Codex also load the project hooks from `.claude/` and `.codex/`.
+After either agent changes Go or check configuration, its Stop hook runs
+`make check` and returns failures to the agent. Review new or changed hooks when
+the client asks; Codex exposes that review through `/hooks`.
 
 ## quorum review
 

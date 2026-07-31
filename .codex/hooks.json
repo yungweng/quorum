@@ -1,0 +1,41 @@
+{
+  "description": "Run repository checks after Codex changes quality-critical files.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GO111MODULE=off go run \"$(git rev-parse --show-toplevel)/scripts/agenthook/main.go\" start",
+            "timeout": 30,
+            "statusMessage": "Recording project check baseline"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GO111MODULE=off go run \"$(git rev-parse --show-toplevel)/scripts/agenthook/main.go\" stop",
+            "timeout": 600,
+            "statusMessage": "Checking project changes"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GO111MODULE=off go run \"$(git rev-parse --show-toplevel)/scripts/agenthook/main.go\" end",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
