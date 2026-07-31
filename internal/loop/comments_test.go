@@ -83,6 +83,8 @@ func TestProhibitedPRCommentTermMatchesWholeWords(t *testing.T) {
 		"one agent",
 		"several agents",
 		"release_automation",
+		"generated using artificial intelligence",
+		"Artificial-intelligence generated",
 	} {
 		if got := prohibitedPRCommentTerm(text); got == "" {
 			t.Errorf("prohibitedPRCommentTerm(%q) found nothing", text)

@@ -693,12 +693,17 @@ func (r *run) postPRComment(kind, body string) (string, bool) {
 }
 
 func prohibitedPRCommentTerm(text string) string {
-	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
+	words := strings.FieldsFunc(text, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
+	})
+	for i, word := range words {
 		switch strings.ToLower(word) {
 		case "ai", "openai", "agent", "agents", "codex", "automation":
 			return word
+		}
+		if i+1 < len(words) && strings.EqualFold(word, "artificial") &&
+			strings.EqualFold(words[i+1], "intelligence") {
+			return word + " " + words[i+1]
 		}
 	}
 	return ""
