@@ -263,8 +263,9 @@ shared dependency cache removed.
 - `NICE` lowers the priority of the whole review process tree.
 - `LOAD_LIMIT` is off by default. Turned on, it holds new reviews back while the
   machine is busy; they start on a later poll.
-- `HISTORY` is how many finished runs the dashboard lists. It counts runs, not
-  pull requests, so four reviews of the same one take four lines.
+- `HISTORY` is how many finished runs the dashboard reads. It counts runs, not
+  pull requests, so four reviews of the same one are four of the twenty; they
+  share one line on screen, which says how many they were.
 
 ## The dashboard
 
@@ -282,7 +283,17 @@ in the order the questions get asked:
   the dashboard knows.
 - **ACTIVE** is everything in flight, agent and terminal alike. Its count covers
   agent slots only.
-- **HISTORY** is one line per finished run, described below.
+- **HISTORY** is one line per pull request, newest first, reporting its newest
+  run. Where more than one run went into it, the line says how many there were
+  and how many failed, so a failure a later run fixed is not hidden by it. The
+  log behind the section is described below.
+
+All three sections draw the same columns at the same widths, measured from
+every row of the frame before any of it is printed. What a narrow terminal
+costs is fixed rather than shared out: the author column goes first and goes
+whole, then the explanation behind a result, and the repository and number
+last. A column that cannot keep a useful width is dropped rather than cut to a
+stub, on the grounds that a column which is gone is understood as gone.
 
 Whether a pull request is open, queued for Auto-Merge, merged or closed has to
 come from GitHub. `watch` asks in the background, once for every visible pull

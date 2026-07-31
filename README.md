@@ -219,10 +219,9 @@ ACTIVE  1 / 2
       queued · waiting for a free slot
 
 HISTORY
-  ✓ 21:02  payments #98               2B 1C 3S  comment ↗
-  ✓ 19:42  toaster-api #2002          fix, 2 rounds · nothing found
-  ✓ 18:42  toaster-api #2002          0B 1C 0S  comment ↗
-  ✗ 29 Jul toaster-api #1993          failed, reviewer-2 timed out after 45m
+  ✓  21:02   payments #98       @robin     2B 1C 3S       comment ↗
+  ✓  19:42   toaster-api #2002  @sam       2 runs         nothing found  comment ↗  merged
+  ✗  29 Jul  toaster-api #1993  @robin     failed         reviewer-2 timed out after 45m
 
 every repo that asks you · 2 at a time, 6 reviewers each · auto-merge off · 5.0 GB cache
 ```
@@ -243,11 +242,17 @@ label under each line say which is which. Its count covers agent slots only, so
 a review or a fix loop you ran yourself does not spend one. On an idle machine
 the whole section is one line saying so.
 
-HISTORY is one line per finished run, newest first, however it was started.
-Note the two entries for `toaster-api #2002`: a review and then a fix loop, as
-two runs rather than one overwriting the other. `HISTORY=20` in the config sets
-how many are listed. The log behind it is described in
+HISTORY is one line per pull request, newest first, however its runs were
+started. `toaster-api #2002` says `2 runs`, a review and then a fix loop: the
+log keeps every run, and the line says how many there were and how many of them
+failed rather than spending a row on each. `HISTORY=20` in the config sets how
+many are listed. The log behind it is described in
 [the reference](docs/reference.md#the-history-log).
+
+Every section draws the same columns at the same widths, measured from what is
+actually on screen. On a narrow terminal the columns give way in a fixed order,
+whole rather than shortened to a stub: the author first, then the explanation
+behind a result, and the repository and number last.
 
 `quorum watch` redraws the same screen as it changes and marks pull requests
 that have since been merged or closed.

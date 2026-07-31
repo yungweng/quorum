@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -352,12 +353,14 @@ func TestDashboardShowsPRAuthorInEverySection(t *testing.T) {
 		"acme/open#42":    gh.StateOpen,
 		"acme/history#44": gh.StateMerged,
 	})
+	// The author is a column of its own, so how much space sits between it and
+	// the label is whatever the widest row on screen needed.
 	for _, want := range []string{
-		"open #42 · @open-author",
-		"active #43 · @active-author",
-		"history #44 · @history-author",
+		`open #42 +@open-author`,
+		`active #43 +@active-author`,
+		`history #44 +@history-author`,
 	} {
-		if !strings.Contains(ui.StripANSI(screen), want) {
+		if !regexp.MustCompile(want).MatchString(ui.StripANSI(screen)) {
 			t.Errorf("dashboard is missing %q:\n%s", want, screen)
 		}
 	}
@@ -761,17 +764,21 @@ func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
 	}
 
 	screen, shown := render(t, a, nil)
-	historySection := sectionOf(t, screen, "HISTORY")
-	if got := strings.Count(historySection, "api #42"); got != 2 {
+	historySection := ui.StripANSI(sectionOf(t, screen, "HISTORY"))
+	// The runs on one pull request share a line, and that line says how many
+	// they were: the log keeps them apart, the screen just does not spend a row
+	// each on eight reviews of the same branch.
+	if got := strings.Count(historySection, "api #42"); got != 1 {
 		t.Errorf("two runs on one pull request produced %d lines:\n%s", got, screen)
 	}
 	// Newest first.
 	if strings.Index(historySection, "web #7") > strings.Index(historySection, "api #42") {
 		t.Errorf("the history is not newest first:\n%s", screen)
 	}
-	for _, want := range []string{"fix, 3 rounds", "0B 2C 0S", "reviewer-2 timed out"} {
-		if !strings.Contains(screen, want) {
-			t.Errorf("history is missing %q:\n%s", want, screen)
+	// The group reports its newest run, which is the fix loop, and the count.
+	for _, want := range []string{"2 runs", "nothing found", "reviewer-2 timed out"} {
+		if !strings.Contains(historySection, want) {
+			t.Errorf("history is missing %q:\n%s", want, historySection)
 		}
 	}
 	if !slices.Contains(shown, "acme/web#7") {
@@ -1009,4 +1016,137 @@ func lineWith(t *testing.T, screen, want string) string {
 	}
 	t.Fatalf("no line contains %q:\n%s", want, screen)
 	return ""
+}
+
+// columnOf is the screen column want starts in, which is what alignment is
+// judged by. Byte offsets say nothing about it: the marks and the ellipsis are
+// multi byte, and a title in Japanese is half as many runes as columns.
+func columnOf(line, want string) int {
+	plain := ui.StripANSI(line)
+	i := strings.Index(plain, want)
+	if i < 0 {
+		return -1
+	}
+	return ui.Cells(plain[:i])
+}
+
+// The bug this table replaced: the identity column was sized per line, wide
+// when GitHub had told us who opened the pull request and eighteen columns
+// narrower when it had not, so a result landed at one of two offsets depending
+// on something the result has nothing to do with.
+func TestHistoryColumnsDoNotMoveWithTheAuthor(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for i, author := range []string{"example-user", "", "other-user", ""} {
+		if err := history.Append(a.p.HistoryFile, history.Run{
+			Key: fmt.Sprintf("acme/api#%d", 40+i), Author: author,
+			Kind: history.KindReview, Outcome: history.OK, Reviewed: true,
+			EndedAt: now.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	section := sectionOf(t, mustRender(t, a, 140, nil), "HISTORY")
+	var offsets []int
+	for _, line := range strings.Split(section, "\n")[1:] {
+		offsets = append(offsets, columnOf(line, "nothing found"))
+	}
+	if len(offsets) != 4 {
+		t.Fatalf("expected four history lines, got %d:\n%s", len(offsets), section)
+	}
+	for _, got := range offsets {
+		if got != offsets[0] {
+			t.Errorf("the result column moves between lines, offsets %v:\n%s", offsets, section)
+			break
+		}
+	}
+}
+
+// Every section draws the same two leading columns at the same width, so a run
+// in flight and a run that finished can be read as one list.
+func TestSectionsShareTheIdentityColumns(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/open#42", func(r *state.Record) {
+		r.Title = "still open"
+		r.Author = "example-user"
+		r.Mark(state.OK, "")
+	})
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/a-much-longer-repository#7", Author: "other-user",
+		Kind: history.KindReview, Outcome: history.OK, Reviewed: true, EndedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	screen := mustRender(t, a, 140, map[string]string{"acme/open#42": gh.StateOpen})
+	open := columnOf(lineWith(t, screen, "open #42"), "@example-user")
+	past := columnOf(lineWith(t, screen, "a-much-longer-repository #7"), "@other-user")
+	if open < 0 || past < 0 {
+		t.Fatalf("an author column is missing:\n%s", screen)
+	}
+	// The history line carries a time column the open line does not, so the two
+	// start at different offsets; what has to match is the width the label
+	// column was given, which is the distance from the label to the author.
+	openLabel := columnOf(lineWith(t, screen, "open #42"), "open #42")
+	pastLabel := columnOf(lineWith(t, screen, "a-much-longer-repository #7"), "a-much-longer-repository #7")
+	if open-openLabel != past-pastLabel {
+		t.Errorf("the label column is %d wide in OPEN and %d in HISTORY:\n%s",
+			open-openLabel, past-pastLabel, screen)
+	}
+}
+
+// Repeated runs on one pull request share a line, and that line still says a
+// run failed. Losing that is how the state file's one record per pull request
+// used to present a branch that failed twice as a clean review.
+func TestHistoryGroupsRunsAndKeepsFailuresVisible(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for i, run := range []history.Run{
+		{Outcome: history.Failed, Reason: "reviewer-2 timed out"},
+		{Outcome: history.Failed, Reason: "reviewer-1 timed out"},
+		{Outcome: history.OK, Reviewed: true},
+	} {
+		run.Key, run.Kind = "acme/api#42", history.KindReview
+		run.EndedAt = now.Add(time.Duration(i) * time.Minute)
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	section := ui.StripANSI(sectionOf(t, mustRender(t, a, 140, nil), "HISTORY"))
+	if got := strings.Count(section, "api #42"); got != 1 {
+		t.Fatalf("three runs on one pull request produced %d lines:\n%s", got, section)
+	}
+	if !strings.Contains(section, "3 runs, 2 failed") {
+		t.Errorf("the group does not say what it collapsed:\n%s", section)
+	}
+	// The newest run succeeded, so that is what the mark reports.
+	if !strings.Contains(section, "nothing found") {
+		t.Errorf("the group does not report its newest run:\n%s", section)
+	}
+}
+
+func mustRender(t *testing.T, a *app, width int, ends map[string]string) string {
+	t.Helper()
+	var b strings.Builder
+	a.dashboard(&ui.Writer{Out: &b, Width: width}, ends)
+	return b.String()
+}
+
+// A fix loop on a branch has no number and no author, but it does sit in the
+// label column, so it has to be measured with everything else. Left out, it
+// was cut to a width taken from rows it has nothing to do with, and on a frame
+// holding nothing else there was no width to be cut to at all.
+func TestBranchRunKeepsItsLabel(t *testing.T) {
+	a := testApp(t)
+	babysit(t, a, loop.Progress{
+		PID: os.Getpid(), Repo: "acme/api", Branch: "feature/crumb-tray",
+		StartedAt: time.Now(), MaxIter: 4,
+	})
+
+	active := ui.StripANSI(sectionOf(t, mustRender(t, a, 140, nil), "ACTIVE"))
+	if !strings.Contains(active, "api feature/crumb-tray") {
+		t.Errorf("the branch label was cut away:\n%s", active)
+	}
 }
