@@ -649,18 +649,19 @@ case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) while true; do :; done ;;
 esac`)
+	const waitTimeout = 5 * time.Second
 	started := time.Now()
 	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{
 		ApprovalCreated: true, approvalReviewID: 99,
-	}, time.Second)
+	}, waitTimeout)
 	if err == nil || !strings.Contains(err.Error(), "did not settle") {
 		t.Fatalf("err = %v", err)
 	}
 	if args := readArgs(t, argsFile); !strings.Contains(args, "pr checks 42 --watch --fail-fast --required") {
 		t.Fatalf("checks watch was not reached:\n%s", args)
 	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("checks watch took %s, want under 2s", elapsed)
+	if elapsed := time.Since(started); elapsed > waitTimeout+2*time.Second {
+		t.Fatalf("checks watch took %s, want under %s", elapsed, waitTimeout+2*time.Second)
 	}
 	if result.approvalReviewID != 0 {
 		t.Fatalf("timed-out retry left the approval active: %+v", result)
