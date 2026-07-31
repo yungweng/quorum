@@ -115,6 +115,21 @@ esac`)
 	}
 }
 
+func TestRunRejectsDraftBeforeApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","isDraft":true,"author":{"login":"example-user"}}' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "is a draft") {
+		t.Fatalf("err = %v", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("draft reached a side effect:\n%s", args)
+	}
+}
+
 func TestRunRejectsChangeRequestCreatedAfterApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in

@@ -57,6 +57,44 @@ Adjusted the retry bound and ran the package tests.`
 	}
 }
 
+func TestPRCommentRejectsProhibitedText(t *testing.T) {
+	rep := &warningReporter{}
+	r := &run{
+		p:   &Pipeline{GH: gh.New("false")},
+		o:   Options{RepoRoot: t.TempDir()},
+		ctx: context.Background(),
+		rep: rep,
+		pr:  gh.FullPR{Number: 42},
+	}
+	body := fixCommentBody("CI fix 1", "", "", "PR COMMENT:\nCodex fixed the check.", "", "abc123 Fix check")
+	if _, posted := r.postPRComment("fix-log comment", body); posted {
+		t.Fatal("CI fix comment with prohibited text was posted")
+	}
+	if len(rep.warnings) != 1 || !strings.Contains(rep.warnings[0], "prohibited term") {
+		t.Fatalf("warnings = %v", rep.warnings)
+	}
+}
+
+func TestProhibitedPRCommentTermMatchesWholeWords(t *testing.T) {
+	for _, text := range []string{
+		"AI updated this.",
+		"OpenAI generated this.",
+		"codex-generated",
+		"one agent",
+		"several agents",
+		"release_automation",
+	} {
+		if got := prohibitedPRCommentTerm(text); got == "" {
+			t.Errorf("prohibitedPRCommentTerm(%q) found nothing", text)
+		}
+	}
+	for _, text := range []string{"maintain the failure", "agency update", "automatic merge"} {
+		if got := prohibitedPRCommentTerm(text); got != "" {
+			t.Errorf("prohibitedPRCommentTerm(%q) = %q", text, got)
+		}
+	}
+}
+
 func TestDisputeCommentBodyLinksTheReviewAndDropsTheMarker(t *testing.T) {
 	dispute := `DISPUTED FINDINGS:
 1. Critical “Home fallback”: /payroll is resolved by PLANNING_SUB_PAGES first.`

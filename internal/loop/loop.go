@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/envexec"
@@ -679,12 +680,28 @@ func (r *run) postPRComment(kind, body string) (string, bool) {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment body is empty", kind, r.pr.Number))
 		return "", false
 	}
+	if term := prohibitedPRCommentTerm(body); term != "" {
+		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment contains prohibited term %q", kind, r.pr.Number, term))
+		return "", false
+	}
 	url, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, body)
 	if err != nil {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: %v", kind, r.pr.Number, err))
 		return "", false
 	}
 	return url, true
+}
+
+func prohibitedPRCommentTerm(text string) string {
+	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		switch strings.ToLower(word) {
+		case "ai", "openai", "agent", "agents", "codex", "automation":
+			return word
+		}
+	}
+	return ""
 }
 
 func fixCommentBody(label, reviewLabel, reviewURL, current, original, commits string) string {
