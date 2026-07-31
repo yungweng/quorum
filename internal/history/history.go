@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,8 @@ const (
 
 // Run is one finished run.
 type Run struct {
-	Key       string    `json:"key"` // "owner/repo#42"
+	Key       string    `json:"key"` // "owner/repo#42" or "owner/repo#branch:name"
+	Branch    string    `json:"branch,omitempty"`
 	Title     string    `json:"title,omitempty"`
 	Kind      string    `json:"kind"`
 	Source    string    `json:"source"`
@@ -70,6 +72,11 @@ type Run struct {
 	Rounds     int    `json:"rounds,omitempty"`
 	CommentURL string `json:"comment_url,omitempty"`
 	RunDir     string `json:"run_dir,omitempty"`
+}
+
+// BranchKey returns the stable identity used for runs without a pull request.
+func BranchKey(repo, branch string) string {
+	return repo + "#branch:" + branch
 }
 
 // Name is the "owner/repo" part of the key, and Number the pull request.
@@ -93,11 +100,18 @@ func (r Run) Number() int {
 	return n
 }
 
-// URL is the pull request this run was about.
+// URL is the pull request or branch this run was about.
 func (r Run) URL() string {
 	repo, number, ok := strings.Cut(r.Key, "#")
 	if !ok {
 		return ""
+	}
+	if r.Branch != "" {
+		parts := strings.Split(r.Branch, "/")
+		for i := range parts {
+			parts[i] = url.PathEscape(parts[i])
+		}
+		return "https://github.com/" + repo + "/tree/" + strings.Join(parts, "/")
 	}
 	return "https://github.com/" + repo + "/pull/" + number
 }

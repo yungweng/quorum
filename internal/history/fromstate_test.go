@@ -20,6 +20,41 @@ func TestEveryFinishedReviewIsRecorded(t *testing.T) {
 	}
 }
 
+// Every poll after a review writes the timeline cache back onto the finished
+// record, because posting the review moved the pull request's updatedAt. That
+// write leaves At alone, so it is the same run, not a new one.
+func TestBookkeepingOnAFinishedRecordIsNotANewRun(t *testing.T) {
+	done := state.Record{Status: state.OK, At: state.Now(), CommentURL: "https://example.invalid/c/1"}
+	if _, ok := FromState("acme/api#42", state.Record{Status: state.Running}, done, SourceAgent); !ok {
+		t.Fatal("the finished review was not recorded")
+	}
+	cached := done
+	cached.TimelineAt = "2026-01-01T00:00:00Z"
+	cached.SeenReqAt = "2026-01-01T00:00:00Z"
+	if _, ok := FromState("acme/api#42", done, cached, SourceAgent); ok {
+		t.Error("a timeline lookup was recorded as a second run")
+	}
+	// The next real run stamps At again, and is a new entry.
+	again := state.Record{Status: state.OK, At: "2026-01-02T10:00:00Z"}
+	if _, ok := FromState("acme/api#42", cached, again, SourceAgent); !ok {
+		t.Error("the next review was dropped")
+	}
+}
+
+// A failure repeated by orphan recovery is the same story: only the write that
+// moves At is a run.
+func TestARepeatedFailureIsRecordedOnce(t *testing.T) {
+	failed := state.Record{Status: state.Failed, Reason: "codex exited 1", At: state.Now()}
+	if _, ok := FromState("acme/api#42", state.Record{}, failed, SourceAgent); !ok {
+		t.Fatal("the failure was not recorded")
+	}
+	touched := failed
+	touched.Title = "a title"
+	if _, ok := FromState("acme/api#42", failed, touched, SourceAgent); ok {
+		t.Error("touching a failed record was recorded as a second failure")
+	}
+}
+
 // The poll re-applies a skip on every pass. Recording each one would fill the
 // log with the same line for as long as the pull request stays open.
 func TestARepeatedSkipIsRecordedOnce(t *testing.T) {

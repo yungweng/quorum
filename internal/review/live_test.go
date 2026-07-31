@@ -69,6 +69,26 @@ func TestReadLiveRejectsIncompleteMetadata(t *testing.T) {
 	}
 }
 
+func TestReadLiveAcceptsABranchWithoutAPRNumber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.json")
+	if err := publishLive(dir, path, LiveRun{
+		PID: os.Getpid(), Repo: "acme/api", Branch: "feature/crumb-tray",
+		Title: "feature/crumb-tray", StartedAt: time.Now(), Reviewers: 3,
+		RunDir: filepath.Join(dir, "run"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := readLive(path)
+	if !ok {
+		t.Fatal("branch-only live review was rejected")
+	}
+	if got.Key() != "acme/api@feature/crumb-tray" {
+		t.Errorf("branch key = %q", got.Key())
+	}
+}
+
 func TestLiveRunsRemovesADeadProcessRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "999999.json")

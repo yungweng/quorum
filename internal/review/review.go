@@ -25,16 +25,18 @@ import (
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
+	"github.com/yungweng/quorum/internal/runname"
+	"github.com/yungweng/quorum/internal/target"
 )
 
 // Failures a caller has to tell apart. The shell version signalled these as
 // exit codes 2, 3 and 4, which the CLI still maps back onto.
 var (
-	// ErrEnvrcChanged means the PR touches an .envrc and no override was given.
-	ErrEnvrcChanged = errors.New("PR changes an .envrc file")
-	// ErrHeadDrifted means the PR received a new commit while the reviewers
+	// ErrEnvrcChanged means the target touches an .envrc and no override was given.
+	ErrEnvrcChanged = errors.New("target changes an .envrc file")
+	// ErrHeadDrifted means the target received a new commit while the reviewers
 	// were running, so their findings describe code that is no longer current.
-	ErrHeadDrifted = errors.New("PR head changed during review")
+	ErrHeadDrifted = errors.New("target head changed during review")
 	// ErrAggregatorInvalid means the aggregator could not produce a comment
 	// with the required structure, twice.
 	ErrAggregatorInvalid = errors.New("aggregator output invalid")
@@ -63,6 +65,8 @@ const (
 type Options struct {
 	Repo     string // owner/repo
 	Number   int
+	Branch   string // internal branch target; empty resolves the current checkout
+	HeadSHA  string // internal branch pin; empty reviews the resolved target head
 	RepoRoot string // the checkout the worktree is created from
 
 	Runs          int
@@ -118,22 +122,26 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	rep := r.reporter()
 
-	pr, err := r.GH.ViewPR(ctx, o.RepoRoot, o.Number)
+	tgt, run, err := r.resolveRunTarget(ctx, &o)
 	if err != nil {
 		return nil, err
 	}
+	pr := tgt.PR
 	baseBranch := o.BaseBranch
 	if baseBranch == "" {
 		baseBranch = pr.BaseRefName
-	} else if baseBranch != pr.BaseRefName {
+	} else if !tgt.BranchOnly && baseBranch != pr.BaseRefName {
 		rep.Warn(fmt.Sprintf("PR base is %q, but reviewing against %q", pr.BaseRefName, baseBranch))
 	}
 	baseRef := "origin/" + baseBranch
-
-	run, err := o.runDir(pr.Number)
-	if err != nil {
-		return nil, err
+	if tgt.BranchOnly {
+		rep.Info(fmt.Sprintf(
+			"branch %s has no open PR; reviewing origin/%s against %s without posting",
+			pr.HeadRefName, pr.HeadRefName, baseRef,
+		))
+		o.Post = false
 	}
+
 	// Cache collection takes this same lock from its liveness check through
 	// dependency eviction. Create and claim the run while holding it so
 	// collection must happen wholly before this startup or see this run as live.
@@ -151,6 +159,11 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	defer releaseClaim()
+	if o.ResumeRun == "" {
+		if err := writeRunTarget(run.target, newRunTarget(o, tgt, baseBranch)); err != nil {
+			return nil, fmt.Errorf("write run target metadata: %w", err)
+		}
+	}
 
 	// A fresh run has not linked a dependency tree yet, so the age sweep may
 	// evict trees if no older run is using them. A resumed worktree may retain
@@ -164,13 +177,14 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 
 	rep.Header(RunHeader{
 		Repo: o.Repo, Number: pr.Number, Title: pr.Title, Author: pr.Author.Login,
+		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 		BaseRef: baseRef, BaseSHA: pr.BaseRefOid, HeadSHA: pr.HeadRefOid,
 		Draft: pr.IsDraft, Runs: o.Runs, Concurrency: o.Concurrency,
 		Timeout: o.ReviewTimeout, Model: o.Model, Effort: o.Effort, RunDir: run.root,
 	})
 
 	// checkout prepares the worktree and tells us what was actually reviewed.
-	reviewedBase, reviewedHead, err := r.checkout(ctx, o, run, pr, baseBranch, baseRef)
+	reviewedBase, reviewedHead, err := r.checkout(ctx, o, run, tgt, baseBranch, baseRef)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +232,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		rep.Warn(fmt.Sprintf("one or more reviewers failed; continuing with %d reviewer output(s)", len(indices)))
 	}
 
-	driftNote, err := r.checkDrift(ctx, o, baseBranch, pr.Number, reviewedBase, reviewedHead)
+	driftNote, err := r.checkDrift(ctx, o, tgt, baseBranch, reviewedBase, reviewedHead)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +247,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	prompt := aggregatorPrompt(promptMeta{
 		URL: pr.URL, Title: pr.Title, Author: pr.Author.Login, BaseRef: baseRef,
 		BaseSHA: reviewedBase, HeadSHA: reviewedHead, BaseDriftNote: driftNote,
+		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 	})
 	if err := r.aggregate(ctx, o, run, env, opts, prompt, len(indices), rep); err != nil {
 		return nil, err
@@ -288,17 +303,22 @@ type runPaths struct {
 	root     string
 	output   string
 	worktree string
+	target   string
 	comment  string
 	all      string
 	findings string
 }
 
-func (o Options) runDir(number int) (runPaths, error) {
+func (o Options) runDir(number int, branch string) (runPaths, error) {
 	root := o.ResumeRun
 	if root == "" {
 		stamp := time.Now().Format("20060102-150405")
-		root = filepath.Join(o.RunsDir,
-			fmt.Sprintf("%s-pr-%d-%s", strings.ReplaceAll(o.Repo, "/", "-"), number, stamp))
+		name := fmt.Sprintf("pr-%d", number)
+		if number == 0 {
+			name = "branch-" + runname.BranchPart(branch)
+		}
+		root = filepath.Join(o.RunsDir, fmt.Sprintf("%s-%s-%s",
+			strings.ReplaceAll(o.Repo, "/", "-"), name, stamp))
 	} else {
 		root = strings.TrimSuffix(root, "/")
 		abs, err := filepath.Abs(root)
@@ -312,15 +332,17 @@ func (o Options) runDir(number int) (runPaths, error) {
 		root:     root,
 		output:   out,
 		worktree: filepath.Join(root, "worktree"),
+		target:   filepath.Join(root, "target.json"),
 		comment:  filepath.Join(out, "final-pr-comment.md"),
 		all:      filepath.Join(out, "all-reviewers.md"),
 		findings: filepath.Join(out, "findings.json"),
 	}, nil
 }
 
-// checkout puts the PR head into a detached worktree and returns the base and
-// head SHAs that the reviewers will actually see.
-func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, pr gh.FullPR, baseBranch, baseRef string) (baseSHA, headSHA string, err error) {
+// checkout puts the target head into a detached worktree and returns the base
+// and head SHAs that the reviewers will actually see.
+func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, tgt target.Target, baseBranch, baseRef string) (baseSHA, headSHA string, err error) {
+	pr := tgt.PR
 	if o.ResumeRun != "" {
 		if _, err := os.Stat(run.output); err != nil {
 			return "", "", fmt.Errorf("resume output directory does not exist: %s", run.output)
@@ -348,12 +370,16 @@ func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, pr gh.Fu
 		return "", "", err
 	}
 
-	prRef := fmt.Sprintf("refs/quorum/pr/%d", pr.Number)
-	if err := r.Git.Fetch(ctx, o.RepoRoot, "origin",
-		fmt.Sprintf("+pull/%d/head:%s", pr.Number, prRef)); err != nil {
+	headRef := fmt.Sprintf("refs/quorum/pr/%d", pr.Number)
+	fetchRef := fmt.Sprintf("+pull/%d/head:%s", pr.Number, headRef)
+	if tgt.BranchOnly {
+		headRef = "refs/remotes/origin/" + pr.HeadRefName
+		fetchRef = fmt.Sprintf("+refs/heads/%s:%s", pr.HeadRefName, headRef)
+	}
+	if err := r.Git.Fetch(ctx, o.RepoRoot, "origin", fetchRef); err != nil {
 		return "", "", err
 	}
-	head, err := r.Git.RevParse(ctx, o.RepoRoot, prRef)
+	head, err := r.Git.RevParse(ctx, o.RepoRoot, headRef)
 	if err != nil {
 		return "", "", err
 	}
@@ -361,7 +387,7 @@ func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, pr gh.Fu
 	// moved between the two calls and the run would review one state while
 	// reporting another.
 	if head != pr.HeadRefOid {
-		return "", "", fmt.Errorf("fetched PR head %s differs from GitHub metadata %s", head, pr.HeadRefOid)
+		return "", "", fmt.Errorf("fetched target head %s differs from resolved metadata %s", head, pr.HeadRefOid)
 	}
 	if err := r.Git.WorktreeAdd(ctx, o.RepoRoot, run.worktree, head); err != nil {
 		return "", "", err
@@ -377,7 +403,10 @@ func (r *Runner) allowDirenv(ctx context.Context, o Options, run runPaths, baseR
 		return nil
 	}
 	changed, err := r.Git.ChangedFiles(ctx, run.worktree, baseRef+"...HEAD", ".envrc", ":(glob)**/.envrc")
-	if err == nil && changed != "" && !o.AllowEnvrcChange {
+	if err != nil {
+		return fmt.Errorf("check changed .envrc files: %w", err)
+	}
+	if changed != "" && !o.AllowEnvrcChange {
 		return fmt.Errorf("%w:\n%s\nReview the .envrc change manually, then rerun with --allow-envrc-change if it is safe",
 			ErrEnvrcChanged, changed)
 	}
@@ -517,25 +546,29 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 }
 
 // checkDrift compares what was reviewed against what the remote holds now.
-func (r *Runner) checkDrift(ctx context.Context, o Options, baseBranch string, number int, reviewedBase, reviewedHead string) (string, error) {
+func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, baseBranch, reviewedBase, reviewedHead string) (string, error) {
 	latestBase, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", "refs/heads/"+baseBranch)
 	if err != nil {
 		return "", err
 	}
-	latestHead, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", fmt.Sprintf("refs/pull/%d/head", number))
+	headRef := fmt.Sprintf("refs/pull/%d/head", tgt.PR.Number)
+	if tgt.BranchOnly {
+		headRef = "refs/heads/" + tgt.PR.HeadRefName
+	}
+	latestHead, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", headRef)
 	if err != nil {
 		return "", err
 	}
-	// A moved head means the reviewers described code that is no longer what
-	// the PR contains. Posting that would be worse than posting nothing.
+	// A moved head means the reviewers described code the target no longer
+	// contains. Publishing that would be worse than publishing nothing.
 	if latestHead != reviewedHead {
 		return "", fmt.Errorf("%w: reviewed %s, latest %s (base reviewed %s, latest %s)",
 			ErrHeadDrifted, reviewedHead, latestHead, reviewedBase, latestBase)
 	}
-	// A moved base is survivable: the diff the reviewers saw is still the diff
-	// the PR author wrote. It goes into the comment as a note.
+	// A moved base is survivable: the target head stayed fixed. It goes into
+	// the report as a note.
 	if latestBase != reviewedBase {
-		return fmt.Sprintf("Base branch moved after review: reviewed %s, latest %s. The PR head stayed the same.",
+		return fmt.Sprintf("Base branch moved after review: reviewed %s, latest %s. The target head stayed the same.",
 			reviewedBase, latestBase), nil
 	}
 	return "", nil

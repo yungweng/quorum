@@ -7,7 +7,7 @@ clean.
 
 ```bash
 quorum watch           # follow running, queued and finished work
-quorum review          # review the PR of the current branch
+quorum review          # review the current branch, with or without a PR
 quorum babysit 1811    # review, fix, CI, repeat until it is clean
 ```
 
@@ -55,22 +55,29 @@ needed for projects that have an `.envrc`.
 Run it from inside the repository checkout:
 
 ```bash
-quorum review                         # the PR of the current branch
+quorum review                         # current branch; its PR when one exists
 quorum review 1811
 quorum review https://github.com/owner/repo/pull/1811
 quorum review 1811 -n 8 --effort low
-quorum review 1811 --dry-run       # write the comment, do not post it
+quorum review 1811 --dry-run       # write the report, do not post it
 ```
 
+If the current branch has no open PR, it reviews the pushed branch against the
+repository's default branch and writes the report to disk without posting it.
+The checkout must be clean and match `origin`; use `--base` to choose another
+base branch.
+
 It builds a detached worktree under `~/.cache/quorum/reviews/`, runs `direnv
-allow` unless the PR itself changed an `.envrc`, links in cached dependency
+allow` unless the target itself changed an `.envrc`, links in cached dependency
 trees and enters the environment once so the install hook runs one time per run
 rather than once per reviewer, then fans out `codex exec review`. The outputs
-are merged into one comment, checked for structure, and posted. Each run also
-writes a machine-readable `findings.json` beside the comment.
+are merged into one report and checked for structure. PR reviews post it;
+branch-only reviews keep it on disk. Each run also writes a machine-readable
+`findings.json` beside the report.
 
 A failed run keeps its worktree, so the expensive reviewer passes never have to
-run twice: `quorum review 1811 --resume-run <dir>` picks it up.
+run twice: `quorum review 1811 --resume-run <dir>` picks it up with the original
+target and base.
 
 A run refuses to post rather than post something misleading: on a moved PR head,
 on an `.envrc` the PR itself changed, and on an aggregator answer with the wrong
@@ -82,7 +89,7 @@ You implement, babysit iterates. It expects the first implementation to be
 committed and pushed.
 
 ```bash
-quorum babysit                  # the PR of the current branch
+quorum babysit                  # current branch; its PR when one exists
 quorum babysit 1811
 quorum babysit 1811 --effort high "Focus on the time-tracking module"
 ```
@@ -91,6 +98,11 @@ The loop: wait for CI, review, decide. Zero Blockers and Critical means done.
 Otherwise the review comment goes into a Codex session that checks each finding
 for whether it is real or intended, fixes the real ones, commits and pushes. The
 pipeline watches CI, posts a comment logging what was fixed, and reviews again.
+
+If the current branch has no open PR, `babysit` runs the same review-fix rounds
+on the clean, pushed branch. It still runs repository checks in each fix step
+and confirms every push on `origin`, but it skips PR CI and PR comments because
+neither exists yet.
 
 Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.
@@ -110,8 +122,10 @@ Three situations that used to need a human are decided automatically. Pass
   accepted on first sight: the session must survive one forced re-check where it
   actively tries to reproduce each finding. **A dispute it upholds still appears
   on the PR as a review finding, so read the run summary before merging.**
-- **Changed `.envrc` files.** The diff is printed and `direnv allow` runs. With
-  the sandbox bypassed the session can execute anything anyway.
+- **Changed `.envrc` files.** A run stops before loading an `.envrc` changed by
+  the target unless you pass `--allow-envrc-change` after reading it. Changes
+  made during a fix round are printed before `direnv allow` runs; with the
+  sandbox bypassed the session can execute anything anyway.
 
 Every fix round ends with a comment on the PR describing what was fixed and what
 was left alone as intended. The session writes the text, in the language of the
@@ -132,6 +146,12 @@ quorum 1.1.0                                        agent loaded, every 5m, last
 
   1/2 review   ·   1 fix   ·   1 queued   ·   3.4 load                                     ⠋
 ────────────────────────────────────────────────────────────────────────────────────────────
+
+OPEN  2
+  ● payments #98                accept crumb refunds in the same currency
+      reviewed 21:02 · 2B 1C 3S  comment ↗
+  ● toaster-api #2002           read the crumb tray size from the config
+      reviewed 19:42 · nothing found  comment ↗
 
 ACTIVE  1 / 2
   ● toaster-api #2016           stop emailing every user at 3am about crumbs
@@ -154,6 +174,13 @@ every repo that asks you · 2 at a time, 6 reviewers each · 5.0 GB cache
 
 The status bar under the version answers "what is this machine doing" before
 anything else has to be read.
+
+OPEN is what is waiting for a person: pull requests quorum has reviewed that
+are still open, newest first, with what the review found. The bullet is red for
+blockers, yellow for critical findings and green for neither, so the one that
+needs you is the one the eye lands on. A pull request leaves the section when
+it is merged or closed, when it is being reviewed again (ACTIVE has it then),
+and two weeks after its last review.
 
 ACTIVE is everything in flight: reviews the agent started, reviews you started
 in a terminal, fix loops, and what is waiting for a slot. The symbol and the

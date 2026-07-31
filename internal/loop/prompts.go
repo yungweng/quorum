@@ -27,15 +27,23 @@ const (
 //     itself via gh so it appears as a normal comment from the user;
 //   - the DISPUTED FINDINGS contract, which is the only way a round with no
 //     commits is allowed to end without stopping the run.
-func standingRules(branch string, autonomous bool) string {
+func standingRules(branch string, autonomous, branchOnly bool) string {
+	target := "an existing pull request"
+	pipeline := "CI checks -> external code review -> fix rounds"
+	record := "in the PR comment section of your final message"
+	if branchOnly {
+		target = "a pushed branch that has no open pull request"
+		pipeline = "external code review -> fix rounds"
+		record = "in your final message"
+	}
 	decision := `- Only for product decisions you cannot responsibly make yourself (data semantics, user-visible policy, migration of existing data): stop and end your final message with a line that is exactly:
 OPEN QUESTIONS:
 followed by short numbered questions. Use this marker for nothing else. You will receive the user's answers and can then continue.`
 	if autonomous {
-		decision = `- No human is available during this run. Make every decision yourself, including product decisions: pick the most conservative reasonable option and record notable decisions in the PR comment section of your final message. Do not stop to ask questions.`
+		decision = fmt.Sprintf("- No human is available during this run. Make every decision yourself, including product decisions: pick the most conservative reasonable option and record notable decisions %s. Do not stop to ask questions.", record)
 	}
 
-	return fmt.Sprintf(`You are the fix agent for an existing pull request, running unattended inside an automated pipeline (CI checks -> external code review -> fix rounds), in a dedicated git worktree on a detached checkout of the PR head.
+	return fmt.Sprintf(`You are the fix agent for %s, running unattended inside a pipeline (%s), in a dedicated git worktree on a detached checkout of the pushed branch head.
 
 Standing rules for every step:
 - Follow this repository's contributor and agent instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING) where present.
@@ -48,7 +56,7 @@ Standing rules for every step:
 - If an external review finding rated Blocker or Critical is factually wrong and no code change is warranted, do not change code just to satisfy the review. Instead end your final message with a line that is exactly:
 DISPUTED FINDINGS:
 followed by short numbered rebuttals, one per disputed finding, each naming the finding and why it is wrong. Use this marker only for Blocker/Critical findings you are confident are incorrect, never to avoid work, and never together with code changes that already resolve the finding.`,
-		branch, decision)
+		target, pipeline, branch, decision)
 }
 
 // firstPrompt wraps the opening step in the standing rules and PR context.
@@ -75,7 +83,20 @@ Inspect the failures with gh (for example: gh run view <run-id> --log-failed; th
 // Suggestions and Questions are handed over once per round but never keep the
 // loop alive; only Blockers and Critical do. The PR COMMENT block is what the
 // pipeline posts afterwards.
-func fixRoundPrompt(number int, comment string) string {
+func fixRoundPrompt(number int, branch string, branchOnly bool, comment string) string {
+	if branchOnly {
+		return fmt.Sprintf(`An external code review of branch %s found issues. The full review report follows below.
+
+Please check for each finding whether it is a real issue or might be intended behavior.
+- For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
+- Suggestions: implement each one unless it describes intended behavior or you have a strong technical reason not to.
+- Resolve the Questions with your best judgment; only raise OPEN QUESTIONS if one truly needs a product decision.
+- Run the affected checks, commit your work, and push.
+
+---
+
+%s`, branch, comment)
+	}
 	return fmt.Sprintf(`An external code review of PR #%d found issues. The full review comment follows below.
 
 Please check for each finding whether it is a real issue or might be intended behavior.
@@ -125,6 +146,15 @@ func prContext(number int, title, branch, base, url, body, extra string) string 
 	var b strings.Builder
 	fmt.Fprintf(&b, "PR #%d: %s\nBranch: %s (base: %s)\nURL: %s\n\nPR description:\n\n%s",
 		number, title, branch, base, url, body)
+	if extra != "" {
+		fmt.Fprintf(&b, "\n\nAdditional context from the user:\n\n%s", extra)
+	}
+	return b.String()
+}
+
+func branchContext(branch, base, extra string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Branch: %s (base: %s)\nNo open pull request exists for this branch.", branch, base)
 	if extra != "" {
 		fmt.Fprintf(&b, "\n\nAdditional context from the user:\n\n%s", extra)
 	}

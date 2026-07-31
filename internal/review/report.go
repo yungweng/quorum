@@ -12,6 +12,8 @@ type RunHeader struct {
 	Number      int
 	Title       string
 	Author      string
+	Branch      string
+	BranchOnly  bool
 	BaseRef     string
 	BaseSHA     string
 	HeadSHA     string

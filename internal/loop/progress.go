@@ -85,8 +85,13 @@ type Progress struct {
 	RunDir string `json:"-"`
 }
 
-// Key is the "owner/repo#number" the state file uses.
-func (p Progress) Key() string { return fmt.Sprintf("%s#%d", p.Repo, p.Number) }
+// Key identifies either a pull request or a branch-only run.
+func (p Progress) Key() string {
+	if p.Number > 0 {
+		return fmt.Sprintf("%s#%d", p.Repo, p.Number)
+	}
+	return p.Repo + "@" + p.Branch
+}
 
 // LogDir is where the run's Codex logs are.
 func (p Progress) LogDir() string { return filepath.Join(p.RunDir, "logs") }

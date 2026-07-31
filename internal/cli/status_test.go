@@ -42,6 +42,73 @@ func testApp(t *testing.T) *app {
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}
 }
 
+func TestRecentReviewedPRKeysIncludesEveryEligibleRecord(t *testing.T) {
+	now := time.Now()
+	file := state.File{PRs: map[string]state.Record{}}
+	for i := 1; i <= 25; i++ {
+		file.PRs[fmt.Sprintf("acme/api#%d", i)] = state.Record{
+			Status: state.OK,
+			At:     now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+		}
+	}
+
+	keys := recentReviewedPRKeys(reviewedPRs(file, nil), now)
+	if len(keys) != 25 {
+		t.Fatalf("recent reviewed PR keys = %d, want 25", len(keys))
+	}
+}
+
+func TestOpenSectionIncludesSuccessfulManualRuns(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{
+			Key: "acme/api#42", Title: "manual review", Kind: history.KindReview,
+			Source: history.SourceManual, Outcome: history.OK, Reviewed: true,
+			Blockers: 2, Critical: 1, CommentURL: "https://example.invalid/comment/42", EndedAt: now,
+		},
+		{
+			Key: "acme/web#43", Title: "manual fix loop", Kind: history.KindBabysit,
+			Source: history.SourceManual, Outcome: history.Converged, Reviewed: true, EndedAt: now.Add(-time.Minute),
+		},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, tracked := render(t, a, nil)
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "manual review", "2B 1C 0S", "web #43", "manual fix loop"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("OPEN is missing %q:\n%s", want, screen)
+		}
+	}
+	for _, key := range []string{"acme/api#42", "acme/web#43"} {
+		if !slices.Contains(tracked, key) {
+			t.Errorf("tracked = %v, want manual run %s", tracked, key)
+		}
+	}
+}
+
+func TestNewerFailedManualRunHidesStaleReview(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	for _, run := range []history.Run{
+		{Key: "acme/api#42", Source: history.SourceManual, Outcome: history.OK, Reviewed: true, EndedAt: now.Add(-time.Hour)},
+		{Key: "acme/api#42", Source: history.SourceManual, Outcome: history.Failed, EndedAt: now},
+	} {
+		if err := history.Append(a.p.HistoryFile, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	screen, _ := render(t, a, nil)
+	if open := sectionOf(t, screen, "OPEN"); strings.Contains(open, "api #42") {
+		t.Errorf("OPEN kept a stale successful review after a newer failure:\n%s", screen)
+	}
+}
+
 // render draws the dashboard onto a terminal-capable writer and returns both
 // the screen and the pull requests it says it drew.
 func render(t *testing.T, a *app, ends map[string]string) (string, []string) {
@@ -158,6 +225,96 @@ func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
 	}
 	if len(shown) != 1 || shown[0] != "acme/api#42" {
 		t.Errorf("shown = %v, want one manual review key", shown)
+	}
+}
+
+// The open section is the answer to "what is waiting for me": a review that
+// found something stays in view until the pull request is merged or closed,
+// instead of scrolling away under later runs.
+func TestOpenSectionListsReviewedPullRequestsThatAreStillOpen(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "tenant scoping"
+		r.Critical = 2
+		r.CommentURL = "https://github.com/acme/api/pull/42#issuecomment-1"
+		r.Mark(state.OK, "")
+	})
+
+	screen, shown := render(t, a, nil)
+	open := sectionOf(t, screen, "OPEN")
+	for _, want := range []string{"api #42", "tenant scoping", "0B 2C 0S", "comment"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("the open section is missing %q:\n%s", want, screen)
+		}
+	}
+	if !slices.Contains(shown, "acme/api#42") {
+		t.Errorf("shown = %v, an open pull request must be looked up", shown)
+	}
+}
+
+// Once it is merged or closed there is nothing left to do about it, and the
+// history section already records that it happened.
+func TestOpenSectionDropsMergedAndClosedPullRequests(t *testing.T) {
+	a := testApp(t)
+	for _, key := range []string{"acme/api#42", "acme/api#43", "acme/api#44"} {
+		record(t, a, key, func(r *state.Record) { r.Mark(state.OK, "") })
+	}
+	ends := map[string]string{
+		"acme/api#42": gh.StateMerged,
+		"acme/api#43": gh.StateClosed,
+		"acme/api#44": gh.StateOpen,
+	}
+
+	screen, _ := render(t, a, ends)
+	open := sectionOf(t, screen, "OPEN")
+	if strings.Contains(open, "api #42") || strings.Contains(open, "api #43") {
+		t.Errorf("a merged or closed pull request stayed in the open section:\n%s", screen)
+	}
+	if !strings.Contains(open, "api #44") {
+		t.Errorf("the open pull request is missing:\n%s", screen)
+	}
+}
+
+// A pull request being reviewed right now belongs under ACTIVE. Listing the
+// result of the previous run above it as well says the same pull request twice.
+func TestOpenSectionLeavesOutWhatIsAlreadyActive(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/api#42", func(r *state.Record) {
+		r.Title = "an earlier review"
+		r.Mark(state.OK, "")
+	})
+	manualReview(t, a, review.LiveRun{
+		PID: os.Getpid(), Repo: "acme/api", Number: 42, Title: "an earlier review",
+		StartedAt: time.Now(), Reviewers: 2,
+	}, "")
+
+	screen, _ := render(t, a, nil)
+	if got := strings.Count(ui.StripANSI(screen), "api #42"); got != 1 {
+		t.Errorf("api #42 is on screen %d times, want once:\n%s", got, screen)
+	}
+}
+
+// Two hundred records outlive the pull requests they describe. Age is the only
+// thing the dashboard knows about one GitHub has not been asked about, so an
+// old one is history rather than something still waiting for a person.
+func TestOpenSectionStopsAtTheWindowAndTheLimit(t *testing.T) {
+	a := testApp(t)
+	old := time.Now().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	record(t, a, "acme/api#1", func(r *state.Record) {
+		r.Mark(state.OK, "")
+		r.At = old
+	})
+	for i := range openLimit + 5 {
+		record(t, a, fmt.Sprintf("acme/web#%d", i+1), func(r *state.Record) { r.Mark(state.OK, "") })
+	}
+
+	screen, _ := render(t, a, nil)
+	open := sectionOf(t, screen, "OPEN")
+	if strings.Contains(open, "api #1") {
+		t.Errorf("a month old review is still listed as open:\n%s", screen)
+	}
+	if got := strings.Count(open, "web #"); got != openLimit {
+		t.Errorf("the open section lists %d pull requests, want %d:\n%s", got, openLimit, screen)
 	}
 }
 
@@ -452,11 +609,12 @@ func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
 	}
 
 	screen, shown := render(t, a, nil)
-	if got := strings.Count(screen, "api #42"); got != 2 {
+	historySection := sectionOf(t, screen, "HISTORY")
+	if got := strings.Count(historySection, "api #42"); got != 2 {
 		t.Errorf("two runs on one pull request produced %d lines:\n%s", got, screen)
 	}
 	// Newest first.
-	if strings.Index(screen, "web #7") > strings.Index(screen, "api #42") {
+	if strings.Index(historySection, "web #7") > strings.Index(historySection, "api #42") {
 		t.Errorf("the history is not newest first:\n%s", screen)
 	}
 	for _, want := range []string{"fix, 3 rounds", "0B 2C 0S", "reviewer-2 timed out"} {
@@ -466,6 +624,30 @@ func TestDashboardListsEveryRunNotEveryPullRequest(t *testing.T) {
 	}
 	if !slices.Contains(shown, "acme/web#7") {
 		t.Errorf("shown = %v, want the logged runs for end-state tracking", shown)
+	}
+}
+
+func TestDashboardRendersBranchHistoryWithoutTrackingItAsAPR(t *testing.T) {
+	a := testApp(t)
+	run := history.Run{
+		Key:      history.BranchKey("acme/api", "feature/crumb-tray"),
+		Branch:   "feature/crumb-tray",
+		Kind:     history.KindReview,
+		Source:   history.SourceManual,
+		Outcome:  history.OK,
+		Reviewed: true,
+		EndedAt:  time.Now(),
+	}
+	if err := history.Append(a.p.HistoryFile, run); err != nil {
+		t.Fatal(err)
+	}
+
+	screen, tracked := render(t, a, nil)
+	if !strings.Contains(screen, "api feature/crumb-tray") || strings.Contains(screen, "api #0") {
+		t.Fatalf("branch history was not rendered as a branch:\n%s", screen)
+	}
+	if slices.Contains(tracked, run.Key) {
+		t.Fatalf("branch key %q was sent for PR end-state tracking", run.Key)
 	}
 }
 
@@ -516,8 +698,14 @@ func TestDashboardFallsBackToTheStateFileWhileTheLogIsEmpty(t *testing.T) {
 	if !strings.Contains(screen, "web #7") {
 		t.Errorf("the logged run is missing:\n%s", screen)
 	}
-	if strings.Contains(screen, "api #42") {
+	// Only the history section stops using the fallback. The record itself is
+	// a reviewed pull request that is still open, which is what the open
+	// section above is for, so it stays on screen there.
+	if history := sectionOf(t, screen, "HISTORY"); strings.Contains(history, "api #42") {
 		t.Errorf("the fallback was still used once the log had an entry:\n%s", screen)
+	}
+	if open := sectionOf(t, screen, "OPEN"); !strings.Contains(open, "api #42") {
+		t.Errorf("the reviewed pull request left the open section:\n%s", screen)
 	}
 }
 
@@ -543,13 +731,18 @@ func TestAnIdleDashboardStaysCompact(t *testing.T) {
 	if !strings.Contains(lineWith(t, screen, "ACTIVE"), "nothing running") {
 		t.Errorf("the idle state is not stated on the ACTIVE line:\n%s", screen)
 	}
+	if !strings.Contains(lineWith(t, screen, "OPEN"), "nothing reviewed is still open") {
+		t.Errorf("the idle state is not stated on the OPEN line:\n%s", screen)
+	}
 	// And it says it once, not once per pipeline stage.
 	for _, gone := range []string{"REVIEWING", "BABYSITTING", "QUEUED", "SYSTEM"} {
 		if strings.Contains(screen, gone) {
 			t.Errorf("%s still has a heading of its own:\n%s", gone, screen)
 		}
 	}
-	if n := strings.Count(strings.TrimSpace(screen), "\n") + 1; n > 12 {
+	// Three sections, each stating its own idle case in one line, plus header,
+	// status bar and footer.
+	if n := strings.Count(strings.TrimSpace(screen), "\n") + 1; n > 13 {
 		t.Errorf("an idle dashboard is %d lines:\n%s", n, screen)
 	}
 	// The settings did not disappear with the section that held them.
@@ -618,6 +811,29 @@ func sectionBadge(t *testing.T, screen, heading string) string {
 		return strings.TrimSpace(rest)
 	}
 	t.Fatalf("no %s heading:\n%s", heading, screen)
+	return ""
+}
+
+// sectionOf returns one section of the dashboard, from its heading to the next
+// blank line that starts a new one. Sections show the same pull request for
+// different reasons, so an assertion about one of them has to say which.
+func sectionOf(t *testing.T, screen, heading string) string {
+	t.Helper()
+	lines := strings.Split(screen, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, heading) {
+			continue
+		}
+		out := []string{line}
+		for _, next := range lines[i+1:] {
+			if strings.TrimSpace(next) == "" {
+				break
+			}
+			out = append(out, next)
+		}
+		return strings.Join(out, "\n")
+	}
+	t.Fatalf("no %s section:\n%s", heading, screen)
 	return ""
 }
 

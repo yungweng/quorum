@@ -137,12 +137,19 @@ func (a *app) cmdReview(argv []string) int {
 	number = res.Findings.PR
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
 	if notify {
-		body := fmt.Sprintf("PR #%d: %d blockers, %d critical.",
-			number, res.Findings.Blockers, res.Findings.Critical)
+		rep.mu.Lock()
+		branch := rep.branch
+		rep.mu.Unlock()
+		target := fmt.Sprintf("PR #%d", number)
+		if number == 0 {
+			target = "Branch " + branch
+		}
+		body := fmt.Sprintf("%s: %d blockers, %d critical.",
+			target, res.Findings.Blockers, res.Findings.Critical)
 		if res.Posted {
 			body += " Comment posted."
 		} else {
-			body += " Dry run complete."
+			body += " Report written to disk."
 		}
 		a.out.Notify("quorum: review complete", body)
 	}
@@ -155,16 +162,23 @@ func (a *app) cmdReview(argv []string) int {
 // with an empty key and logRun drops it.
 func (t *termReporter) historyRun(repo string, started time.Time, outcome, reason string, res *review.Result) history.Run {
 	t.mu.Lock()
-	number, title := t.number, t.title
+	number, title, branch := t.number, t.title, t.branch
 	if t.repo != "" {
 		repo = t.repo
 	}
 	t.mu.Unlock()
-	if number == 0 || repo == "" {
+	if repo == "" || number == 0 && branch == "" {
 		return history.Run{}
 	}
+	key := fmt.Sprintf("%s#%d", repo, number)
+	historyBranch := ""
+	if number == 0 {
+		key = history.BranchKey(repo, branch)
+		historyBranch = branch
+	}
 	run := history.Run{
-		Key:       fmt.Sprintf("%s#%d", repo, number),
+		Key:       key,
+		Branch:    historyBranch,
 		Title:     title,
 		Kind:      history.KindReview,
 		Source:    history.SourceManual,
@@ -205,29 +219,31 @@ func (a *app) reviewUsage() {
 	fmt.Printf(`Usage:
   quorum review [pr-number|github-pr-url] [options]
 
-Reviews an open PR and posts the result. Without a PR argument the PR of the
-current branch is used.
+Reviews an open PR and posts the result. Without a PR argument, quorum uses the
+open PR for the current branch when one exists. Otherwise it reviews the pushed
+branch against the repository default branch and writes the report without
+posting.
 
 Options:
   -n, --runs N             Number of Codex reviewer passes. Default: %d
   --concurrency N          Max reviewer passes at once. Default: same as --runs
   --model MODEL            Model for reviewers and aggregator. Default: %s
   --effort LEVEL           minimal, low, medium, high, xhigh. Default: %s
-  --base BRANCH            Base branch to review against. Default: the PR base
-  --dry-run                Write the comment to disk without posting it
+  --base BRANCH            Base branch. Default: PR base or repository default
+  --dry-run                Write the report to disk without posting it
   --keep-worktree          Keep the temporary worktree after a successful run
-  --resume-run DIR         Reuse a run directory and only aggregate/post
+  --resume-run DIR         Reuse a run with its original target and base
   --review-timeout DUR     Kill a reviewer that runs too long. Default: %s
   --min-successful N       Reviewer outputs required. Default: a majority
   --no-direnv              Skip direnv
-  --allow-envrc-change     Allow direnv allow even when the PR changed .envrc
+  --allow-envrc-change     Allow direnv allow when the target changed .envrc
   --no-notify              No terminal notification when the run finishes
   -h, --help               Show this help
 
 Exit codes:
-  2  refused: the PR changes an .envrc
-  3  refused: the PR head moved during the review
-  4  the aggregator could not produce a postable comment
+  2  refused: the target changes an .envrc
+  3  refused: the target head moved during the review
+  4  the aggregator could not produce a valid report
 `, a.cfg.Reviewers, a.cfg.ReviewModel, a.cfg.ReviewEffort,
 		durationText(a.cfg.ReviewTimeout))
 }
@@ -258,6 +274,7 @@ type termReporter struct {
 	runs   int
 	title  string
 	repo   string
+	branch string
 
 	mu       sync.Mutex
 	tick     int
@@ -270,13 +287,19 @@ func (t *termReporter) Header(h review.RunHeader) {
 	t.runs = h.Runs
 	t.title = h.Title
 	t.repo = h.Repo
+	t.branch = h.Branch
 	t.reviewer = map[int]*reviewerState{}
 	t.mu.Unlock()
 
 	o := t.out
 	o.Rule()
-	o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title))+draftTag(o, h.Draft))
-	o.Row("repo", h.Repo+o.Dim("  ·  @"+h.Author))
+	if h.BranchOnly {
+		o.Row("branch", o.Bold(h.Branch)+o.Dim("  ·  no open PR"))
+		o.Row("repo", h.Repo)
+	} else {
+		o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title))+draftTag(o, h.Draft))
+		o.Row("repo", h.Repo+o.Dim("  ·  @"+h.Author))
+	}
 	o.Row("base", fmt.Sprintf("%s %s", h.BaseRef, o.Dim(shortSHA(h.BaseSHA))))
 	o.Row("head", o.Dim(shortSHA(h.HeadSHA)))
 	o.Row("reviewers", fmt.Sprintf("%d %s", h.Runs,

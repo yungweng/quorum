@@ -262,10 +262,11 @@ A panel of Codex reviewers for your pull requests.
 
 %s
   quorum watch           follow running, queued and finished work
-  quorum review [pr]     review a PR and post the comment
-  quorum babysit [pr]    review, fix and wait for CI until the PR is clean
+  quorum review [pr]     review a PR or the current pushed branch
+  quorum babysit [pr]    review and fix a PR or the current pushed branch
 
-  [pr] defaults to the pull request for the current branch.
+  Without [pr], an open PR for the current branch is used when one exists;
+  otherwise quorum works on the pushed branch without PR comments or PR CI.
 
 %s
   quorum status          show one dashboard snapshot

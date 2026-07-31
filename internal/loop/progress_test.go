@@ -68,6 +68,13 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 	}
 }
 
+func TestBranchProgressKeyDoesNotInventPRZero(t *testing.T) {
+	p := Progress{Repo: "acme/api", Branch: "feature/crumb-tray"}
+	if got := p.Key(); got != "acme/api@feature/crumb-tray" {
+		t.Errorf("branch key = %q", got)
+	}
+}
+
 // The progress file outlives the run: it stays in the run cache until
 // collection drops the directory a week later. Only the claim says whether
 // anything is still happening, so a finished run has to disappear on its own.

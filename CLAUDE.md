@@ -90,7 +90,10 @@ reporting without breaking the build.
   through `progress.json`, which is rewritten whole on every phase change;
   reviewers report through `output/events.log`. Neither the Codex logs nor the
   run's message files are ever parsed for progress: `fix-round-1.log` passes a
-  megabyte within minutes.
+  megabyte within minutes. GitHub is asked outside the frame as well: `watch`
+  polls merge states in a goroutine beside the redraw, and `status` asks once
+  before it draws. A network call inside `dashboard` would make the screen wait
+  on it every three seconds.
 - **`gh pr checks` is not trustworthy right after a push.** It briefly still
   answers for the previous head, so a red commit reads as green. Never read a
   check result before GitHub reports the pushed sha as the PR head.

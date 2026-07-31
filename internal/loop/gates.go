@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/yungweng/quorum/internal/review"
 )
 
 // questionGate handles a step that ended with OPEN QUESTIONS.
@@ -27,7 +29,7 @@ func (r *run) questionGate(tagBase string) error {
 			if n > maxQuestionBounces {
 				r.rep.Notify("Festgefahren", "Codex stellt weiter Fragen im autonomen Modus")
 				return fmt.Errorf("%w: Codex keeps asking questions although autonomous mode told it to decide itself; a human is needed: %s",
-					ErrGateAborted, r.pr.URL)
+					ErrGateAborted, r.targetReference())
 			}
 			r.rep.Info("autonomous mode: sending the questions back for Codex to decide itself")
 			if err := r.resume(fmt.Sprintf("%s-answers-%d", tagBase, n), bounceQuestionsPrompt); err != nil {
@@ -121,7 +123,7 @@ func (r *run) disputeGate(tagBase, preSHA string) error {
 		if !hasMarker(r.lastMsg, MarkerDisputed) {
 			r.rep.Notify("Festgefahren", "Dispute-Runde ohne Commits und ohne Dispute")
 			return fmt.Errorf("%w: Codex neither fixed nor still disputes the remaining findings; a human is needed: %s",
-				ErrNoProgress, r.pr.URL)
+				ErrNoProgress, r.targetReference())
 		}
 	}
 }
@@ -205,6 +207,20 @@ func (r *run) setupDirenv() error {
 	files := findEnvrc(r.worktree)
 	if len(files) == 0 {
 		return nil
+	}
+	baseRef := "origin/" + r.pr.BaseRefName
+	if err := r.p.Git.Fetch(r.ctx, r.o.RepoRoot, "origin",
+		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", r.pr.BaseRefName, r.pr.BaseRefName)); err != nil {
+		return err
+	}
+	changed, err := r.p.Git.ChangedFiles(r.ctx, r.worktree, baseRef+"...HEAD",
+		".envrc", ":(glob)**/.envrc")
+	if err != nil {
+		return fmt.Errorf("check changed .envrc files: %w", err)
+	}
+	if changed != "" && !r.o.AllowEnvrcChange {
+		return fmt.Errorf("%w:\n%s\nReview the .envrc change manually, then rerun with --allow-envrc-change if it is safe",
+			review.ErrEnvrcChanged, changed)
 	}
 	r.envrcBaseline = map[string]bool{}
 	for _, f := range files {

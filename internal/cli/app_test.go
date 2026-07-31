@@ -32,7 +32,8 @@ func TestNoCommandShowsPrimaryCommandHelp(t *testing.T) {
 		"quorum watch",
 		"quorum review [pr]",
 		"quorum babysit [pr]",
-		"[pr] defaults to the pull request for the current branch.",
+		"Without [pr], an open PR for the current branch is used when one exists;",
+		"otherwise quorum works on the pushed branch without PR comments or PR CI.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("help is missing %q:\n%s", want, got)

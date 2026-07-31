@@ -56,7 +56,7 @@ DISPUTED FINDINGS:
 // that stalls on questions nobody will answer, or a session inventing product
 // decisions while a human sits waiting.
 func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
-	auto := standingRules("feature/crumb-tray", true)
+	auto := standingRules("feature/crumb-tray", true, false)
 	if !strings.Contains(auto, "No human is available during this run") {
 		t.Error("autonomous rules do not tell the session to decide itself")
 	}
@@ -64,7 +64,7 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 		t.Error("autonomous rules still invite the session to ask questions")
 	}
 
-	interactive := standingRules("feature/crumb-tray", false)
+	interactive := standingRules("feature/crumb-tray", false, false)
 	if !strings.Contains(interactive, MarkerQuestions) {
 		t.Error("interactive rules do not describe the questions marker")
 	}
@@ -73,7 +73,7 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 // The push command is spelled out because a bare `git push` fails on the
 // detached checkout the pipeline works in.
 func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
-	rules := standingRules("feature/crumb-tray", true)
+	rules := standingRules("feature/crumb-tray", true, false)
 	want := "git push origin HEAD:refs/heads/feature/crumb-tray"
 	if !strings.Contains(rules, want) {
 		t.Errorf("the standing rules do not contain %q", want)
@@ -83,7 +83,7 @@ func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
 // The pipeline posts the fix log itself so it appears as an ordinary comment
 // from the user. A session that posts its own would produce duplicates.
 func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
-	rules := standingRules("main", true)
+	rules := standingRules("main", true, false)
 	if !strings.Contains(rules, "Never create or edit PRs or comments") {
 		t.Error("the standing rules do not forbid the session from commenting")
 	}
@@ -98,11 +98,37 @@ func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
 func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"ci fix":    ciFixPrompt(12, "[]"),
-		"fix round": fixRoundPrompt(12, "## Summary\n\nfine"),
+		"fix round": fixRoundPrompt(12, "", false, "## Summary\n\nfine"),
 	} {
 		if !strings.Contains(prompt, "Do not wait for CI") {
 			t.Errorf("%s prompt does not tell the session to leave CI to the pipeline", name)
 		}
+	}
+}
+
+func TestBranchFixPromptDoesNotInventAPROrCIWatcher(t *testing.T) {
+	got := fixRoundPrompt(0, "feature/crumb-tray", true, "## Summary\n\nfine")
+	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", MarkerComment} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("branch fix prompt contains %q", unwanted)
+		}
+	}
+	for _, want := range []string{"branch feature/crumb-tray", "Run the affected checks"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("branch fix prompt is missing %q", want)
+		}
+	}
+}
+
+func TestBranchContextDoesNotInventAPR(t *testing.T) {
+	got := branchContext("feature/crumb-tray", "main", "Focus on cleanup")
+	for _, want := range []string{"feature/crumb-tray", "main", "No open pull request", "Focus on cleanup"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("branch context is missing %q", want)
+		}
+	}
+	if strings.Contains(got, "PR #0") {
+		t.Error("branch context invented PR #0")
 	}
 }
 

@@ -12,8 +12,10 @@ commands are `quorum watch`, `quorum review` and `quorum babysit`.
 quorum review [pr-number|github-pr-url] [options]
 ```
 
-Without a PR argument, quorum reviews the PR of the current branch. Run the
-command from inside that repository's checkout.
+Without a PR argument, quorum uses the open PR for the current branch when one
+exists. Otherwise it reviews the pushed branch against the repository default
+branch and writes the report without posting. The checkout must be clean and
+match `origin`. Run the command from inside that repository's checkout.
 
 | Option | Meaning | Default |
 |---|---|---|
@@ -21,14 +23,14 @@ command from inside that repository's checkout.
 | `--concurrency N` | Reviewer passes at once | same as `--runs` |
 | `--model MODEL` | Model for reviewers and aggregator | `gpt-5.6-terra` |
 | `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh` | `medium` |
-| `--base BRANCH` | Base branch to review against | the PR base |
-| `--dry-run` | Write the comment to disk without posting it | off |
+| `--base BRANCH` | Base branch to review against | PR base or repository default |
+| `--dry-run` | Write the report to disk without posting it | off |
 | `--keep-worktree` | Keep the worktree after a successful run | off |
-| `--resume-run DIR` | Reuse a run directory, only aggregate and post | |
+| `--resume-run DIR` | Reuse a run directory with its original target and base | |
 | `--review-timeout DUR` | Kill a reviewer that runs too long | 45m |
 | `--min-successful N` | Reviewer outputs required to post | a majority |
 | `--no-direnv` | Skip direnv | off |
-| `--allow-envrc-change` | Allow `direnv allow` when the PR changed `.envrc` | off |
+| `--allow-envrc-change` | Allow `direnv allow` when the target changed `.envrc` | off |
 | `--no-notify` | No terminal notification when the run finishes | off |
 | `-h`, `--help` | Show the help | |
 
@@ -42,7 +44,10 @@ quorum babysit [options] [pr-number|pr-url] [extra context...]
 ```
 
 Options and positionals may interleave. Extra positional text becomes context
-for the fix session.
+for the fix session. Without a PR argument, quorum uses the current branch's
+open PR when one exists. With no open PR it works on the clean, pushed branch,
+runs repository checks in each fix step, confirms pushes on `origin`, and skips
+PR CI and PR comments.
 
 | Option | Meaning | Default |
 |---|---|---|
@@ -52,13 +57,14 @@ for the fix session.
 | `--review-model MODEL` | Model for the review rounds | `gpt-5.6-terra` |
 | `--review-effort LEVEL` | Effort for the review rounds | `medium` |
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
-| `--max-ci-fixes N` | CI fix attempts per green-CI phase | 3 |
+| `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
 | `--sandboxed` | Use your codex sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
 | `--no-notify` | Disable terminal notifications | off |
 | `--no-direnv` | Skip direnv | off |
+| `--allow-envrc-change` | Allow `direnv allow` when the target changed `.envrc` | off |
 | `--keep-worktree` | Keep the worktree after success | off |
 | `-h`, `--help` | Show the help | |
 
@@ -93,10 +99,10 @@ posting or committing something misleading.
 
 ### quorum review
 
-- **The PR head moved during the review.** The run refuses to post: the findings
-  describe code the PR no longer contains. If only the base moved, the run
-  continues and the comment carries a note.
-- **The PR changed an `.envrc`.** `direnv allow` executes whatever is in that
+- **The target head moved during the review.** The run refuses to publish stale
+  findings. If only the base moved, the run continues and the report carries a
+  note.
+- **The target changed an `.envrc`.** `direnv allow` executes whatever is in that
   file. The run stops unless you pass `--allow-envrc-change` after reading the
   diff yourself.
 - **The aggregator produced the wrong shape.** The comment must have exactly
@@ -106,9 +112,12 @@ posting or committing something misleading.
 
 ### quorum babysit
 
-- **Do not push to the PR branch while a run is active.** A review refuses to
-  post when the head moves under it, and the pipeline treats that as fatal.
-- The pipeline refuses to start on a dirty checkout of the PR branch, or when
+- **The target changed an `.envrc`.** The run stops before loading it unless
+  you pass `--allow-envrc-change` after reading the diff yourself.
+- **Do not push to the target branch while a run is active.** A review refuses
+  to use stale findings when the head moves under it, and the pipeline treats
+  that as fatal.
+- The pipeline refuses to start on a dirty checkout of the target branch, or when
   your local branch differs from origin: it reviews the pushed head and would
   otherwise silently ignore your work.
 - Fork PRs are refused: the pipeline pushes `refs/heads/<branch>` on origin,
@@ -126,17 +135,17 @@ from the tools they replace.
 `quorum review`:
 
 ```text
-0  posted, or written to disk under --dry-run
+0  posted for a PR, or written to disk for --dry-run or a branch without a PR
 1  any other failure
-2  refused: the PR changes an .envrc
-3  refused: the PR head moved during the review
-4  the aggregator could not produce a postable comment
+2  refused: the target changes an .envrc
+3  refused: the target head moved during the review
+4  the aggregator could not produce a valid report
 ```
 
 `quorum babysit`:
 
 ```text
-0  CI green and the review clean, or remaining findings disputed and accepted
+0  review clean (and CI green for a PR), or remaining findings disputed and accepted
 1  any other failure
 2  aborted at a gate
 3  CI still red after --max-ci-fixes attempts
@@ -214,6 +223,30 @@ shared dependency cache removed.
   machine is busy; they start on a later poll.
 - `HISTORY` is how many finished runs the dashboard lists. It counts runs, not
   pull requests, so four reviews of the same one take four lines.
+
+## The dashboard
+
+`status` draws it once, `watch` redraws it every three seconds. Three sections,
+in the order the questions get asked:
+
+- **OPEN** is what is waiting for a person: pull requests with a finished
+  review that are still open, newest first, at most ten of them, with what the
+  review found and a link to the comment. A pull request drops out when GitHub
+  reports it merged or closed, while it is being reviewed again, and two weeks
+  after its last review. The two weeks matter because the state file keeps two
+  hundred records and most of them describe pull requests that were merged long
+  ago; where GitHub has not been asked, age is the only thing the dashboard
+  knows.
+- **ACTIVE** is everything in flight, agent and terminal alike. Its count covers
+  agent slots only.
+- **HISTORY** is one line per finished run, described below.
+
+Whether a pull request has been merged or closed is the one thing on this
+screen that has to come from GitHub. `watch` asks in the background, once for
+every visible pull request at a time, and keeps the previous answer when the
+call fails. `status` asks once before it draws, with a single attempt and a
+five second deadline, and falls back to listing everything recent when there is
+no answer: this is the only network call either command makes.
 
 ## The history log
 

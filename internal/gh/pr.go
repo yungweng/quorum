@@ -54,6 +54,38 @@ func (c *Client) ViewPR(ctx context.Context, dir string, number int) (FullPR, er
 	return pr, nil
 }
 
+// CurrentBranchPR asks GitHub CLI to resolve the PR associated with the
+// checkout's branch configuration and remotes. Unlike `pr list --head`, this
+// distinguishes an intended fork PR from an unrelated fork using the same
+// branch name.
+func (c *Client) CurrentBranchPR(ctx context.Context, dir string) (FullPR, bool, error) {
+	pr, err := c.ViewPR(ctx, dir, 0)
+	if err == nil {
+		if pr.State != "OPEN" {
+			return FullPR{}, false, nil
+		}
+		return pr, true, nil
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "no pull requests found") {
+		return FullPR{}, false, nil
+	}
+	return FullPR{}, false, err
+}
+
+// DefaultBranch returns the repository's default branch for the checkout.
+func (c *Client) DefaultBranch(ctx context.Context, dir string) (string, error) {
+	out, err := c.runIn(ctx, dir, "repo", "view", "--json", "defaultBranchRef",
+		"-q", ".defaultBranchRef.name")
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("%w: gh repo view returned no default branch", ErrTransient)
+	}
+	return branch, nil
+}
+
 // CurrentRepo returns "owner/repo" for the checkout in dir.
 func (c *Client) CurrentRepo(ctx context.Context, dir string) (string, error) {
 	out, err := c.runIn(ctx, dir, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")

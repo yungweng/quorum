@@ -44,26 +44,41 @@ func (r *run) startReview(round int) {
 	}
 	r.review = br
 
-	opts := review.Options{
-		Repo:           r.o.Repo,
-		Number:         r.pr.Number,
-		RepoRoot:       r.o.RepoRoot,
-		Runs:           r.o.Reviewers,
-		Model:          r.o.ReviewModel,
-		Effort:         r.o.ReviewEffort,
-		Post:           true,
-		UseDirenv:      r.o.UseDirenv,
-		RunsDir:        r.o.ReviewRunsDir,
-		SharedRunsDirs: []string{r.o.RunsDir},
-		DepsDir:        r.o.DepsDir,
-		CodexBin:       r.o.CodexBin,
-		DirenvBin:      r.o.DirenvBin,
-		ReviewTimeout:  review.DefaultReviewTimeout,
-	}
+	opts := r.reviewOptions()
 	go func() {
 		res, err := r.p.Review.Run(ctx, opts)
 		br.done <- bgResult{res, err}
 	}()
+}
+
+func (r *run) reviewOptions() review.Options {
+	return review.Options{
+		Repo:             r.o.Repo,
+		Number:           r.pr.Number,
+		Branch:           branchOnlyValue(r.target.BranchOnly, r.branch),
+		HeadSHA:          branchOnlyValue(r.target.BranchOnly, r.headSHA),
+		RepoRoot:         r.o.RepoRoot,
+		Runs:             r.o.Reviewers,
+		Model:            r.o.ReviewModel,
+		Effort:           r.o.ReviewEffort,
+		BaseBranch:       r.pr.BaseRefName,
+		Post:             !r.target.BranchOnly,
+		UseDirenv:        r.o.UseDirenv,
+		AllowEnvrcChange: r.o.AllowEnvrcChange,
+		RunsDir:          r.o.ReviewRunsDir,
+		SharedRunsDirs:   []string{r.o.RunsDir},
+		DepsDir:          r.o.DepsDir,
+		CodexBin:         r.o.CodexBin,
+		DirenvBin:        r.o.DirenvBin,
+		ReviewTimeout:    review.DefaultReviewTimeout,
+	}
+}
+
+func branchOnlyValue(branchOnly bool, branch string) string {
+	if branchOnly {
+		return branch
+	}
+	return ""
 }
 
 // finishReview joins the running review and returns its findings plus the

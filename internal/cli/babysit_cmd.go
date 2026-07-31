@@ -21,7 +21,8 @@ import (
 
 var babysitBoolFlags = map[string]bool{
 	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
-	"no-direnv": true, "keep-worktree": true, "h": true, "help": true,
+	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true,
+	"h": true, "help": true,
 }
 
 var babysitValueFlags = map[string]bool{
@@ -102,6 +103,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	o.Verbose = args.boolean("verbose")
 	o.Out = os.Stdout
 	o.KeepWorktree = args.boolean("keep-worktree")
+	o.AllowEnvrcChange = args.boolean("allow-envrc-change")
 	if args.boolean("sandboxed") {
 		o.Bypass = false
 	}
@@ -167,6 +169,9 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 	if res != nil {
 		number = res.PR.Number
 		run.Title = res.PR.Title
+		if res.BranchOnly {
+			run.Branch = res.PR.HeadRefName
+		}
 		run.Rounds = res.Rounds
 		run.RunDir = res.RunDir
 		// Counts only mean something once a round has actually reviewed, and
@@ -184,10 +189,14 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 			run.Reason = ""
 		}
 	}
-	if number == 0 || repo == "" {
+	if repo == "" || number == 0 && run.Branch == "" {
 		return history.Run{}
 	}
-	run.Key = fmt.Sprintf("%s#%d", repo, number)
+	if number == 0 {
+		run.Key = history.BranchKey(repo, run.Branch)
+	} else {
+		run.Key = fmt.Sprintf("%s#%d", repo, number)
+	}
 	return run
 }
 
@@ -230,10 +239,10 @@ func (a *app) babysitUsage() {
 	fmt.Printf(`Usage:
   quorum babysit [options] [pr-number|pr-url] [extra context...]
 
-Runs the review-fix cycle for an open PR until a review reports zero Blockers
-and Critical findings and CI is green. Without a PR argument the PR of the
-current branch is used. Extra positional text becomes context for the fix
-session.
+Runs the review-fix cycle until a review reports zero Blockers and Critical
+findings. Without a PR argument, quorum uses the open PR for the current branch
+when one exists. Otherwise it works on the pushed branch and skips PR CI and PR
+comments. Extra positional text becomes context for the fix session.
 
 The fix sessions run with --dangerously-bypass-approvals-and-sandbox by
 default: they must run tests, use gh and push, all unattended. Pass
@@ -246,13 +255,14 @@ Options:
   --review-model MODEL   Model for the review rounds. Default: %s
   --review-effort LEVEL  Effort for the review rounds. Default: %s
   --max-iter N           Max review->fix rounds. Default: %d
-  --max-ci-fixes N       Max CI fix attempts per green-CI phase. Default: %d
+  --max-ci-fixes N       Max PR CI fix attempts per green-CI phase. Default: %d
   --fix-timeout DUR      Kill a fix step that runs longer. Default: %s
   --sandboxed            Use your codex sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line
   --no-notify            Disable terminal notifications
   --no-direnv            Skip direnv
+  --allow-envrc-change   Allow direnv allow when the target changed .envrc
   --keep-worktree        Keep the worktree after success
   -h, --help             Show this help
 
@@ -276,7 +286,11 @@ type loopTermReporter struct {
 func (l *loopTermReporter) Header(h loop.Header) {
 	o := l.out
 	o.Rule()
-	o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)))
+	if h.BranchOnly {
+		o.Row("target", o.Bold(h.Branch)+o.Dim("  ·  no open PR"))
+	} else {
+		o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)))
+	}
 	o.Row("repo", h.Repo)
 	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
 	o.Row("model", modelDesc(h.Model, h.Effort))
@@ -292,8 +306,11 @@ func (l *loopTermReporter) Header(h loop.Header) {
 		mode = "interactive" + o.Dim("  gates ask in the terminal")
 	}
 	o.Row("mode", mode)
-	o.Row("limits", fmt.Sprintf("%d review rounds, %d CI fixes", h.MaxIter, h.MaxCIFixes)+
-		o.Dim(fmt.Sprintf("  ·  %s per fix step", durationText(h.FixTimeout))))
+	limits := fmt.Sprintf("%d review rounds", h.MaxIter)
+	if !h.BranchOnly {
+		limits += fmt.Sprintf(", %d CI fixes", h.MaxCIFixes)
+	}
+	o.Row("limits", limits+o.Dim(fmt.Sprintf("  ·  %s per fix step", durationText(h.FixTimeout))))
 	o.Row("run dir", o.Link(o.Dim(filepath.Base(h.RunDir)), "file://"+h.RunDir))
 	o.Rule()
 }
@@ -388,7 +405,11 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 	o := l.out
 	fmt.Println()
 	o.Rule()
-	o.Row("pr", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+"  "+o.Link(o.Blue(res.PR.URL), res.PR.URL))
+	if res.BranchOnly {
+		o.Row("target", o.Bold(res.PR.HeadRefName)+o.Dim("  ·  no open PR"))
+	} else {
+		o.Row("pr", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+"  "+o.Link(o.Blue(res.PR.URL), res.PR.URL))
+	}
 	o.Row("branch", res.PR.HeadRefName)
 	o.Row("rounds", fmt.Sprintf("%d review round(s)", res.Rounds))
 	o.Row("duration", ui.Duration(res.Duration))
@@ -403,23 +424,40 @@ func (l *loopTermReporter) summary(res *loop.Result) {
 	}
 	switch {
 	case res.Converged && res.DisputeAccepted:
-		o.Row("result", o.Green("CI green, remaining findings disputed by Codex and accepted"))
-		fmt.Println("  Note: the review comment on the PR still lists the disputed findings.")
+		result := "remaining findings disputed by Codex and accepted"
+		if !res.BranchOnly {
+			result = "CI green, " + result
+		}
+		o.Row("result", o.Green(result))
+		if !res.BranchOnly {
+			fmt.Println("  Note: the review comment on the PR still lists the disputed findings.")
+		}
 		if res.DisputeText != "" {
 			for _, line := range strings.Split(res.DisputeText, "\n") {
 				fmt.Printf("  %s\n", line)
 			}
 		}
 		o.Rule()
-		l.Notify("Fertig", fmt.Sprintf("PR #%d fertig; Disputes akzeptiert, bereit fuer den manuellen Test", res.PR.Number))
+		l.Notify("Fertig", fmt.Sprintf("%s fertig; Disputes akzeptiert, bereit fuer den manuellen Test", babysitTargetLabel(res)))
 	case res.Converged:
-		o.Row("result", o.Green("review clean, CI green"))
+		result := "review clean"
+		if !res.BranchOnly {
+			result += ", CI green"
+		}
+		o.Row("result", o.Green(result))
 		o.Rule()
-		l.Notify("Fertig", fmt.Sprintf("PR #%d ist bereit fuer den manuellen Test", res.PR.Number))
+		l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
 	default:
 		o.Row("result", o.Red("not converged"))
 		o.Rule()
 	}
+}
+
+func babysitTargetLabel(res *loop.Result) string {
+	if res.BranchOnly {
+		return "Branch " + res.PR.HeadRefName
+	}
+	return fmt.Sprintf("PR #%d", res.PR.Number)
 }
 
 func modelDesc(model, effort string) string {

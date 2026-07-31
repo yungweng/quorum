@@ -16,6 +16,7 @@ type LiveRun struct {
 	PID       int       `json:"pid"`
 	Repo      string    `json:"repo"`
 	Number    int       `json:"number"`
+	Branch    string    `json:"branch,omitempty"`
 	Title     string    `json:"title,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	Reviewers int       `json:"reviewers"`
@@ -23,8 +24,13 @@ type LiveRun struct {
 	RunDir string `json:"run_dir"`
 }
 
-// Key is the "owner/repo#number" used by the scheduler state.
-func (r LiveRun) Key() string { return fmt.Sprintf("%s#%d", r.Repo, r.Number) }
+// Key identifies either a pull request or a branch-only run.
+func (r LiveRun) Key() string {
+	if r.Number > 0 {
+		return fmt.Sprintf("%s#%d", r.Repo, r.Number)
+	}
+	return r.Repo + "@" + r.Branch
+}
 
 // LiveTracker publishes one terminal review until Close removes its record.
 type LiveTracker struct {
@@ -46,6 +52,7 @@ func (r *LiveTracker) Header(h RunHeader) {
 		PID:       os.Getpid(),
 		Repo:      h.Repo,
 		Number:    h.Number,
+		Branch:    h.Branch,
 		Title:     h.Title,
 		StartedAt: r.started,
 		Reviewers: h.Runs,
@@ -97,7 +104,7 @@ func readLive(path string) (LiveRun, bool) {
 	if err := json.Unmarshal(b, &run); err != nil {
 		return LiveRun{}, false
 	}
-	if run.PID < 1 || run.Repo == "" || run.Number < 1 || run.Reviewers < 1 ||
+	if run.PID < 1 || run.Repo == "" || (run.Number < 1 && run.Branch == "") || run.Reviewers < 1 ||
 		run.StartedAt.IsZero() || run.RunDir == "" {
 		return LiveRun{}, false
 	}
