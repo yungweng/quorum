@@ -14,9 +14,10 @@ import (
 )
 
 func TestAgentHookChecksOnlyRelevantSessionChanges(t *testing.T) {
+	t.Setenv("GO111MODULE", "off")
 	repo := newGitRepository(t)
 	writeTestFile(t, repo, "main.go", "package main\n\nfunc main() {}\n")
-	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@printf x >> .check-ran\n\t@test ! -f .fail\n")
+	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@test -z \"$${GO111MODULE:-}\"\n\t@printf x >> .check-ran\n\t@test ! -f .fail\n")
 	git(t, repo, "add", ".")
 	git(t, repo, "commit", "-m", "initial")
 

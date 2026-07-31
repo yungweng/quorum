@@ -261,7 +261,20 @@ func writeState(path string, contents []byte) error {
 func runCheck(repo string) ([]byte, error) {
 	cmd := exec.Command("make", "check")
 	cmd.Dir = repo
+	cmd.Env = withoutEnv("GO111MODULE")
 	return cmd.CombinedOutput()
+}
+
+func withoutEnv(name string) []string {
+	prefix := name + "="
+	env := os.Environ()
+	filtered := env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func gitOutput(repo string, args ...string) (string, error) {
