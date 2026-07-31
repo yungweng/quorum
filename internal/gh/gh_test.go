@@ -148,6 +148,22 @@ func TestMergeHeadRejectsUnmergedResponse(t *testing.T) {
 	}
 }
 
+func TestMergeQueueEnabledChecksTheExactHead(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
+  echo "unexpected arguments: $*" >&2
+  exit 1
+fi
+echo '{"data":{"repository":{"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
+	required, err := testClient(bin).MergeQueueEnabled(context.Background(), "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !required {
+		t.Fatal("required merge queue was not detected")
+	}
+}
+
 func TestWatchChecksClassifiesTransientFailure(t *testing.T) {
 	bin, _ := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
 	state, _, err := testClient(bin).WatchChecks(context.Background(), t.TempDir(), 42)
@@ -313,17 +329,21 @@ func TestPRDetailsRejectsEmptyHead(t *testing.T) {
 
 func TestPRDetailsReadsReviewDecision(t *testing.T) {
 	bin, _ := fakeGH(t, `
-if [[ "$*" != *reviewDecision* ]]; then
-  echo 'reviewDecision was not requested' >&2
+if [[ "$*" != *reviewDecision* || "$*" != *latestReviews* || "$*" != *baseRefName* ]]; then
+  echo 'review policy fields were not requested' >&2
   exit 1
 fi
-echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED"}'`)
+echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","latestReviews":[{"state":"CHANGES_REQUESTED","author":{"login":"example-reviewer"}}]}'`)
 	details, err := testClient(bin).PRDetails(context.Background(), "acme/api", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if details.ReviewDecision != "CHANGES_REQUESTED" {
 		t.Fatalf("review decision = %q", details.ReviewDecision)
+	}
+	if details.BaseRefName != "main" || len(details.LatestReviews) != 1 ||
+		details.LatestReviews[0].Author.Login != "example-reviewer" {
+		t.Fatalf("details = %+v", details)
 	}
 }
 

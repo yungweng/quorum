@@ -67,6 +67,15 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		}
 		return result, err
 	}
+	if pr.BaseRefName != "" {
+		requiresQueue, err := client.MergeQueueEnabled(ctx, repo, number, reviewedSHA)
+		if err != nil {
+			return result, fmt.Errorf("checking merge queue policy: %w", err)
+		}
+		if requiresQueue {
+			return result, fmt.Errorf("refusing auto-merge: target branch %s requires a merge queue", pr.BaseRefName)
+		}
+	}
 
 	login, err := client.Login(ctx)
 	if err != nil {
@@ -94,10 +103,18 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		return reviews[i].SubmittedAt.Before(reviews[j].SubmittedAt)
 	})
 	approved := false
+	activeChangeRequests := make(map[string]bool)
 	var reusableApprovalID int64
 	var createdReview gh.PRReview
 	for _, review := range reviews {
 		if !strings.EqualFold(review.User.Login, login) {
+			reviewer := strings.ToLower(review.User.Login)
+			switch review.State {
+			case "CHANGES_REQUESTED":
+				activeChangeRequests[reviewer] = true
+			case "APPROVED", "DISMISSED":
+				delete(activeChangeRequests, reviewer)
+			}
 			continue
 		}
 		switch review.State {
@@ -114,6 +131,10 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	}
 	if approved {
 		result.approvalReviewID = reusableApprovalID
+	}
+	if len(activeChangeRequests) > 0 {
+		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
+			fmt.Errorf("refusing auto-merge: pull request %s#%d has active change requests", repo, number))
 	}
 	if !approved {
 		current, err := client.PRDetails(ctx, repo, number)
@@ -157,6 +178,10 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		}
 		return result, err
 	}
+	if latestReviewsRequestChanges(current.LatestReviews, login) {
+		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
+			fmt.Errorf("refusing auto-merge: pull request %s#%d has active change requests", repo, number))
+	}
 	if mergeErr := client.MergeHead(ctx, repo, number, reviewedSHA); mergeErr != nil {
 		if current, inspectErr := client.PRDetails(ctx, repo, number); inspectErr == nil {
 			merged, headErr := validateHead(current, repo, number, reviewedSHA)
@@ -190,6 +215,15 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	}
 	result.Status = Merged
 	return result, nil
+}
+
+func latestReviewsRequestChanges(reviews []gh.LatestReview, login string) bool {
+	for _, review := range reviews {
+		if review.State == "CHANGES_REQUESTED" && !strings.EqualFold(review.Author.Login, login) {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryWhenReady waits for checks, then retries the exact-head merge. A green

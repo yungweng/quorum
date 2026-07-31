@@ -220,13 +220,22 @@ func (c *Client) searchPRs(ctx context.Context, args []string) ([]PR, error) {
 }
 
 // Details are the fields the search API does not carry.
+type LatestReview struct {
+	State  string `json:"state"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
 type Details struct {
-	HeadRefOid        string `json:"headRefOid"`
-	IsDraft           bool   `json:"isDraft"`
-	IsCrossRepository bool   `json:"isCrossRepository"`
-	State             string `json:"state"`
-	Title             string `json:"title"`
-	ReviewDecision    string `json:"reviewDecision"`
+	BaseRefName       string         `json:"baseRefName"`
+	HeadRefOid        string         `json:"headRefOid"`
+	IsDraft           bool           `json:"isDraft"`
+	IsCrossRepository bool           `json:"isCrossRepository"`
+	State             string         `json:"state"`
+	Title             string         `json:"title"`
+	ReviewDecision    string         `json:"reviewDecision"`
+	LatestReviews     []LatestReview `json:"latestReviews"`
 	AutoMergeRequest  *struct {
 		EnabledAt string `json:"enabledAt"`
 	} `json:"autoMergeRequest"`
@@ -240,7 +249,7 @@ type Details struct {
 func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Details, error) {
 	var d Details
 	out, err := c.run(ctx, "pr", "view", fmt.Sprint(number), "--repo", repo,
-		"--json", "headRefOid,isDraft,isCrossRepository,author,state,title,reviewDecision,autoMergeRequest")
+		"--json", "baseRefName,headRefOid,isDraft,isCrossRepository,author,state,title,reviewDecision,latestReviews,autoMergeRequest")
 	if err != nil {
 		return d, err
 	}
@@ -251,6 +260,46 @@ func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Detail
 		return d, fmt.Errorf("%w: gh pr view %s#%d returned no head sha", ErrTransient, repo, number)
 	}
 	return d, nil
+}
+
+// MergeQueueEnabled reports whether the pull request's target branch requires
+// a merge queue and confirms that the queried pull request still has headSHA.
+func (c *Client) MergeQueueEnabled(ctx context.Context, repo string, number int, headSHA string) (bool, error) {
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || number <= 0 || headSHA == "" {
+		return false, fmt.Errorf("merge queue check needs owner/repository, pull request number, and head sha")
+	}
+	const query = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { headRefOid isMergeQueueEnabled }
+  }
+}`
+	out, err := c.run(ctx, "api", "graphql", "-f", "query="+query,
+		"-F", "owner="+owner, "-F", "name="+name, "-F", "number="+fmt.Sprint(number))
+	if err != nil {
+		return false, err
+	}
+	var response struct {
+		Data struct {
+			Repository struct {
+				PullRequest *struct {
+					HeadRefOid        string `json:"headRefOid"`
+					MergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return false, fmt.Errorf("gh api merge queue check: %w", err)
+	}
+	pr := response.Data.Repository.PullRequest
+	if pr == nil || pr.HeadRefOid == "" {
+		return false, fmt.Errorf("%w: GitHub returned no pull request head during merge queue check", ErrTransient)
+	}
+	if pr.HeadRefOid != headSHA {
+		return false, fmt.Errorf("pull request head moved from %s to %s during merge queue check", headSHA, pr.HeadRefOid)
+	}
+	return pr.MergeQueueEnabled, nil
 }
 
 // The states a pull request can be in, as GitHub spells them.

@@ -115,6 +115,57 @@ esac`)
 	}
 }
 
+func TestRunRejectsUnprotectedExternalChangeRequest(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"id":10,"state":"CHANGES_REQUESTED","commit_id":"abc123","submitted_at":"2026-07-31T10:00:00Z","user":{"login":"other-reviewer"}},{"id":11,"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T10:01:00Z","user":{"login":"reviewer"}}]' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "active change requests") {
+		t.Fatalf("err = %v", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("external change request reached a side effect:\n%s", args)
+	}
+}
+
+func TestRunAllowsSupersededExternalChangeRequest(t *testing.T) {
+	client, _ := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"id":10,"state":"CHANGES_REQUESTED","commit_id":"abc123","submitted_at":"2026-07-31T10:00:00Z","user":{"login":"other-reviewer"}},{"id":11,"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T10:01:00Z","user":{"login":"other-reviewer"}},{"id":12,"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T10:02:00Z","user":{"login":"reviewer"}}]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"merged":true}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Merged {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRunRejectsMergeQueueBeforeApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo '{"data":{"repository":{"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "requires a merge queue") {
+		t.Fatalf("err = %v", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("merge queue branch reached a side effect:\n%s", args)
+	}
+}
+
 func TestRunRejectsDraftBeforeApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
@@ -138,7 +189,7 @@ case "$n" in
   3) echo '[]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   5) echo '{"id":99,"state":"APPROVED"}' ;;
-  6) echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","author":{"login":"example-user"}}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","latestReviews":[{"state":"CHANGES_REQUESTED","author":{"login":"other-reviewer"}}],"author":{"login":"example-user"}}' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err == nil || !strings.Contains(err.Error(), "active change requests") {

@@ -136,7 +136,8 @@ A clean posted PR review has no Blockers or Critical findings; Suggestions and
 Questions are allowed. Quorum approves the exact reviewed commit, then asks
 GitHub to merge it with a merge commit after the repository's branch rules
 pass. It never uses administrator privileges. A moved head, an own PR, a local
-report (`POST=0` or `--dry-run`) and a branch without a PR are not merged.
+report (`POST=0` or `--dry-run`), a branch without a PR, and a target branch
+that requires a merge queue are not merged.
 
 The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
 The other two settings apply only to the matching command started in a
