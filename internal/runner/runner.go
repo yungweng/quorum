@@ -3,6 +3,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -95,6 +96,18 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		mergeStatus := ""
 		if automerge.Allowed(r.Cfg.AutoMergeAgent, r.Cfg.Post, findings) {
 			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA)
+			if errors.Is(mergeErr, automerge.ErrMergeNotReady) {
+				r.Log.Printf("%s: waiting for required checks before merge", key)
+				r.recordAutoMergePending(key, runDir, findings)
+				retryResult, retryErr := r.retryAutoMergeAfterChecks(ctx, clone, repo, number, findings.HeadSHA)
+				if mergeResult.ApprovalAttempted {
+					retryResult.ApprovalAttempted = true
+				}
+				if mergeResult.ApprovalCreated {
+					retryResult.ApprovalCreated = true
+				}
+				mergeResult, mergeErr = retryResult, retryErr
+			}
 			mergeStatus = mergeResult.Status
 			if mergeErr != nil {
 				reason := fmt.Sprintf("auto-merge failed: %v", mergeErr)
@@ -139,6 +152,45 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	r.recordFailureWith(key, sha, runDir, reason, runLog)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
+}
+
+// recordAutoMergePending preserves the completed review while the same
+// detached run waits for protected-branch checks. ReqAt remains unset until
+// the merge either succeeds or reaches a terminal failure.
+func (r *Runner) recordAutoMergePending(key, runDir string, findings review.Findings) {
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.Running, "waiting for required checks before merge")
+		rec.SHA = findings.HeadSHA
+		rec.RunDir = runDir
+		rec.CommentURL = urlOf(findings)
+		rec.Blockers = state.Num(findings.Blockers)
+		rec.Critical = state.Num(findings.Critical)
+		rec.Suggestions = state.Num(findings.Suggestions)
+		rec.Questions = state.Num(findings.Questions)
+	})
+}
+
+func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo string, number int, sha string) (automerge.Result, error) {
+	for {
+		checkState, output, err := r.GH.WatchChecks(ctx, clone, number)
+		if err != nil {
+			return automerge.Result{}, fmt.Errorf("waiting for required checks: %w", err)
+		}
+		switch checkState {
+		case gh.ChecksPass, gh.ChecksNone:
+			return automerge.Run(ctx, r.GH, repo, number, sha)
+		case gh.ChecksFail:
+			return automerge.Result{}, fmt.Errorf("required checks failed: %s", firstLine(output))
+		case gh.ChecksPending:
+			timer := time.NewTimer(10 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return automerge.Result{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
 }
 
 // recordAutoMergeFailure preserves the successful review but marks its failed

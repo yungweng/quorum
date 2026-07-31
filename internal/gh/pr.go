@@ -132,9 +132,10 @@ func (c *Client) CommentBody(ctx context.Context, dir string, number int, body s
 // idempotent. GitHub changes State to DISMISSED when an approval no longer
 // counts, so only APPROVED reviews are reusable.
 type PRReview struct {
-	State    string `json:"state"`
-	CommitID string `json:"commit_id"`
-	User     struct {
+	State       string    `json:"state"`
+	CommitID    string    `json:"commit_id"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	User        struct {
 		Login string `json:"login"`
 	} `json:"user"`
 }

@@ -2,6 +2,7 @@ package automerge
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,7 +105,7 @@ func TestRunDoesNotReuseSupersededApproval(t *testing.T) {
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
-  3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}},{"state":"CHANGES_REQUESTED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  3) echo '[{"state":"CHANGES_REQUESTED","commit_id":"abc123","submitted_at":"2026-07-31T10:01:00Z","user":{"login":"reviewer"}},{"state":"APPROVED","commit_id":"abc123","submitted_at":"2026-07-31T10:00:00Z","user":{"login":"reviewer"}}]' ;;
   4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   5) echo '{"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
@@ -119,6 +120,23 @@ esac`)
 	}
 	if args := readArgs(t, argsFile); !strings.Contains(args, "event=APPROVE") {
 		t.Fatalf("approval was not renewed:\n%s", args)
+	}
+}
+
+func TestRunReportsPendingBranchRequirements(t *testing.T) {
+	client, _ := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo 'Pull Request is not mergeable (HTTP 405)' >&2; exit 1 ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+esac`)
+
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if !errors.Is(err, ErrMergeNotReady) {
+		t.Fatalf("err = %v, want ErrMergeNotReady", err)
 	}
 }
 

@@ -251,13 +251,13 @@ func TestLatestReviewRequestReportsFailure(t *testing.T) {
 
 func TestReviewsReadsConcatenatedPages(t *testing.T) {
 	bin, _ := fakeGH(t, `printf '%s\n%s\n' \
-  '[{"state":"APPROVED","commit_id":"head-1","user":{"login":"example-user"}}]' \
+  '[{"state":"APPROVED","commit_id":"head-1","submitted_at":"2026-07-31T09:00:00Z","user":{"login":"example-user"}}]' \
   '[{"state":"DISMISSED","commit_id":"head-2","user":{"login":"other-user"}}]'`)
 	reviews, err := testClient(bin).Reviews(context.Background(), "acme/api", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reviews) != 2 || reviews[0].CommitID != "head-1" || reviews[1].State != "DISMISSED" {
+	if len(reviews) != 2 || reviews[0].CommitID != "head-1" || reviews[0].SubmittedAt.IsZero() || reviews[1].State != "DISMISSED" {
 		t.Fatalf("reviews = %+v", reviews)
 	}
 }

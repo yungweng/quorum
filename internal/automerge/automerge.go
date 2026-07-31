@@ -3,7 +3,9 @@ package automerge
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/yungweng/quorum/internal/gh"
@@ -15,6 +17,10 @@ const approvalBody = "No blockers or critical findings found."
 const (
 	Merged = "merged"
 )
+
+// ErrMergeNotReady means GitHub refused the exact-head merge because branch
+// requirements have not settled yet. Callers may wait for checks and retry.
+var ErrMergeNotReady = errors.New("reviewed head is not ready to merge")
 
 type Result struct {
 	ApprovalAttempted bool
@@ -66,6 +72,11 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if err != nil {
 		return result, err
 	}
+	// Derive current reviewer state from submission time, independent of the
+	// order in which GitHub or a paginated response happens to return reviews.
+	sort.SliceStable(reviews, func(i, j int) bool {
+		return reviews[i].SubmittedAt.Before(reviews[j].SubmittedAt)
+	})
 	approved := false
 	for _, review := range reviews {
 		if !strings.EqualFold(review.User.Login, login) {
@@ -113,6 +124,14 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 				result.Status = Merged
 				return result, nil
 			}
+			if _, headErr := validateHead(current, repo, number, reviewedSHA); headErr != nil {
+				return result, headErr
+			}
+		}
+		// GitHub uses 405 while an otherwise valid pull request is waiting
+		// for protected-branch requirements. Keep other errors terminal.
+		if strings.Contains(err.Error(), "HTTP 405") {
+			return result, fmt.Errorf("%w: %v", ErrMergeNotReady, err)
 		}
 		return result, fmt.Errorf("merging reviewed head: %w", err)
 	}
