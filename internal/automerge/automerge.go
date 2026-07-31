@@ -15,6 +15,7 @@ import (
 
 const approvalBody = "No blockers or critical findings found."
 const driftDismissalBody = "The pull request head changed after this approval was submitted."
+const failureDismissalBody = "Automatic merge did not complete, so this approval is no longer active."
 
 const (
 	Merged = "merged"
@@ -128,23 +129,29 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	// Re-read the head after approval, then use GitHub's head-bound merge API.
 	current, err := client.PRDetails(ctx, repo, number)
 	if err != nil {
-		return result, dismissCreatedApproval(ctx, client, repo, number, &result, err)
+		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, err)
 	}
 	if merged, err := validateHead(current, repo, number, reviewedSHA); merged || err != nil {
 		if merged {
 			result.Status = Merged
 		}
-		if err != nil && current.HeadRefOid != reviewedSHA {
-			err = dismissCreatedApproval(ctx, client, repo, number, &result, err)
+		if err != nil {
+			if current.HeadRefOid != reviewedSHA {
+				err = dismissCreatedApproval(ctx, client, repo, number, &result, err)
+			} else {
+				err = dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, err)
+			}
 		}
 		return result, err
 	}
-	if err := client.MergeHead(ctx, repo, number, reviewedSHA); err != nil {
+	if mergeErr := client.MergeHead(ctx, repo, number, reviewedSHA); mergeErr != nil {
 		if current, inspectErr := client.PRDetails(ctx, repo, number); inspectErr == nil {
 			merged, headErr := validateHead(current, repo, number, reviewedSHA)
 			if headErr != nil {
 				if current.HeadRefOid != reviewedSHA {
 					headErr = dismissCreatedApproval(ctx, client, repo, number, &result, headErr)
+				} else {
+					headErr = dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, headErr)
 				}
 				return result, headErr
 			}
@@ -152,13 +159,21 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 				result.Status = Merged
 				return result, nil
 			}
+		} else {
+			cause := fmt.Errorf("merging reviewed head: %w", mergeErr)
+			if strings.Contains(mergeErr.Error(), "HTTP 405") {
+				cause = fmt.Errorf("%w: %v", ErrMergeNotReady, mergeErr)
+			}
+			cause = errors.Join(cause, fmt.Errorf("rechecking pull request after merge failure: %w", inspectErr))
+			return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, cause)
 		}
 		// GitHub uses 405 while an otherwise valid pull request is waiting
 		// for protected-branch requirements. Keep other errors terminal.
-		if strings.Contains(err.Error(), "HTTP 405") {
-			return result, fmt.Errorf("%w: %v", ErrMergeNotReady, err)
+		if strings.Contains(mergeErr.Error(), "HTTP 405") {
+			return result, fmt.Errorf("%w: %v", ErrMergeNotReady, mergeErr)
 		}
-		return result, fmt.Errorf("merging reviewed head: %w", err)
+		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
+			fmt.Errorf("merging reviewed head: %w", mergeErr))
 	}
 	result.Status = Merged
 	return result, nil
@@ -176,7 +191,8 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return combined, fmt.Errorf("required checks did not settle within %s", waitTimeout)
+			return stopRetry(ctx, client, repo, number, combined,
+				fmt.Errorf("required checks did not settle within %s", waitTimeout))
 		}
 		watchCtx, cancel := context.WithTimeout(ctx, remaining)
 		checkState, output, err := client.WatchChecks(watchCtx, checksDir, number)
@@ -184,22 +200,25 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
-				return combined, ctx.Err()
+				return stopRetry(ctx, client, repo, number, combined, ctx.Err())
 			}
 			if errors.Is(watchErr, context.DeadlineExceeded) {
-				return combined, fmt.Errorf("required checks did not settle within %s", waitTimeout)
+				return stopRetry(ctx, client, repo, number, combined,
+					fmt.Errorf("required checks did not settle within %s", waitTimeout))
 			}
 			if errors.Is(err, gh.ErrTransient) {
 				if !time.Now().Before(deadline) {
-					return combined, fmt.Errorf("required checks did not settle within %s", waitTimeout)
+					return stopRetry(ctx, client, repo, number, combined,
+						fmt.Errorf("required checks did not settle within %s", waitTimeout))
 				}
 				delay := min(retryDelay(time.Second, waitTimeout), time.Until(deadline))
 				if err := waitRetry(ctx, delay); err != nil {
-					return combined, err
+					return stopRetry(ctx, client, repo, number, combined, err)
 				}
 				continue
 			}
-			return combined, fmt.Errorf("waiting for required checks: %w", err)
+			return stopRetry(ctx, client, repo, number, combined,
+				fmt.Errorf("waiting for required checks: %w", err))
 		}
 		if done, err := verifyRetryHead(ctx, client, repo, number, reviewedSHA, &combined); done || err != nil {
 			return combined, err
@@ -210,38 +229,40 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 		case gh.ChecksPass:
 			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
 			combined = combineResults(combined, result)
+			if mergeErr == nil {
+				return combined, nil
+			}
 			if !errors.Is(mergeErr, ErrMergeNotReady) {
-				if errors.Is(mergeErr, errHeadDrift) {
-					mergeErr = dismissCreatedApproval(ctx, client, repo, number, &combined, mergeErr)
-				}
-				return combined, mergeErr
+				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			if !time.Now().Before(deadline) {
-				return combined, mergeErr
+				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			delay = retryDelay(5*time.Second, waitTimeout)
 		case gh.ChecksFail:
-			return combined, fmt.Errorf("required checks failed: %s", firstLine(output))
+			return stopRetry(ctx, client, repo, number, combined,
+				fmt.Errorf("required checks failed: %s", firstLine(output)))
 		case gh.ChecksNone:
 			if !time.Now().Before(deadline) {
 				result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
 				combined = combineResults(combined, result)
-				if errors.Is(mergeErr, errHeadDrift) {
-					mergeErr = dismissCreatedApproval(ctx, client, repo, number, &combined, mergeErr)
+				if mergeErr == nil {
+					return combined, nil
 				}
-				return combined, mergeErr
+				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			delay = retryDelay(20*time.Second, waitTimeout)
 		case gh.ChecksPending:
 			if !time.Now().Before(deadline) {
-				return combined, fmt.Errorf("required checks did not settle within %s", waitTimeout)
+				return stopRetry(ctx, client, repo, number, combined,
+					fmt.Errorf("required checks did not settle within %s", waitTimeout))
 			}
 			delay = retryDelay(10*time.Second, waitTimeout)
 		}
 
 		delay = min(delay, time.Until(deadline))
 		if err := waitRetry(ctx, delay); err != nil {
-			return combined, err
+			return stopRetry(ctx, client, repo, number, combined, err)
 		}
 	}
 }
@@ -263,6 +284,11 @@ func combineResults(first, second Result) Result {
 	}
 }
 
+func stopRetry(ctx context.Context, client *gh.Client, repo string, number int, result Result, cause error) (Result, error) {
+	err := dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, cause)
+	return result, err
+}
+
 func reconcileApprovalFailure(ctx context.Context, client *gh.Client, repo string, number int, login, reviewedSHA string, knownReviewIDs map[int64]struct{}, result *Result, approvalErr error) error {
 	reviews, err := client.Reviews(ctx, repo, number)
 	if err != nil {
@@ -281,13 +307,21 @@ func reconcileApprovalFailure(ctx context.Context, client *gh.Client, repo strin
 
 	current, err := client.PRDetails(ctx, repo, number)
 	if err != nil {
-		return dismissCreatedApproval(ctx, client, repo, number, result,
+		return dismissCreatedApprovalAfterFailure(ctx, client, repo, number, result,
 			errors.Join(approvalErr, fmt.Errorf("reconciling timed-out approval: %w", err)))
 	}
-	if _, err := validateHead(current, repo, number, reviewedSHA); errors.Is(err, errHeadDrift) {
-		return dismissCreatedApproval(ctx, client, repo, number, result, errors.Join(approvalErr, err))
+	merged, headErr := validateHead(current, repo, number, reviewedSHA)
+	if errors.Is(headErr, errHeadDrift) {
+		return dismissCreatedApproval(ctx, client, repo, number, result, errors.Join(approvalErr, headErr))
 	}
-	return approvalErr
+	if headErr != nil {
+		return dismissCreatedApprovalAfterFailure(ctx, client, repo, number, result, errors.Join(approvalErr, headErr))
+	}
+	if merged {
+		result.Status = Merged
+		return nil
+	}
+	return dismissCreatedApprovalAfterFailure(ctx, client, repo, number, result, approvalErr)
 }
 
 func waitRetry(ctx context.Context, delay time.Duration) error {
@@ -302,6 +336,9 @@ func waitRetry(ctx context.Context, delay time.Duration) error {
 }
 
 func validateHead(current gh.Details, repo string, number int, reviewedSHA string) (bool, error) {
+	if current.IsCrossRepository {
+		return false, fmt.Errorf("refusing auto-merge for fork pull request %s#%d", repo, number)
+	}
 	if current.HeadRefOid != reviewedSHA {
 		return false, fmt.Errorf("%w: refusing auto-merge: reviewed head is %s but GitHub reports %s", errHeadDrift, reviewedSHA, current.HeadRefOid)
 	}
@@ -317,12 +354,14 @@ func validateHead(current gh.Details, repo string, number int, reviewedSHA strin
 func verifyRetryHead(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string, result *Result) (bool, error) {
 	current, err := client.PRDetails(ctx, repo, number)
 	if err != nil {
-		return false, dismissCreatedApproval(ctx, client, repo, number, result, err)
+		return false, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, result, err)
 	}
 	merged, err := validateHead(current, repo, number, reviewedSHA)
 	if err != nil {
 		if errors.Is(err, errHeadDrift) {
 			err = dismissCreatedApproval(ctx, client, repo, number, result, err)
+		} else {
+			err = dismissCreatedApprovalAfterFailure(ctx, client, repo, number, result, err)
 		}
 		return false, err
 	}
@@ -334,12 +373,20 @@ func verifyRetryHead(ctx context.Context, client *gh.Client, repo string, number
 }
 
 func dismissCreatedApproval(ctx context.Context, client *gh.Client, repo string, number int, result *Result, cause error) error {
+	return dismissCreatedApprovalWith(ctx, client, repo, number, result, driftDismissalBody, "after head drift", cause)
+}
+
+func dismissCreatedApprovalAfterFailure(ctx context.Context, client *gh.Client, repo string, number int, result *Result, cause error) error {
+	return dismissCreatedApprovalWith(ctx, client, repo, number, result, failureDismissalBody, "after auto-merge stopped", cause)
+}
+
+func dismissCreatedApprovalWith(ctx context.Context, client *gh.Client, repo string, number int, result *Result, message, reason string, cause error) error {
 	if result.approvalReviewID == 0 {
 		return cause
 	}
 	reviewID := result.approvalReviewID
-	if err := client.DismissReview(ctx, repo, number, reviewID, driftDismissalBody); err != nil {
-		return errors.Join(cause, fmt.Errorf("dismissing approval %d after head drift: %w", reviewID, err))
+	if err := client.DismissReview(ctx, repo, number, reviewID, message); err != nil {
+		return errors.Join(cause, fmt.Errorf("dismissing approval %d %s: %w", reviewID, reason, err))
 	}
 	result.approvalReviewID = 0
 	return cause

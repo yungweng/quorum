@@ -171,6 +171,18 @@ func TestRunRejectsHeadDriftBeforeApproval(t *testing.T) {
 	}
 }
 
+func TestRunRejectsForkBeforeApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `echo '{"headRefOid":"abc123","state":"OPEN","isCrossRepository":true,"author":{"login":"example-user"}}'`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "fork pull request") {
+		t.Fatalf("err = %v", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("fork PR reached a side effect:\n%s", args)
+	}
+}
+
 func TestRunRejectsMergedDifferentHead(t *testing.T) {
 	client, _ := fakeGH(t, `echo '{"headRefOid":"new-head","state":"MERGED","author":{"login":"example-user"}}'`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "reviewed-head")
@@ -251,6 +263,29 @@ esac`)
 	}
 }
 
+func TestRunDismissesReconciledApprovalWhenApprovalFails(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
+  6) echo '[{"id":99,"state":"APPROVED","commit_id":"abc123","body":"`+approvalBody+`","user":{"login":"reviewer"}}]' ;;
+  7) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "approving reviewed head") {
+		t.Fatalf("err = %v", err)
+	}
+	if !result.ApprovalCreated || result.approvalReviewID != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("reconciled approval was not dismissed:\n%s", args)
+	}
+}
+
 func TestRunRejectsOwnPullRequest(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
@@ -268,7 +303,7 @@ esac`)
 }
 
 func TestRunReportsApprovalWhenMergeFails(t *testing.T) {
-	client, _ := fakeGH(t, `
+	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
@@ -277,6 +312,7 @@ case "$n" in
   5) echo '{"id":99,"state":"APPROVED"}' ;;
   6) echo '{"headRefOid":"abc123","state":"OPEN","autoMergeRequest":null,"author":{"login":"example-user"}}' ;;
   7) echo 'branch protection rejected the merge' >&2; exit 1 ;;
+  8) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err == nil || !strings.Contains(err.Error(), "merging reviewed head") {
@@ -284,6 +320,33 @@ esac`)
 	}
 	if !result.ApprovalCreated {
 		t.Fatalf("partial result lost the approval: %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("terminal merge failure left the approval active:\n%s", args)
+	}
+}
+
+func TestRunDismissesApprovalWhenMergeInspectionFails(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  5) echo '{"id":99,"state":"APPROVED"}' ;;
+  6) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  7) echo 'merge request failed' >&2; exit 1 ;;
+  8|9|10) echo 'net/http: TLS handshake timeout' >&2; exit 1 ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err == nil || !strings.Contains(err.Error(), "rechecking pull request") {
+		t.Fatalf("err = %v", err)
+	}
+	if !result.ApprovalCreated || result.approvalReviewID != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("uncertain merge left the approval active:\n%s", args)
 	}
 }
 
@@ -356,7 +419,9 @@ case "$n" in
   2) while true; do :; done ;;
 esac`)
 	started := time.Now()
-	_, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{}, time.Second)
+	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{
+		ApprovalCreated: true, approvalReviewID: 99,
+	}, time.Second)
 	if err == nil || !strings.Contains(err.Error(), "did not settle") {
 		t.Fatalf("err = %v", err)
 	}
@@ -365,6 +430,32 @@ esac`)
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("checks watch took %s, want under 2s", elapsed)
+	}
+	if result.approvalReviewID != 0 {
+		t.Fatalf("timed-out retry left the approval active: %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("timed-out retry did not dismiss the approval:\n%s", args)
+	}
+}
+
+func TestRetryDismissesApprovalWhenChecksFail(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1|3) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'build fail 1m' >&2; exit 1 ;;
+esac`)
+	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{
+		ApprovalCreated: true, approvalReviewID: 99,
+	}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "required checks failed") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.approvalReviewID != 0 {
+		t.Fatalf("failed checks left the approval active: %+v", result)
+	}
+	if args := readArgs(t, argsFile); !strings.Contains(args, "pulls/42/reviews/99/dismissals") {
+		t.Fatalf("failed checks did not dismiss the approval:\n%s", args)
 	}
 }
 
