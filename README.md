@@ -147,6 +147,12 @@ quorum 1.1.0                                        agent loaded, every 5m, last
   1/2 review   ·   1 fix   ·   1 queued   ·   3.4 load                                     ⠋
 ────────────────────────────────────────────────────────────────────────────────────────────
 
+OPEN  2
+  ● payments #98                accept crumb refunds in the same currency
+      reviewed 21:02 · 2B 1C 3S  comment ↗
+  ● toaster-api #2002           read the crumb tray size from the config
+      reviewed 19:42 · nothing found  comment ↗
+
 ACTIVE  1 / 2
   ● toaster-api #2016           stop emailing every user at 3am about crumbs
       review · agent · 6m · 4/6 reviewers done
@@ -168,6 +174,13 @@ every repo that asks you · 2 at a time, 6 reviewers each · 5.0 GB cache
 
 The status bar under the version answers "what is this machine doing" before
 anything else has to be read.
+
+OPEN is what is waiting for a person: pull requests quorum has reviewed that
+are still open, newest first, with what the review found. The bullet is red for
+blockers, yellow for critical findings and green for neither, so the one that
+needs you is the one the eye lands on. A pull request leaves the section when
+it is merged or closed, when it is being reviewed again (ACTIVE has it then),
+and two weeks after its last review.
 
 ACTIVE is everything in flight: reviews the agent started, reviews you started
 in a terminal, fix loops, and what is waiting for a slot. The symbol and the

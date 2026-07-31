@@ -27,8 +27,58 @@ const agentTTL = 30 * time.Second
 
 func (a *app) cmdStatus(args []string) int {
 	_ = args
-	a.dashboard(a.out, nil)
+	a.dashboard(a.out, a.endsOnce())
 	return 0
+}
+
+// endsOnce asks GitHub once how the recently reviewed pull requests ended.
+//
+// watch has a tracker for this and status does not, but status is the command
+// that most needs the answer: without it the open section has no way to tell a
+// pull request that is still waiting for someone from one that was merged an
+// hour ago, and would list both. One batched query covers every candidate. It
+// is decoration on a command that has always been instant, so it gets one
+// attempt and a short deadline, and a machine with no network simply falls back
+// to showing everything recent.
+func (a *app) endsOnce() map[string]string {
+	file, err := state.Read(a.p.StateFile)
+	if err != nil {
+		return nil
+	}
+	cutoff := time.Now().Add(-openWindow)
+	var keys []string
+	for _, e := range file.Entries() {
+		if e.Status != state.OK || e.Number() == 0 {
+			continue
+		}
+		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
+			continue
+		}
+		keys = append(keys, e.Key)
+		if len(keys) == openLimit*2 {
+			// Twice the section's own limit, so a few merged pull requests at
+			// the front cannot push the list short.
+			break
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	t, err := a.findTools()
+	if err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := gh.New(t.GH)
+	client.Attempts = 1
+	client.Timeout = 5 * time.Second
+	client.Log = nil
+	states, err := client.PRStates(ctx, keys)
+	if err != nil {
+		return nil
+	}
+	return states
 }
 
 // dashboard renders everything quorum knows in one screen: what is running, what
@@ -67,9 +117,12 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 
 	a.header(w)
 
-	var running, queued, recent []state.Entry
+	var running, queued, recent, reviewed []state.Entry
 	seen := map[string]bool{}
 	for _, e := range file.Entries() {
+		if e.Status == state.OK {
+			reviewed = append(reviewed, e)
+		}
 		seen[e.Key] = true
 		if m, ok := live[e.Key]; ok && !babysitPID[m.PID] && e.Status != state.Running {
 			// A direct run claims its slot before it updates an existing state
@@ -113,6 +166,24 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 
 	a.statusbar(w, len(live), len(babysits), len(queued))
 
+	// What is in flight is drawn first but printed second: the open section has
+	// to leave out whatever the active section is about to show, or a pull
+	// request being reviewed right now appears twice, once as a live run and
+	// once as the result of the run before it.
+	busy := make(map[string]bool, len(running)+len(queued)+len(manualReviews)+len(babysits))
+	for _, group := range [][]state.Entry{running, queued} {
+		for _, e := range group {
+			busy[e.Key] = true
+		}
+	}
+	for _, run := range manualReviews {
+		busy[run.Key()] = true
+	}
+	for _, p := range babysits {
+		busy[p.Key()] = true
+	}
+	open := openPRs(reviewed, busy, ends)
+
 	// What is running gets as much room as it needs and no more, and the log of
 	// finished runs gets the rest.
 	//
@@ -121,13 +192,14 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	// the time, while the runs that had actually happened were squeezed in
 	// underneath. The counts that used to justify those headings are on the
 	// status bar, so nothing is lost by collapsing them.
+	a.sectionOpen(w, open, ends)
 	a.sectionActive(w, running, manualReviews, babysits, queued, live, ends)
 	past := a.sectionHistory(w, recent, ends)
 	a.footer(w)
 
-	shown := make([]string, 0, len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
+	shown := make([]string, 0, len(open)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
 	shownSet := make(map[string]bool, cap(shown))
-	for _, group := range [][]state.Entry{running, queued} {
+	for _, group := range [][]state.Entry{open, running, queued} {
 		for _, e := range group {
 			if shownSet[e.Key] {
 				continue
@@ -236,6 +308,104 @@ func (a *app) agentLine() string {
 		return "agent loaded, " + every + ", no poll yet"
 	}
 	return fmt.Sprintf("agent loaded, %s, last poll %s", every, ui.Ago(at))
+}
+
+// openLimit and openWindow bound the open section.
+//
+// Both exist for the same reason: the state file keeps two hundred records and
+// most of them are pull requests that were merged months ago. Whether one is
+// still open is only known once GitHub has been asked, and until then age is
+// the best guess there is. A run older than the window is history, and the
+// history section is where it belongs.
+const (
+	openLimit  = 10
+	openWindow = 14 * 24 * time.Hour
+)
+
+// openPRs is what quorum has reviewed and what is still waiting for something
+// to happen to it: newest first, minus everything the active section already
+// shows, minus everything GitHub says has been merged or closed.
+//
+// ends may be empty, which is what a dashboard drawn before the first lookup
+// answers looks like. An unknown pull request is treated as open, so the list
+// starts complete and shortens as answers arrive, rather than starting empty
+// and looking as though nothing had been reviewed.
+func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]string) []state.Entry {
+	cutoff := time.Now().Add(-openWindow)
+	out := make([]state.Entry, 0, openLimit)
+	for _, e := range reviewed {
+		if busy[e.Key] {
+			continue
+		}
+		switch ends[e.Key] {
+		case gh.StateMerged, gh.StateClosed:
+			continue
+		}
+		if t := e.Time(); t.IsZero() || t.Before(cutoff) {
+			continue
+		}
+		out = append(out, e)
+		if len(out) == openLimit {
+			break
+		}
+	}
+	return out
+}
+
+// sectionOpen is the top of the dashboard: the pull requests quorum has
+// reviewed that are still open, and what the review found.
+//
+// It answers the question the other two sections cannot. Active is only about
+// this minute, and history is a log, so a review from this morning that found
+// two blockers scrolls away under later runs even though nobody has done
+// anything about it yet. This section keeps it in view until the pull request
+// is merged or closed.
+func (a *app) sectionOpen(w *ui.Writer, open []state.Entry, ends map[string]string) {
+	if len(open) == 0 {
+		fmt.Fprintln(w.Out)
+		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim("      nothing reviewed is still open"))
+		return
+	}
+	w.Section("open", len(open), 0)
+	now := time.Now()
+	for _, e := range open {
+		a.prLine(w, openMark(w, e), e, ends[e.Key])
+		w.Printf("      %s\n", openDetail(w, e, now))
+	}
+}
+
+// openMark colours the bullet by what the review found, so the pull request
+// that needs a person is the one the eye lands on first.
+func openMark(w *ui.Writer, e state.Entry) string {
+	switch {
+	case e.Blockers > 0:
+		return w.Red("●")
+	case e.Critical > 0:
+		return w.Yellow("●")
+	}
+	return w.Green("●")
+}
+
+// openDetail is the line under an open pull request: when it was reviewed,
+// what came out, and the comment that says it.
+func openDetail(w *ui.Writer, e state.Entry, now time.Time) string {
+	counts := fmt.Sprintf("%dB %dC %dS", e.Blockers, e.Critical, e.Suggestions)
+	if e.Blockers == 0 && e.Critical == 0 && e.Suggestions == 0 && e.Questions == 0 {
+		counts = "nothing found"
+	}
+	switch {
+	case e.Blockers > 0:
+		counts = w.Red(counts)
+	case e.Critical > 0:
+		counts = w.Yellow(counts)
+	default:
+		counts = w.Dim(counts)
+	}
+	text := w.Dim("reviewed "+historyWhen(now, e.Time())+" · ") + counts
+	if e.CommentURL != "" {
+		text += w.Dim("  ") + w.Link(w.Blue("comment ↗"), e.CommentURL)
+	}
+	return text
 }
 
 // sectionActive is everything in flight: reviews the agent started, reviews

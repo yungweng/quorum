@@ -224,6 +224,30 @@ shared dependency cache removed.
 - `HISTORY` is how many finished runs the dashboard lists. It counts runs, not
   pull requests, so four reviews of the same one take four lines.
 
+## The dashboard
+
+`status` draws it once, `watch` redraws it every three seconds. Three sections,
+in the order the questions get asked:
+
+- **OPEN** is what is waiting for a person: pull requests with a finished
+  review that are still open, newest first, at most ten of them, with what the
+  review found and a link to the comment. A pull request drops out when GitHub
+  reports it merged or closed, while it is being reviewed again, and two weeks
+  after its last review. The two weeks matter because the state file keeps two
+  hundred records and most of them describe pull requests that were merged long
+  ago; where GitHub has not been asked, age is the only thing the dashboard
+  knows.
+- **ACTIVE** is everything in flight, agent and terminal alike. Its count covers
+  agent slots only.
+- **HISTORY** is one line per finished run, described below.
+
+Whether a pull request has been merged or closed is the one thing on this
+screen that has to come from GitHub. `watch` asks in the background, once for
+every visible pull request at a time, and keeps the previous answer when the
+call fails. `status` asks once before it draws, with a single attempt and a
+five second deadline, and falls back to listing everything recent when there is
+no answer: this is the only network call either command makes.
+
 ## The history log
 
 `status` and `watch` list what has finished under HISTORY, read from
