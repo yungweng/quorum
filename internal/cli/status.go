@@ -348,6 +348,7 @@ func reviewedPRs(file state.File, runs []history.Run) []state.Entry {
 			reviewed: succeeded,
 			entry: state.Entry{Key: run.Key, Record: state.Record{
 				Title:       run.Title,
+				Author:      run.Author,
 				Status:      state.OK,
 				At:          run.EndedAt.Format(time.RFC3339),
 				CommentURL:  run.CommentURL,
@@ -509,6 +510,7 @@ func (a *app) sectionActive(
 			Key: run.Key(),
 			Record: state.Record{
 				Title:     run.Title,
+				Author:    run.Author,
 				StartedAt: run.StartedAt.Format(time.RFC3339),
 				RunDir:    run.RunDir,
 			},
@@ -524,7 +526,7 @@ func (a *app) sectionActive(
 			w.Printf("      %s\n", babysitTrack(w, p, now))
 			continue
 		}
-		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title}}
+		e := state.Entry{Key: p.Key(), Record: state.Record{Title: p.Title, Author: p.Author}}
 		a.prLine(w, w.Magenta("●"), e, ends[p.Key()])
 		w.Printf("      %s\n", babysitTrack(w, p, now))
 	}
@@ -718,13 +720,14 @@ func (a *app) sectionHistory(w *ui.Writer, fallback []state.Entry, runs []histor
 		if run.Number() > 0 {
 			keys = append(keys, run.Key)
 		}
-		w.Printf("  %s %s %s%s %s%s\n",
-			historyMark(w, run),
-			w.Dim(ui.Pad(historyWhen(now, run.EndedAt), 6)),
-			runLabel(w, run, ends[run.Key]),
-			runLabelPad(run),
-			historyDetail(w, run),
-			endSuffix(w, ends[run.Key]))
+		mark := historyMark(w, run)
+		when := w.Dim(ui.Pad(historyWhen(now, run.EndedAt), 6))
+		detail := historyDetail(w, run)
+		end := endSuffix(w, ends[run.Key])
+		prefix := "  " + mark + " " + when + " "
+		suffix := " " + detail + end
+		label := runIdentity(w, run, ends[run.Key], max(w.Cols()-ui.Cells(prefix)-ui.Cells(suffix), 1))
+		w.Printf("%s%s%s\n", prefix, label, suffix)
 	}
 	return keys
 }
@@ -754,9 +757,13 @@ func (a *app) historyFromState(w *ui.Writer, recent []state.Entry, limit int, en
 		default:
 			symbol, detail = w.Dim("–"), w.Dim("skipped: "+e.Reason)
 		}
-		w.Printf("  %s %s %s%s %s%s\n",
-			mark(w, symbol), w.Dim(ui.Pad(historyWhen(now, e.Time()), 6)),
-			prLabel(w, e, ends[e.Key]), labelPad(e), detail, endSuffix(w, ends[e.Key]))
+		outcome := mark(w, symbol)
+		when := w.Dim(ui.Pad(historyWhen(now, e.Time()), 6))
+		end := endSuffix(w, ends[e.Key])
+		prefix := "  " + outcome + " " + when + " "
+		suffix := " " + detail + end
+		label := prIdentity(w, e, ends[e.Key], max(w.Cols()-ui.Cells(prefix)-ui.Cells(suffix), 1))
+		w.Printf("%s%s%s\n", prefix, label, suffix)
 	}
 	return keys
 }
@@ -870,30 +877,21 @@ func (a *app) footer(w *ui.Writer) {
 	w.Printf("%s\n", w.Dim(ui.Truncate(strings.Join(parts, " · "), w.Cols())))
 }
 
-// runLabel renders the "insura #103" column for a logged run, linked to the
-// pull request and struck through once it has been merged.
-func runLabel(w *ui.Writer, run history.Run, end string) string {
-	label := runLabelText(run)
-	styled := w.Bold(label)
-	if end == gh.StateMerged {
-		styled = w.Strike(styled)
-	}
-	return w.Link(styled, run.URL())
-}
-
-func runLabelPad(run history.Run) string {
-	label := runLabelText(run)
-	if n := labelWidth - ui.Cells(label); n > 0 {
-		return strings.Repeat(" ", n)
-	}
-	return ""
-}
-
 func runLabelText(run history.Run) string {
 	if run.Branch != "" {
 		return fmt.Sprintf("%s %s", run.Name(), run.Branch)
 	}
 	return fmt.Sprintf("%s #%d", run.Name(), run.Number())
+}
+
+func runIdentity(w *ui.Writer, run history.Run, end string, room int) string {
+	if run.Number() > 0 {
+		e := state.Entry{Key: run.Key, Record: state.Record{Author: run.Author}}
+		return prIdentity(w, e, end, room)
+	}
+	column := min(max(labelWidth, ui.Cells(runLabelText(run))), room)
+	label := ui.Truncate(runLabelText(run), column)
+	return w.Link(w.Bold(label), run.URL()) + strings.Repeat(" ", max(column-ui.Cells(label), 0))
 }
 
 // findingsText is the one line summary of a finished review from the state
@@ -915,36 +913,32 @@ func findingsText(w *ui.Writer, e state.Entry) string {
 }
 
 // labelWidth keeps the repository and number column aligned across sections.
-const labelWidth = 26
+// authorLabelWidth makes room for the common " · @login" suffix without
+// shifting the title and result columns from one pull request to the next.
+const (
+	labelWidth       = 26
+	authorLabelWidth = 44
+)
 
 func labelOf(e state.Entry) string {
 	return fmt.Sprintf("%s #%d", e.Name(), e.Number())
 }
 
-// prLabel renders the "toaster-api #2017" column, linked to the pull
-// request and crossed out once that pull request has been merged: the work
-// landed, so the line is history rather than something to look at.
-func prLabel(w *ui.Writer, e state.Entry, end string) string {
-	return styledPRLabel(w, e, labelOf(e), end)
+func authorOf(author string) string {
+	if author == "" {
+		return ""
+	}
+	return " · @" + author
 }
 
+// styledPRLabel links the repository and number to the pull request and crosses
+// it out once the pull request has been merged.
 func styledPRLabel(w *ui.Writer, e state.Entry, label, end string) string {
 	styled := w.Bold(label)
 	if end == gh.StateMerged {
 		styled = w.Strike(styled)
 	}
 	return w.Link(styled, e.URL())
-}
-
-// labelPad is the spacing that keeps the column after the label aligned. It
-// stays outside prLabel so a strikethrough ends with the text instead of
-// trailing off across empty space, and because padding inside the styling
-// would be counted in escape bytes rather than in visible cells.
-func labelPad(e state.Entry) string {
-	if n := labelWidth - ui.Cells(labelOf(e)); n > 0 {
-		return strings.Repeat(" ", n)
-	}
-	return ""
 }
 
 func truncateLabel(e state.Entry, width int) string {
@@ -957,6 +951,32 @@ func truncateLabel(e state.Entry, width int) string {
 		return ui.Truncate(e.Name(), width-suffixWidth) + suffix
 	}
 	return ui.Truncate(label, width)
+}
+
+// prIdentity renders the linked repository and number followed by the author.
+// It gives the author the remaining space after preserving enough of the label
+// to recognise the PR number, then pads the pair as one column.
+func prIdentity(w *ui.Writer, e state.Entry, end string, room int) string {
+	room = max(room, 1)
+	plainAuthor := authorOf(e.Author)
+	preferred := labelWidth
+	if plainAuthor != "" {
+		preferred = authorLabelWidth
+	}
+	natural := ui.Cells(labelOf(e)) + ui.Cells(plainAuthor)
+	column := min(max(preferred, natural), room)
+
+	labelRoom := column
+	author := ""
+	if plainAuthor != "" {
+		minLabelRoom := min(ui.Cells(labelOf(e)), ui.Cells(fmt.Sprintf("… #%d", e.Number())))
+		authorRoom := max(column-minLabelRoom, 0)
+		author = ui.Truncate(plainAuthor, authorRoom)
+		labelRoom = max(column-ui.Cells(author), 1)
+	}
+	label := truncateLabel(e, labelRoom)
+	styled := styledPRLabel(w, e, label, end) + w.Dim(author)
+	return styled + strings.Repeat(" ", max(column-ui.Cells(label)-ui.Cells(author), 0))
 }
 
 // endWord names how a pull request ended, in plain text.
@@ -994,22 +1014,26 @@ func (a *app) prLine(w *ui.Writer, mark string, e state.Entry, end string) {
 	if e.Title == "" {
 		// Records written before titles were stored have nothing to show, and
 		// padding to an empty column just leaves trailing whitespace.
-		label := truncateLabel(e, max(w.Cols()-4-endWidth, 1))
-		w.Printf("  %s %s%s\n", mark, styledPRLabel(w, e, label, end), endSuffix(w, end))
+		identity := strings.TrimRight(prIdentity(w, e, end, max(w.Cols()-4-endWidth, 1)), " ")
+		w.Printf("  %s %s%s\n", mark, identity, endSuffix(w, end))
 		return
 	}
 	available := max(w.Cols()-6-endWidth, 1)
-	labelRoom := max(labelWidth, ui.Cells(labelOf(e)))
-	titleRoom := available - labelRoom
-	if titleRoom < 12 {
-		labelRoom = max(available-12, 1)
-		titleRoom = max(available-labelRoom, 0)
+	identityWidth := ui.Cells(labelOf(e)) + ui.Cells(authorOf(e.Author))
+	if e.Author == "" {
+		identityWidth = max(labelWidth, identityWidth)
+	} else {
+		identityWidth = max(authorLabelWidth, identityWidth)
 	}
-	label := truncateLabel(e, labelRoom)
-	w.Printf("  %s %s%s  %s%s\n",
+	titleRoom := available - identityWidth
+	if titleRoom < 12 {
+		identityWidth = max(available-12, 1)
+		titleRoom = max(available-identityWidth, 0)
+	}
+	identity := prIdentity(w, e, end, identityWidth)
+	w.Printf("  %s %s  %s%s\n",
 		mark,
-		styledPRLabel(w, e, label, end),
-		strings.Repeat(" ", max(labelRoom-ui.Cells(label), 0)),
+		identity,
 		ui.Truncate(e.Title, titleRoom),
 		endSuffix(w, end))
 }

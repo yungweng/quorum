@@ -32,7 +32,7 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 
 	started := time.Now().Add(-30 * time.Minute).Round(time.Second)
 	r := &run{root: root, prog: Progress{
-		PID: os.Getpid(), Repo: "acme/api", Number: 7, Title: "a fix",
+		PID: os.Getpid(), Repo: "acme/api", Number: 7, Title: "a fix", Author: "example-user",
 		Branch: "feature", StartedAt: started, MaxIter: 12, MaxCIFixes: 3,
 		Round: 2, CI: CIGreen, Reviewed: true, Blockers: 1, Critical: 2, Commits: 4,
 	}}
@@ -44,6 +44,9 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 	}
 	if got.Repo != "acme/api" || got.Number != 7 || got.Key() != "acme/api#7" {
 		t.Errorf("pull request identity was lost: %+v", got)
+	}
+	if got.Author != "example-user" {
+		t.Errorf("author = %q, want example-user", got.Author)
 	}
 	if got.PID != os.Getpid() {
 		t.Errorf("pid = %d, want %d; without it a run the agent started cannot be matched to its record", got.PID, os.Getpid())

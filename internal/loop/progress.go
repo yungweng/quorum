@@ -54,6 +54,7 @@ type Progress struct {
 	Repo   string `json:"repo"`
 	Number int    `json:"number"`
 	Title  string `json:"title,omitempty"`
+	Author string `json:"author,omitempty"`
 	Branch string `json:"branch,omitempty"`
 
 	StartedAt time.Time `json:"started_at"`

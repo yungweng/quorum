@@ -313,6 +313,7 @@ func (r *run) prepare() error {
 		Repo:       r.o.Repo,
 		Number:     pr.Number,
 		Title:      pr.Title,
+		Author:     pr.Author.Login,
 		Branch:     r.branch,
 		StartedAt:  time.Now(),
 		MaxIter:    r.o.MaxIter,

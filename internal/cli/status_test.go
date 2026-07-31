@@ -252,6 +252,37 @@ func TestOpenSectionListsReviewedPullRequestsThatAreStillOpen(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsPRAuthorInEverySection(t *testing.T) {
+	a := testApp(t)
+	record(t, a, "acme/open#42", func(r *state.Record) {
+		r.Title = "open review"
+		r.Author = "open-author"
+		r.Mark(state.OK, "")
+	})
+	manualReview(t, a, review.LiveRun{
+		PID: os.Getpid(), Repo: "acme/active", Number: 43, Title: "active review",
+		Author: "active-author", StartedAt: time.Now(), Reviewers: 2,
+	}, "start\n")
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/history#44", Title: "finished review", Author: "history-author",
+		Kind: history.KindReview, Source: history.SourceManual, Outcome: history.OK,
+		Reviewed: true, EndedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	screen, _ := render(t, a, nil)
+	for _, want := range []string{
+		"open #42 · @open-author",
+		"active #43 · @active-author",
+		"history #44 · @history-author",
+	} {
+		if !strings.Contains(ui.StripANSI(screen), want) {
+			t.Errorf("dashboard is missing %q:\n%s", want, screen)
+		}
+	}
+}
+
 // Once it is merged or closed there is nothing left to do about it, and the
 // history section already records that it happened.
 func TestOpenSectionDropsMergedAndClosedPullRequests(t *testing.T) {
@@ -756,6 +787,7 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	longKey := "acme/" + strings.Repeat("r", 100) + "#1"
 	record(t, a, longKey, func(r *state.Record) {
 		r.Title = strings.Repeat("a very long german pull request title ", 6)
+		r.Author = strings.Repeat("a", 39)
 		r.Mark(state.Running, "")
 	})
 	record(t, a, "acme/api#2", func(r *state.Record) {
@@ -767,7 +799,7 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	now := time.Now()
 	babysit(t, a, loop.Progress{
 		PID: 999999, Repo: "acme/api", Number: 3,
-		Title:     strings.Repeat("ein sehr langer deutscher Titel ", 6),
+		Title: strings.Repeat("ein sehr langer deutscher Titel ", 6), Author: strings.Repeat("b", 39),
 		StartedAt: now.Add(-25 * time.Hour), MaxIter: 12, MaxCIFixes: 3,
 		Round: 12, Phase: loop.PhaseCIFix, Since: now.Add(-25 * time.Hour),
 		CI: loop.CIRed, CIFix: 3, Reviewed: true, Blockers: 12, Critical: 12,
@@ -778,8 +810,15 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	// every column to its right out past the edge of the screen.
 	record(t, a, "acme/web#4", func(r *state.Record) {
 		r.Title = "✨ " + strings.Repeat("日本語のタイトル ", 8)
+		r.Author = "example-user"
 		r.Mark(state.Pending, "waiting")
 	})
+	if err := history.Append(a.p.HistoryFile, history.Run{
+		Key: "acme/history#5", Author: strings.Repeat("h", 39), Kind: history.KindReview,
+		Outcome: history.Failed, Reason: strings.Repeat("failure detail ", 8), EndedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Both sides of the two column threshold, and a terminal wider than the
 	// layout cap, where lines must stop at the cap rather than at the edge.

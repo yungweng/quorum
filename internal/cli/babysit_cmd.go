@@ -169,6 +169,7 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 	if res != nil {
 		number = res.PR.Number
 		run.Title = res.PR.Title
+		run.Author = res.PR.Author.Login
 		if res.BranchOnly {
 			run.Branch = res.PR.HeadRefName
 		}

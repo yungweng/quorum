@@ -18,6 +18,7 @@ type LiveRun struct {
 	Number    int       `json:"number"`
 	Branch    string    `json:"branch,omitempty"`
 	Title     string    `json:"title,omitempty"`
+	Author    string    `json:"author,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	Reviewers int       `json:"reviewers"`
 
@@ -54,6 +55,7 @@ func (r *LiveTracker) Header(h RunHeader) {
 		Number:    h.Number,
 		Branch:    h.Branch,
 		Title:     h.Title,
+		Author:    h.Author,
 		StartedAt: r.started,
 		Reviewers: h.Runs,
 		RunDir:    h.RunDir,

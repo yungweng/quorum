@@ -53,6 +53,7 @@ type Run struct {
 	Key       string    `json:"key"` // "owner/repo#42" or "owner/repo#branch:name"
 	Branch    string    `json:"branch,omitempty"`
 	Title     string    `json:"title,omitempty"`
+	Author    string    `json:"author,omitempty"`
 	Kind      string    `json:"kind"`
 	Source    string    `json:"source"`
 	Outcome   string    `json:"outcome"`

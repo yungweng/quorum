@@ -162,7 +162,7 @@ func (a *app) cmdReview(argv []string) int {
 // with an empty key and logRun drops it.
 func (t *termReporter) historyRun(repo string, started time.Time, outcome, reason string, res *review.Result) history.Run {
 	t.mu.Lock()
-	number, title, branch := t.number, t.title, t.branch
+	number, title, author, branch := t.number, t.title, t.author, t.branch
 	if t.repo != "" {
 		repo = t.repo
 	}
@@ -180,6 +180,7 @@ func (t *termReporter) historyRun(repo string, started time.Time, outcome, reaso
 		Key:       key,
 		Branch:    historyBranch,
 		Title:     title,
+		Author:    author,
 		Kind:      history.KindReview,
 		Source:    history.SourceManual,
 		Outcome:   outcome,
@@ -273,6 +274,7 @@ type termReporter struct {
 	number int
 	runs   int
 	title  string
+	author string
 	repo   string
 	branch string
 
@@ -286,6 +288,7 @@ func (t *termReporter) Header(h review.RunHeader) {
 	t.number = h.Number
 	t.runs = h.Runs
 	t.title = h.Title
+	t.author = h.Author
 	t.repo = h.Repo
 	t.branch = h.Branch
 	t.reviewer = map[int]*reviewerState{}

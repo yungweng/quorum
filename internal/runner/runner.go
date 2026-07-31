@@ -45,7 +45,7 @@ type Runner struct {
 // Review clones or refreshes the repository, reviews the pull request and
 // records the outcome. It runs in the detached child process that owns the
 // marker.
-func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, reqAt string) error {
+func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, author, reqAt string) error {
 	r.applyPriority()
 
 	clone, err := r.ensureClone(ctx, repo)
@@ -65,6 +65,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	r.Log.Printf("%s: reviewing %s (%s)", key, short(sha), title)
 	r.mutate(key, func(rec *state.Record) {
 		rec.Title = title
+		rec.Author = author
 		rec.Mark(state.Running, "")
 		rec.SHA = sha
 		rec.RunLog = runLog

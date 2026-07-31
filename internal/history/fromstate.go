@@ -45,6 +45,7 @@ func FromState(key string, before, after state.Record, source string) (Run, bool
 	run := Run{
 		Key:        key,
 		Title:      after.Title,
+		Author:     after.Author,
 		Kind:       KindReview,
 		Source:     source,
 		Outcome:    outcome(after.Status),

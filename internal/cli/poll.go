@@ -202,6 +202,14 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 	repo := pr.Repository.NameWithOwner
 	file, _ := state.Read(a.p.StateFile)
 	c := candidate{pr: pr, key: key, rec: file.PRs[key]}
+	if c.rec.Title != pr.Title || c.rec.Author != pr.Author.Login {
+		a.record(key, func(rec *state.Record) {
+			rec.Title = pr.Title
+			rec.Author = pr.Author.Login
+		})
+		c.rec.Title = pr.Title
+		c.rec.Author = pr.Author.Login
+	}
 
 	skip := func(reason string) (candidate, bool) {
 		if c.rec.Status != state.Skipped || c.rec.Reason != reason {
@@ -307,7 +315,7 @@ func (a *app) start(t tools, c candidate) bool {
 		return false
 	}
 	cmd := exec.Command(self, "_review", c.key, repo, itoa(c.pr.Number),
-		details.HeadRefOid, c.pr.Title, c.reqAt, marker.Path)
+		details.HeadRefOid, c.pr.Title, c.pr.Author.Login, c.reqAt, marker.Path)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	devnull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if devnull != nil {
@@ -330,6 +338,7 @@ func (a *app) start(t tools, c candidate) bool {
 	a.log.Printf("%s: review started (pid %d, %d reviewers)", c.key, cmd.Process.Pid, a.cfg.Reviewers)
 	a.record(c.key, func(rec *state.Record) {
 		rec.Title = c.pr.Title
+		rec.Author = c.pr.Author.Login
 		rec.Mark(state.Running, "")
 		rec.SHA = details.HeadRefOid
 		rec.StartedAt = state.Now()
@@ -340,10 +349,11 @@ func (a *app) start(t tools, c candidate) bool {
 // cmdReviewOne is the detached child that performs one review. It owns the
 // marker for as long as it runs.
 func (a *app) cmdReviewOne(args []string) int {
-	if len(args) < 7 {
-		return a.die("_review is internal and takes key repo number sha title reqAt marker")
+	if len(args) < 8 {
+		return a.die("_review is internal and takes key repo number sha title author reqAt marker")
 	}
-	key, repo, number, sha, title, reqAt, markerPath := args[0], args[1], args[2], args[3], args[4], args[5], args[6]
+	key, repo, number, sha, title, author, reqAt, markerPath :=
+		args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]
 
 	marker := &runner.Marker{Key: key, Path: markerPath, PID: os.Getpid()}
 	defer marker.Release()
@@ -363,7 +373,7 @@ func (a *app) cmdReviewOne(args []string) int {
 		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, DirenvBin: t.Direnv,
 		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
 	}
-	if err := r.Review(ctx, key, repo, atoi(number), sha, title, reqAt); err != nil {
+	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt); err != nil {
 		return 1
 	}
 	return 0
@@ -375,6 +385,7 @@ func (a *app) markQueued(cs []candidate, status, reason string) {
 	for _, c := range cs {
 		a.record(c.key, func(rec *state.Record) {
 			rec.Title = c.pr.Title
+			rec.Author = c.pr.Author.Login
 			rec.Mark(status, reason)
 		})
 	}
