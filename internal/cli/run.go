@@ -54,7 +54,7 @@ func (a *app) cmdRun(args []string) int {
 	a.log.Echo = func(s string) { fmt.Println(s) }
 	r := &runner.Runner{Cfg: a.cfg, P: a.p, Log: a.log, GitBin: t.Git, GHBin: t.GH,
 		CodexBin: t.Codex, DirenvBin: t.Direnv, GH: client, Git: a.newGit(t.Git)}
-	if err := r.Review(ctx, key, repo, number, details.HeadRefOid, details.Title, details.Author.Login, ""); err != nil {
+	if err := r.Review(ctx, key, repo, number, details.HeadRefOid, details.Title, details.Author.Login, "", runner.InvocationManual); err != nil {
 		return 1
 	}
 	return 0

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/paths"
@@ -138,6 +139,28 @@ func TestSummaryLine(t *testing.T) {
 	// A run that only raised questions still has something to report.
 	if got := summaryLine(review.Findings{Questions: 2}); got == "nothing found" {
 		t.Error("questions were reported as nothing found")
+	}
+}
+
+func TestAutoMergeSettingFollowsInvocationSource(t *testing.T) {
+	r := &Runner{Cfg: config.Config{AutoMergeAgent: true}}
+	if !r.autoMergeEnabled(InvocationAgent) {
+		t.Fatal("agent invocation ignored AUTO_MERGE_AGENT")
+	}
+	if r.autoMergeEnabled(InvocationManual) {
+		t.Fatal("manual invocation used AUTO_MERGE_AGENT")
+	}
+
+	r.Cfg.AutoMergeAgent = false
+	r.Cfg.AutoMergeReview = true
+	if r.autoMergeEnabled(InvocationAgent) {
+		t.Fatal("agent invocation used AUTO_MERGE_REVIEW")
+	}
+	if !r.autoMergeEnabled(InvocationManual) {
+		t.Fatal("manual invocation ignored AUTO_MERGE_REVIEW")
+	}
+	if r.autoMergeEnabled(InvocationSource(99)) {
+		t.Fatal("unknown invocation source enabled auto-merge")
 	}
 }
 

@@ -214,8 +214,9 @@ Zero disables the timeout it belongs to.
 ### Auto-merge
 
 The three `AUTO_MERGE_*` settings are independent and default to `0`. The agent
-uses only `AUTO_MERGE_AGENT`, even when `AGENT_ACTION="babysit"`; terminal
-commands use the setting named after their command.
+uses only `AUTO_MERGE_AGENT`, even when `AGENT_ACTION="babysit"`; `quorum
+review` and `quorum run` use `AUTO_MERGE_REVIEW`, and `quorum babysit` uses
+`AUTO_MERGE_BABYSIT`.
 
 After a posted review with zero Blockers and zero Critical findings, quorum:
 
