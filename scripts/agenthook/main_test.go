@@ -202,6 +202,7 @@ func newGitRepository(t *testing.T) string {
 	git(t, repo, "init", "-q")
 	git(t, repo, "config", "user.name", "Example User")
 	git(t, repo, "config", "user.email", "example@example.com")
+	git(t, repo, "config", "commit.gpgSign", "false")
 	return repo
 }
 
