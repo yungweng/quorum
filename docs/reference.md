@@ -59,6 +59,7 @@ PR CI and PR comments.
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
 | `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
+| `--divergence-scan` | Analyze all rounds after the limit, write a report, then stop | off |
 | `--sandboxed` | Use your codex sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
@@ -151,6 +152,7 @@ from the tools they replace.
 3  CI still red after --max-ci-fixes attempts
 4  not converged after --max-iter rounds
 5  a fix round produced no changes although findings remain
+6  the review/fix history contains incompatible decisions
 ```
 
 ## Configuration
@@ -196,6 +198,8 @@ FIX_EFFORT=""
 MAX_ITER=12
 MAX_CI_FIXES=3
 FIX_TIMEOUT="2h"         # per fix step; keep it above your CI runtime
+DIVERGENCE_SCAN=0        # analyze the current run after MAX_ITER, then stop
+DIVERGENCE_ESCALATE_TO="" # users or org/team slugs to mention, without @
 SANDBOXED=0
 
 AGENT_ACTION="review"    # or "babysit"

@@ -160,6 +160,8 @@ func TestRoundTrip(t *testing.T) {
 	want.FixEffort = "high"
 	want.MaxIter = 4
 	want.FixTimeout = 90 * time.Minute
+	want.DivergenceScan = true
+	want.DivergenceEscalateTo = []string{"example-user", "acme/platform"}
 	want.Sandboxed = true
 	want.AgentAction = ActionBabysit
 	want.AutoMergeAgent = true

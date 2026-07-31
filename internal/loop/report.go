@@ -9,22 +9,23 @@ import (
 
 // Header is what a pipeline run announces about itself before it starts.
 type Header struct {
-	Repo        string
-	Number      int
-	Title       string
-	Branch      string
-	Base        string
-	BranchOnly  bool
-	Model       string
-	Effort      string
-	Bypass      bool
-	Interactive bool
-	MaxIter     int
-	MaxCIFixes  int
-	FixTimeout  time.Duration
-	RunDir      string
-	Worktree    string
-	HeadSHA     string
+	Repo           string
+	Number         int
+	Title          string
+	Branch         string
+	Base           string
+	BranchOnly     bool
+	Model          string
+	Effort         string
+	Bypass         bool
+	Interactive    bool
+	MaxIter        int
+	MaxCIFixes     int
+	DivergenceScan bool
+	FixTimeout     time.Duration
+	RunDir         string
+	Worktree       string
+	HeadSHA        string
 }
 
 // Reporter receives everything a pipeline run wants to say.

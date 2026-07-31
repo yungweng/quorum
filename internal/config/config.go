@@ -58,6 +58,10 @@ type Config struct {
 	MaxIter    int
 	MaxCIFixes int
 	FixTimeout time.Duration
+	// DivergenceScan runs one read-only analysis after MaxIter is exhausted.
+	// Escalation targets are GitHub users or org/team slugs without a leading @.
+	DivergenceScan       bool
+	DivergenceEscalateTo []string
 	// Sandboxed opts the fix sessions out of
 	// --dangerously-bypass-approvals-and-sandbox. They then run under the
 	// user's own codex config, which must allow commands, network and push or
@@ -313,6 +317,10 @@ func (c *Config) set(key, value string) {
 		c.MaxCIFixes = intOr(value, c.MaxCIFixes)
 	case "FIX_TIMEOUT":
 		c.FixTimeout = durationOr(value, c.FixTimeout)
+	case "DIVERGENCE_SCAN":
+		c.DivergenceScan = truthy(value)
+	case "DIVERGENCE_ESCALATE_TO":
+		c.DivergenceEscalateTo = fields(value)
 	case "SANDBOXED":
 		c.Sandboxed = truthy(value)
 	case "AGENT_ACTION":
@@ -452,6 +460,9 @@ func (c Config) Render() string {
 	w("MAX_ITER=%d\t\t# review -> fix rounds before giving up\n", c.MaxIter)
 	w("MAX_CI_FIXES=%d\t\t# CI fix attempts per green-CI phase\n", c.MaxCIFixes)
 	w("FIX_TIMEOUT=%q\t\t# per codex fix step; keep above your CI runtime\n", FormatDuration(c.FixTimeout))
+	w("DIVERGENCE_SCAN=%s\t# analyze the round history after MAX_ITER\n", bit(c.DivergenceScan))
+	w("DIVERGENCE_ESCALATE_TO=%q\t# users or org/team slugs, without @\n",
+		strings.Join(c.DivergenceEscalateTo, " "))
 	w("SANDBOXED=%s\t\t# 1 uses your codex sandbox defaults instead of bypassing them\n\n", bit(c.Sandboxed))
 
 	w("# What the agent does with a pull request that asks for your review:\n")

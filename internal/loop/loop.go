@@ -42,6 +42,9 @@ var (
 	// ErrNoProgress is exit 5: a fix round changed nothing while findings
 	// remain, and did not dispute them either.
 	ErrNoProgress = errors.New("fix round produced no changes although findings remain")
+	// ErrDiverged is exit 6: the bounded analysis found incompatible review/fix
+	// decisions and produced a report for manual resolution.
+	ErrDiverged = errors.New("review loop diverged")
 )
 
 // Defaults for a run.
@@ -78,6 +81,13 @@ type Options struct {
 	MaxIter    int
 	MaxCIFixes int
 	FixTimeout time.Duration
+
+	DivergenceScan       bool
+	DivergenceEscalateTo []string
+	DivergenceTimeout    time.Duration
+	// Post controls the divergence report only. Existing review and fix
+	// comments retain their own posting policy.
+	Post bool
 
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
 	// sandbox. They must run tests, use gh and push, unattended, and a
@@ -125,6 +135,9 @@ type Result struct {
 	RunDir               string
 	Duration             time.Duration
 	LastFindings         review.Findings
+	Divergence           *DivergenceReport
+	DivergenceReportPath string
+	DivergenceCommentURL string
 }
 
 // Pipeline runs the review-fix cycle.
@@ -203,6 +216,7 @@ type run struct {
 	ciFixTotal      int
 	disputeAccepted bool
 	disputeText     string
+	divergenceTrace DivergenceTrace
 
 	// prog is what this run publishes about itself for a watcher to read. It
 	// is the run's own copy; publish writes it out.
@@ -348,7 +362,8 @@ func (r *run) prepare() error {
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
-		FixTimeout: r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
+		DivergenceScan: r.o.DivergenceScan,
+		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
 	})
 	if tgt.BranchOnly {
 		r.rep.Warn("no open PR: GitHub PR checks and PR comments are skipped; fix steps still run repository tests")
@@ -359,6 +374,9 @@ func (r *run) prepare() error {
 // execute is the main loop.
 func (r *run) execute() (*Result, error) {
 	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, RunDir: r.root}
+	if r.o.DivergenceScan {
+		r.startDivergenceTrace()
+	}
 
 	r.startReview(1)
 	if !r.target.BranchOnly {
@@ -392,6 +410,9 @@ func (r *run) execute() (*Result, error) {
 		// acting on them would fix the wrong code.
 		if findings.HeadSHA != currentSHA {
 			return res, fmt.Errorf("the review is for %s but the branch is at %s", findings.HeadSHA, currentSHA)
+		}
+		if r.o.DivergenceScan {
+			r.traceReview(iteration, findings, comment)
 		}
 
 		r.rep.RoundResult(iteration, findings, findings.Blocking() == 0)
@@ -433,6 +454,9 @@ func (r *run) execute() (*Result, error) {
 				return res, err
 			}
 			if r.disputeAccepted {
+				if r.o.DivergenceScan {
+					r.traceFix(iteration, preFixSHA, afterSHA, tag)
+				}
 				res.Converged = true
 				res.DisputeAccepted = true
 				res.DisputeText = r.disputeText
@@ -441,6 +465,13 @@ func (r *run) execute() (*Result, error) {
 				break
 			}
 			// The dispute gate only returns unaccepted once new commits exist.
+			afterSHA, err = r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+			if err != nil {
+				return res, err
+			}
+		}
+		if r.o.DivergenceScan {
+			r.traceFix(iteration, preFixSHA, afterSHA, tag)
 		}
 
 		r.recordRound(fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
@@ -464,6 +495,15 @@ func (r *run) execute() (*Result, error) {
 
 	res.RoundLog = r.roundLog
 	if !res.Converged {
+		if r.o.DivergenceScan {
+			if err := r.runDivergenceScan(res); err != nil {
+				return res, fmt.Errorf("%w after %d review rounds; divergence scan failed: %v",
+					ErrNotConverged, r.o.MaxIter, err)
+			}
+			if res.Divergence != nil && res.Divergence.Verdict == DivergenceDiverged {
+				return res, fmt.Errorf("%w after %d review rounds", ErrDiverged, r.o.MaxIter)
+			}
+		}
 		r.rep.Notify("Nicht konvergiert", fmt.Sprintf("%s hat nach %d Runden weiter Findings", r.targetLabel(), r.o.MaxIter))
 		return res, fmt.Errorf("%w after %d review rounds", ErrNotConverged, r.o.MaxIter)
 	}
@@ -816,6 +856,9 @@ func (o Options) withDefaults() Options {
 	if o.FixTimeout == 0 {
 		o.FixTimeout = DefaultFixTimeout
 	}
+	if o.DivergenceTimeout == 0 {
+		o.DivergenceTimeout = review.DefaultReviewTimeout
+	}
 	return o
 }
 
@@ -823,11 +866,21 @@ func (o Options) validate() error {
 	if o.MaxIter < 1 {
 		return fmt.Errorf("max-iter must be >= 1")
 	}
+	if o.DivergenceScan {
+		for _, target := range o.DivergenceEscalateTo {
+			if !validDivergenceTarget(target) {
+				return fmt.Errorf("invalid divergence escalation target %q; expected user or org/team without @", target)
+			}
+		}
+	}
 	if !codex.ValidEffort(o.Effort) {
 		return fmt.Errorf("effort must be one of: %s", strings.Join(codex.Efforts, ", "))
 	}
 	if !codex.ValidEffort(o.ReviewEffort) {
 		return fmt.Errorf("review-effort must be one of: %s", strings.Join(codex.Efforts, ", "))
+	}
+	if o.DivergenceTimeout < 0 {
+		return fmt.Errorf("divergence timeout must not be negative")
 	}
 	if o.Repo == "" || o.RepoRoot == "" {
 		return fmt.Errorf("repo and repo root are required")

@@ -303,6 +303,34 @@ func (a *app) settings() []setting {
 			}
 			return nil
 		}},
+
+		{"divergence scan", func(c config.Config) string {
+			if c.DivergenceScan {
+				return "analyze the review/fix history after the round limit"
+			}
+			return "off"
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			return a.pick(in, "Analyze the review/fix history after the round limit?", c, []option{
+				{"off", "stop with the existing not-converged result",
+					func(c *config.Config) { c.DivergenceScan = false },
+					func(c config.Config) bool { return !c.DivergenceScan }},
+				{"on", "write and post a report, then stop",
+					func(c *config.Config) { c.DivergenceScan = true },
+					func(c config.Config) bool { return c.DivergenceScan }},
+			}, nil)
+		}},
+
+		{"divergence escalation", func(c config.Config) string {
+			return orNone(strings.Join(c.DivergenceEscalateTo, " "))
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, "users or org/team slugs to mention on divergence, without @",
+				strings.Join(c.DivergenceEscalateTo, " "))
+			if err != nil {
+				return err
+			}
+			c.DivergenceEscalateTo = fieldsOrNil(v)
+			return nil
+		}},
 	}
 }
 

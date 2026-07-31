@@ -198,6 +198,39 @@ func TestAutoMergeFailurePreservesSuccessfulReview(t *testing.T) {
 	}
 }
 
+func TestDivergenceResultStopsAgentRetries(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{P: paths.P{
+		StateFile:   filepath.Join(dir, "state.json"),
+		HistoryFile: filepath.Join(dir, "history.jsonl"),
+	}}
+	if err := state.Mutate(r.P.StateFile, "acme/api#42", func(rec *state.Record) {
+		rec.Fails = 2
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reviewURL := "https://example.invalid/review"
+	r.recordDivergenceResult(
+		"acme/api#42", "abc123", "2026-07-31T09:00:00Z", "/run/42", "/log/42",
+		"https://example.invalid/divergence",
+		review.Findings{Critical: 1, CommentURL: &reviewURL},
+		"review loop diverged after 12 review rounds",
+	)
+
+	file, err := state.Read(r.P.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := file.PRs["acme/api#42"]
+	if rec.Status != state.Failed || rec.ReqAt != "2026-07-31T09:00:00Z" || rec.Fails != 0 {
+		t.Fatalf("divergence did not stop retries: %+v", rec)
+	}
+	if rec.CommentURL != "https://example.invalid/divergence" || rec.Critical != 1 ||
+		rec.RunDir != "/run/42" || rec.RunLog != "/log/42" {
+		t.Fatalf("divergence result was not preserved: %+v", rec)
+	}
+}
+
 func TestAutoMergePendingPreservesReviewWithoutHandlingRequest(t *testing.T) {
 	dir := t.TempDir()
 	r := &Runner{P: paths.P{

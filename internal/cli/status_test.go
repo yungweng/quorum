@@ -532,6 +532,22 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsDivergenceAnalysisPhase(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	babysit(t, a, loop.Progress{
+		PID: 999999, Repo: "acme/api", Number: 42, Title: "tenant scoping",
+		StartedAt: now.Add(-90 * time.Minute), MaxIter: 12, MaxCIFixes: 3,
+		Round: 12, Phase: loop.PhaseDivergence, Since: now.Add(-2 * time.Minute),
+		CI: loop.CIGreen, Reviewed: true, Blockers: 1, Critical: 0, Commits: 5,
+	})
+
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(screen, "analyzing divergence") {
+		t.Fatalf("divergence phase is missing from dashboard:\n%s", screen)
+	}
+}
+
 // A fix loop the agent started has a state record too. Drawing both is the same
 // pull request twice, and the review line is the less informative of the two.
 func TestDashboardDoesNotShowAnAgentBabysitTwice(t *testing.T) {

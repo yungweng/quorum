@@ -117,3 +117,41 @@ func TestConvergedBabysitMergeFailureKeepsConvergedHistory(t *testing.T) {
 		t.Fatalf("fix-loop result was not preserved: %+v", run)
 	}
 }
+
+func TestBabysitDivergenceFlagIsBoolean(t *testing.T) {
+	args, err := parseArgs([]string{"42", "--divergence-scan", "focus on retries"}, babysitBoolFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !args.boolean("divergence-scan") {
+		t.Fatal("--divergence-scan was not parsed as a boolean")
+	}
+	if !reflect.DeepEqual(args.pos, []string{"42", "focus on retries"}) {
+		t.Fatalf("positionals = %q", args.pos)
+	}
+}
+
+func TestDivergenceReportReplacesReviewLinkInHistory(t *testing.T) {
+	reviewURL := "https://example.invalid/review"
+	reportURL := "https://example.invalid/divergence"
+	result := &loop.Result{
+		PR: gh.FullPR{Number: 42, Title: "retry policy"}, Rounds: 12,
+		LastFindings:         review.Findings{PR: 42, Critical: 1, CommentURL: &reviewURL},
+		Divergence:           &loop.DivergenceReport{Verdict: loop.DivergenceDiverged},
+		DivergenceCommentURL: reportURL,
+	}
+	run := babysitHistory("acme/api", 42, time.Now(), result, loop.ErrDiverged)
+	if run.CommentURL != reportURL || run.Outcome != history.Failed {
+		t.Fatalf("history run = %+v", run)
+	}
+}
+
+func TestDivergenceHasDistinctExitCode(t *testing.T) {
+	a := testApp(t)
+	if got := a.babysitExit(loop.ErrDiverged); got != exitDiverged {
+		t.Fatalf("babysitExit(ErrDiverged) = %d, want %d", got, exitDiverged)
+	}
+	if exitDiverged == exitNotConverged {
+		t.Fatal("diverged and not-converged share an exit code")
+	}
+}

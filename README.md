@@ -120,6 +120,23 @@ Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.
 All fix rounds share one Codex session, so context carries across rounds.
 
+An opt-in divergence scan can explain why a run still has findings at its round
+limit:
+
+```text
+DIVERGENCE_SCAN=1
+DIVERGENCE_ESCALATE_TO="example-user acme/platform"
+```
+
+The normal rounds do not change. After the final fix and CI wait, one read-only
+analysis compares the current run's review comments, fix responses, disputes
+and commits using the configured review model, effort and timeout. It reports
+whether the history contains incompatible decisions, only cumulative findings,
+or too little evidence to decide, then always stops.
+For a one-off run, use `quorum babysit --divergence-scan`. Reports are kept in
+the run directory; PR reports mention the author and configured escalation
+targets only when a manual decision may be needed.
+
 ## Auto-merge
 
 Auto-merge is off by default and enabled separately for each source:

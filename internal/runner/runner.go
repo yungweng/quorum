@@ -102,13 +102,16 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	}
 
 	var (
-		findings review.Findings
-		runDir   string
-		runErr   error
+		findings          review.Findings
+		runDir            string
+		divergenceVerdict string
+		divergenceURL     string
+		runErr            error
 	)
 	switch action {
 	case config.ActionBabysit:
-		findings, runDir, runErr = r.babysit(ctx, key, clone, repo, number, runLog)
+		findings, runDir, divergenceVerdict, divergenceURL, runErr =
+			r.babysit(ctx, key, clone, repo, number, runLog)
 	default:
 		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, runLog)
 	}
@@ -161,12 +164,46 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	}
 
 	reason := runErr.Error()
+	if divergenceVerdict != "" {
+		r.Log.Printf("%s: STOPPED, divergence analysis = %s (log: %s)", key, divergenceVerdict, runLog)
+		recordedSHA := findings.HeadSHA
+		if recordedSHA == "" {
+			recordedSHA = sha
+		}
+		r.recordDivergenceResult(key, recordedSHA, reqAt, runDir, runLog, divergenceURL, findings, reason)
+		r.notify(fmt.Sprintf("Review loop stopped: %s#%d", nameOf(repo), number),
+			"divergence analysis: "+divergenceVerdict, divergenceURL)
+		return fmt.Errorf("%s: %s", key, reason)
+	}
 	r.Log.Printf("%s: FAILED, %s (log: %s)", key, reason, runLog)
 	// The request timestamp stays unrecorded on purpose, so the next poll
 	// retries until MaxRetries is reached.
 	r.recordFailureWith(key, sha, runDir, reason, runLog)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
+}
+
+func (r *Runner) recordDivergenceResult(key, sha, reqAt, runDir, runLog, reportURL string,
+	findings review.Findings, reason string,
+) {
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.Failed, reason)
+		rec.SHA = sha
+		rec.RunDir = runDir
+		rec.RunLog = runLog
+		rec.CommentURL = reportURL
+		if rec.CommentURL == "" {
+			rec.CommentURL = urlOf(findings)
+		}
+		rec.Blockers = state.Num(findings.Blockers)
+		rec.Critical = state.Num(findings.Critical)
+		rec.Suggestions = state.Num(findings.Suggestions)
+		rec.Questions = state.Num(findings.Questions)
+		rec.Fails = 0
+		// Phase 1 is report-only. Mark this request handled so the agent
+		// cannot turn it into an unbounded sequence of fresh runs.
+		rec.ReqAt = reqAt
+	})
 }
 
 // recordAutoMergePending preserves the completed review while the same
@@ -240,10 +277,10 @@ func (r *Runner) reviewOnce(ctx context.Context, key, clone, repo string, number
 // This is what the three separate tools could not do: the daemon knew how to
 // start a review but had no way to reach the fix pipeline, because that was a
 // different binary with its own idea of where things live.
-func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, error) {
+func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, string, string, error) {
 	logFile, err := os.Create(runLog)
 	if err != nil {
-		return review.Findings{}, "", err
+		return review.Findings{}, "", "", "", err
 	}
 	defer logFile.Close()
 
@@ -258,30 +295,38 @@ func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number in
 		In: nil,
 	}
 	res, err := pipe.Run(ctx, loop.Options{
-		Repo:          repo,
-		RepoRoot:      clone,
-		Number:        number,
-		Model:         r.Cfg.FixModel,
-		Effort:        r.Cfg.FixEffort,
-		Reviewers:     r.Cfg.Reviewers,
-		ReviewModel:   r.Cfg.ReviewModel,
-		ReviewEffort:  r.Cfg.ReviewEffort,
-		MaxIter:       r.Cfg.MaxIter,
-		MaxCIFixes:    r.Cfg.MaxCIFixes,
-		FixTimeout:    r.Cfg.FixTimeout,
-		Bypass:        !r.Cfg.Sandboxed,
-		Interactive:   false,
-		UseDirenv:     true,
-		RunsDir:       r.P.BabysitRuns,
-		ReviewRunsDir: r.P.ReviewRuns,
-		DepsDir:       r.P.DepsCache,
-		CodexBin:      r.CodexBin,
-		DirenvBin:     r.DirenvBin,
+		Repo:                 repo,
+		RepoRoot:             clone,
+		Number:               number,
+		Model:                r.Cfg.FixModel,
+		Effort:               r.Cfg.FixEffort,
+		Reviewers:            r.Cfg.Reviewers,
+		ReviewModel:          r.Cfg.ReviewModel,
+		ReviewEffort:         r.Cfg.ReviewEffort,
+		MaxIter:              r.Cfg.MaxIter,
+		MaxCIFixes:           r.Cfg.MaxCIFixes,
+		FixTimeout:           r.Cfg.FixTimeout,
+		DivergenceScan:       r.Cfg.DivergenceScan,
+		DivergenceEscalateTo: append([]string(nil), r.Cfg.DivergenceEscalateTo...),
+		DivergenceTimeout:    r.Cfg.ReviewTimeout,
+		Post:                 r.Cfg.Post,
+		Bypass:               !r.Cfg.Sandboxed,
+		Interactive:          false,
+		UseDirenv:            true,
+		RunsDir:              r.P.BabysitRuns,
+		ReviewRunsDir:        r.P.ReviewRuns,
+		DepsDir:              r.P.DepsCache,
+		CodexBin:             r.CodexBin,
+		DirenvBin:            r.DirenvBin,
 	})
 	if res == nil {
-		return review.Findings{}, "", err
+		return review.Findings{}, "", "", "", err
 	}
-	return res.LastFindings, res.RunDir, err
+	verdict := ""
+	if res.Divergence != nil {
+		verdict = res.Divergence.Verdict
+	}
+	return res.LastFindings, res.RunDir, verdict, res.DivergenceCommentURL, err
 }
 
 // reviewOptions maps the daemon's configuration onto a review run.
