@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -221,7 +222,9 @@ func (r *run) ensureCIGreen() error {
 		if r.o.DivergenceScan {
 			r.traceCIFix(preSHA, r.headSHA, tag)
 		}
-		r.postFixComment(tag, label, "", "", preSHA)
+		if err := r.postFixComment(tag, label, "", "", preSHA); err != nil {
+			return err
+		}
 	}
 }
 
@@ -234,10 +237,16 @@ func (r *run) watchCI() (gh.CheckState, error) {
 	deadline := time.Now().Add(noChecksTimeout)
 	for {
 		state, out, err := r.p.GH.WatchChecks(r.ctx, r.o.RepoRoot, r.pr.Number)
+		writeTail(filepath.Join(r.logDir, "ci-last.log"), out, 20)
 		if err != nil {
+			if errors.Is(err, gh.ErrTransient) {
+				if err := r.sleep(time.Second); err != nil {
+					return state, err
+				}
+				continue
+			}
 			return state, err
 		}
-		writeTail(filepath.Join(r.logDir, "ci-last.log"), out, 20)
 
 		switch state {
 		case gh.ChecksNone:

@@ -141,7 +141,9 @@ func TestDisabledPostingSkipsPipelineComments(t *testing.T) {
 	if _, posted := r.postPRComment("fix-log comment", "safe body", ""); posted {
 		t.Fatal("disabled posting reported a pipeline comment as posted")
 	}
-	r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha")
+	if err := r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha"); err != nil {
+		t.Fatal(err)
+	}
 	if _, posted, err := r.postDisputeComment(1, "",
 		"DISPUTED FINDINGS:\n1. The finding does not apply.", "reviewed-head"); err != nil {
 		t.Fatal(err)
@@ -213,7 +215,9 @@ func TestFixCommentDoesNotClaimANoopWasFixed(t *testing.T) {
 		worktree: t.TempDir(),
 	}
 
-	r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha")
+	if err := r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha"); err != nil {
+		t.Fatal(err)
+	}
 	if len(rep.warnings) != 0 {
 		t.Fatalf("no-op fix tried to post: %v", rep.warnings)
 	}
@@ -247,6 +251,35 @@ func TestDisputeCommentPostsWithoutABacklinkWhenGitHubReturnedNoReviewURL(t *tes
 	}
 	if len(rep.warnings) != 1 || !strings.Contains(rep.warnings[0], "without a backlink") {
 		t.Fatalf("warnings = %v", rep.warnings)
+	}
+}
+
+func TestFixCommentRejectsHeadDrift(t *testing.T) {
+	dir := t.TempDir()
+	commented := filepath.Join(dir, "commented")
+	gitBin := filepath.Join(dir, "git")
+	if err := os.WriteFile(gitBin, []byte("#!/bin/sh\nprintf '%s' 'abc123 Fix check'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ghBin := filepath.Join(dir, "gh")
+	ghScript := "#!/bin/sh\n" +
+		"if test \"$1\" = pr && test \"$2\" = view; then printf new-head; exit 0; fi\n" +
+		"if test \"$1\" = pr && test \"$2\" = comment; then touch '" + commented + "'; fi\n"
+	if err := os.WriteFile(ghBin, []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p: &Pipeline{GH: gh.New(ghBin), Git: git.New(gitBin)},
+		o: Options{RepoRoot: dir, Post: true}, ctx: context.Background(), rep: NopReporter{},
+		pr: gh.FullPR{Number: 42}, worktree: dir, headSHA: "pushed-head",
+	}
+
+	err := r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha")
+	if err == nil || !strings.Contains(err.Error(), "refusing to post the fix log") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(commented); !os.IsNotExist(err) {
+		t.Fatalf("head-drifted fix log reached the comment command: %v", err)
 	}
 }
 

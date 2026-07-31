@@ -482,8 +482,10 @@ func (r *run) execute() (*Result, error) {
 		if err := r.pushBranch(); err != nil {
 			return res, err
 		}
-		r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
-			fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA)
+		if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
+			fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA); err != nil {
+			return res, err
+		}
 
 		// Overlap the next review with this round's CI wait.
 		if iteration < r.o.MaxIter {
@@ -686,13 +688,21 @@ func (r *run) recordRound(label, preSHA string) {
 // have produced the newest message, so the step's own message is checked as
 // well; the commit list is the fallback. The pipeline posts it rather than the
 // session, which is what keeps it a normal comment from the user.
-func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) {
+func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) error {
 	if r.target.BranchOnly || !r.o.Post {
-		return
+		return nil
 	}
 	commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
 	if commits == "" {
-		return
+		return nil
+	}
+	currentSHA, err := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+	if err != nil {
+		return fmt.Errorf("checking the pull request head before posting the fix log: %w", err)
+	}
+	if currentSHA != r.headSHA {
+		return fmt.Errorf("the pushed fix is for %s but GitHub reports %s; refusing to post the fix log",
+			r.headSHA, currentSHA)
 	}
 	var original string
 	if data, err := os.ReadFile(filepath.Join(r.msgDir, tag+".md")); err == nil {
@@ -700,6 +710,7 @@ func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) 
 	}
 	body := fixCommentBody(label, reviewLabel, reviewURL, r.lastMsg, original, commits)
 	r.postPRComment("fix-log comment", body, reviewURL)
+	return nil
 }
 
 // postDisputeComment posts only the rebuttal that survived the dispute gate.
