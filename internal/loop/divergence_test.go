@@ -227,6 +227,32 @@ func TestTraceMarksTheFinalFixAsUnreviewed(t *testing.T) {
 	}
 }
 
+func TestTraceRecordsCIFixAndAdvancesFinalHead(t *testing.T) {
+	dir := t.TempDir()
+	gitBin := filepath.Join(dir, "git")
+	if err := os.WriteFile(gitBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p: &Pipeline{Git: git.New(gitBin)}, o: Options{DivergenceScan: true},
+		ctx: context.Background(), root: dir, worktree: dir,
+		divergenceTrace: DivergenceTrace{Schema: 1, InitialHead: "old", FinalHead: "old"},
+	}
+	r.lastMsg = "Repaired the failing check."
+	r.traceCIFix("old", "new", "ci-fix-1")
+
+	if len(r.divergenceTrace.CIFixes) != 1 {
+		t.Fatalf("CI fixes = %d, want 1", len(r.divergenceTrace.CIFixes))
+	}
+	fix := r.divergenceTrace.CIFixes[0]
+	if fix.BeforeSHA != "old" || fix.AfterSHA != "new" || fix.Response != r.lastMsg {
+		t.Fatalf("CI fix = %+v", fix)
+	}
+	if r.divergenceTrace.FinalHead != "new" {
+		t.Fatalf("final head = %q, want new", r.divergenceTrace.FinalHead)
+	}
+}
+
 func TestDisabledDivergenceScanHasNoArtifactsOrValidation(t *testing.T) {
 	dir := t.TempDir()
 	r := &run{o: Options{DivergenceScan: false}, root: dir}

@@ -44,6 +44,7 @@ type DivergenceTrace struct {
 	InitialHead string                 `json:"initial_head"`
 	FinalHead   string                 `json:"final_head"`
 	Rounds      []DivergenceRoundTrace `json:"rounds"`
+	CIFixes     []FixTrace             `json:"ci_fixes,omitempty"`
 }
 
 type DivergenceRoundTrace struct {
@@ -103,6 +104,7 @@ Decide whether the run is:
 
 For "diverged", cite both sides with exact round numbers and SHAs from the input. Do not call a repeated but never-fixed finding divergence. Prefer a compatible resolution when ownership, state, or scope can make both requirements hold.
 Use the recorded before/after SHAs to inspect git diffs when comments alone are ambiguous. The last fix has no later review; do not treat its claim of a fix as independently verified.
+CI fixes record repairs made after failed checks. They may occur before the first review or between review rounds.
 
 Write exactly one JSON object, with no Markdown fence or surrounding prose:
 {
@@ -146,14 +148,26 @@ func (r *run) traceFix(round int, beforeSHA, afterSHA, tag string) {
 	if round < 1 || round > len(r.divergenceTrace.Rounds) {
 		return
 	}
-	r.divergenceTrace.Rounds[round-1].Fix = &FixTrace{
+	fix := r.newFixTrace(beforeSHA, afterSHA, tag)
+	r.divergenceTrace.Rounds[round-1].Fix = &fix
+	r.divergenceTrace.FinalHead = afterSHA
+	r.writeDivergenceTrace()
+}
+
+func (r *run) traceCIFix(beforeSHA, afterSHA, tag string) {
+	r.divergenceTrace.CIFixes = append(r.divergenceTrace.CIFixes,
+		r.newFixTrace(beforeSHA, afterSHA, tag))
+	r.divergenceTrace.FinalHead = afterSHA
+	r.writeDivergenceTrace()
+}
+
+func (r *run) newFixTrace(beforeSHA, afterSHA, tag string) FixTrace {
+	return FixTrace{
 		BeforeSHA: beforeSHA,
 		AfterSHA:  afterSHA,
 		Commits:   r.p.Git.LogOneline(r.ctx, r.worktree, beforeSHA+".."+afterSHA),
 		Response:  r.divergenceFixResponse(tag),
 	}
-	r.divergenceTrace.FinalHead = afterSHA
-	r.writeDivergenceTrace()
 }
 
 func (r *run) divergenceFixResponse(tag string) string {

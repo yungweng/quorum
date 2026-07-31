@@ -218,6 +218,9 @@ func (r *run) ensureCIGreen() error {
 		if err := r.pushBranch(); err != nil {
 			return err
 		}
+		if r.o.DivergenceScan {
+			r.traceCIFix(preSHA, r.headSHA, tag)
+		}
 		r.postFixComment(tag, label, "", "", preSHA)
 	}
 }
