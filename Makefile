@@ -4,7 +4,7 @@ GIT_DIRTY := $(shell test -z "$$(git status --porcelain)" || printf '%s' '.dirty
 DEV_VERSION := $(BASE_VERSION)-dev+$(GIT_REV)$(GIT_DIRTY)
 LOCAL_BIN ?= $(HOME)/.local/bin/quorum
 
-.PHONY: dev fmt-check test build lint check install-hooks
+.PHONY: dev fmt-check test build deadcode lint check install-hooks
 
 # Build the current checkout where the maintainer's shell finds it before the
 # Homebrew release. Override LOCAL_BIN to test another location.
@@ -27,10 +27,18 @@ test:
 build:
 	go build ./...
 
+deadcode:
+	@output="$$(go tool deadcode ./...)"; status=$$?; \
+	if test $$status -ne 0; then exit $$status; fi; \
+	if test -n "$$output"; then \
+		printf '%s\n' 'Dead code found:' "$$output" >&2; \
+		exit 1; \
+	fi
+
 lint:
 	golangci-lint run ./...
 
-check: fmt-check test build lint
+check: fmt-check test build deadcode lint
 
 install-hooks:
 	@common_dir="$$(git rev-parse --git-common-dir)"; \

@@ -788,10 +788,6 @@ func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {
 	return url, true
 }
 
-func prohibitedPRCommentTerm(text string) string {
-	return prohibitedPRCommentTermExcept(text, "")
-}
-
 func prohibitedPRCommentTermExcept(text, generatedURL string) string {
 	if generatedURL != "" {
 		text = strings.ReplaceAll(text, generatedURL, " ")

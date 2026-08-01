@@ -130,7 +130,7 @@ changes:
 make install-hooks
 ```
 
-Run the shared format, race-test, build and lint checks with:
+Run the shared format, race-test, build, dead-code and lint checks with:
 
 ```bash
 make check

@@ -114,13 +114,13 @@ func TestProhibitedPRCommentTermMatchesWholeWords(t *testing.T) {
 		"generated using artificial intelligence",
 		"Artificial-intelligence generated",
 	} {
-		if got := prohibitedPRCommentTerm(text); got == "" {
-			t.Errorf("prohibitedPRCommentTerm(%q) found nothing", text)
+		if got := prohibitedPRCommentTermExcept(text, ""); got == "" {
+			t.Errorf("prohibitedPRCommentTermExcept(%q, %q) found nothing", text, "")
 		}
 	}
 	for _, text := range []string{"maintain the failure", "agency update", "automatic merge"} {
-		if got := prohibitedPRCommentTerm(text); got != "" {
-			t.Errorf("prohibitedPRCommentTerm(%q) = %q", text, got)
+		if got := prohibitedPRCommentTermExcept(text, ""); got != "" {
+			t.Errorf("prohibitedPRCommentTermExcept(%q, %q) = %q", text, "", got)
 		}
 	}
 }
