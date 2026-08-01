@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,26 +61,16 @@ func (a *app) cmdInstall(args []string) int {
 		a.out.Printf("wrote a default config to %s\n", a.p.Config)
 	}
 
-	// Deliberately not resolved through symlinks. Homebrew installs the binary
-	// into a versioned Cellar directory and links it into bin, so resolving
-	// would pin the agent to a path that the next upgrade deletes, leaving a
-	// job that launchd still loads and that can no longer run.
-	self, err := os.Executable()
-	if err != nil {
-		return a.die("%v", err)
-	}
-
 	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
 		return a.die("%v", err)
 	}
 	// findTools widened PATH above. Bake it into the job so the agent can find
 	// gh, git, codex and optional direnv outside a login shell.
-	plist := fmt.Sprintf(plistTemplate,
-		paths.PlistLabel, self, a.cfg.PollInterval,
-		filepath.Join(a.p.StateDir, "launchd.out.log"),
-		filepath.Join(a.p.StateDir, "launchd.err.log"),
-		xmlEscape(os.Getenv("PATH")), os.Getenv("HOME"))
-	if err := os.WriteFile(a.p.Plist, []byte(plist), 0o644); err != nil {
+	plist, err := a.renderPlist()
+	if err != nil {
+		return a.die("%v", err)
+	}
+	if err := os.WriteFile(a.p.Plist, plist, 0o644); err != nil {
 		return a.die("%v", err)
 	}
 
@@ -116,6 +107,42 @@ func (a *app) cmdUninstall(args []string) int {
 	a.log.Printf("agent removed")
 	a.out.Printf("Agent removed. Config, state and cache are kept.\n")
 	return 0
+}
+
+// renderPlist is the launchd job as `quorum install` would write it right now.
+//
+// The binary path is deliberately not resolved through symlinks. Homebrew
+// installs the binary into a versioned Cellar directory and links it into bin,
+// so resolving would pin the agent to a path that the next upgrade deletes,
+// leaving a job that launchd still loads and that can no longer run.
+func (a *app) renderPlist() ([]byte, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	return fmt.Appendf(nil, plistTemplate,
+		paths.PlistLabel, self, a.cfg.PollInterval,
+		filepath.Join(a.p.StateDir, "launchd.out.log"),
+		filepath.Join(a.p.StateDir, "launchd.err.log"),
+		xmlEscape(os.Getenv("PATH")), os.Getenv("HOME")), nil
+}
+
+// plistStale reports whether the installed job differs from what install
+// would write now: another binary path, another poll interval, another PATH,
+// or a template this version changed. The binary itself needs no reinstall to
+// take effect, because launchd starts each poll fresh through the symlink; the
+// plist is the only part an upgrade leaves behind. A missing plist is not
+// stale, that is the not-installed case.
+func (a *app) plistStale() bool {
+	installed, err := os.ReadFile(a.p.Plist)
+	if err != nil {
+		return false
+	}
+	want, err := a.renderPlist()
+	if err != nil {
+		return false
+	}
+	return !bytes.Equal(installed, want)
 }
 
 // agentLoaded reports whether launchd knows the job.

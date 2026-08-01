@@ -153,6 +153,10 @@ func (a *app) runChecks() []check {
 		default:
 			out = append(out, check{"agent", fmt.Sprintf("polled %s, %d open request(s)", ui.Ago(at), open), 0, ""})
 		}
+		if a.plistStale() {
+			out = append(out, check{"agent job", "not what quorum install would write now (binary, interval or PATH changed)", 1,
+				"quorum install"})
+		}
 	}
 
 	// Config.

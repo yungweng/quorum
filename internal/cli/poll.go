@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -58,6 +59,14 @@ func (a *app) cmdPoll(args []string) int {
 		return 0
 	}
 	defer unlock()
+
+	// An upgrade swaps the binary behind the symlink, so the next poll already
+	// runs the new version; the plist keeps its old interval, PATH and template
+	// until somebody reinstalls. findTools widened PATH above, so the
+	// comparison sees the same PATH install would bake in.
+	if runtime.GOOS == "darwin" && a.plistStale() {
+		a.log.Printf("the installed launchd job is out of date, refresh it with: quorum install")
+	}
 
 	// The sweeps inside a run only drop what is a week old, which a couple of
 	// days of heavy use fills a disk well ahead of. Enforcing the budget here is

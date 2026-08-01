@@ -411,7 +411,11 @@ hiccup cannot make a pull request silently disappear from the queue.
 
 **Works in the terminal, not from launchd.** Almost always `PATH`. launchd
 ignores your shell profile, so `quorum install` bakes the resolved `PATH` into
-the plist. Install a tool somewhere new and you need to run it again.
+the plist. Install a tool somewhere new and you need to run it again. The agent
+notices this by itself: when the installed job no longer matches what `quorum
+install` would write, every poll logs a warning and `quorum doctor` flags it.
+An upgraded binary alone needs no reinstall; launchd starts each poll fresh
+through the stable symlink, so the next poll already runs the new version.
 
 **gh cannot authenticate from the agent.** `gh` stores its token in the
 keychain, which a user agent can only reach while your session is unlocked. Put
