@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runner"
@@ -143,7 +146,7 @@ func (a *app) forgetCacheSize() {
 
 // measureCache walks everything the budget covers.
 func (a *app) measureCache() int64 {
-	roots := []string{a.p.ReviewRuns, a.p.BabysitRuns, a.p.DepsCache}
+	roots := []string{a.p.ReviewRuns, a.p.BabysitRuns, a.p.DepsCache, a.trashDir()}
 	sizes := make(chan int64, len(roots))
 	for _, root := range roots {
 		go func() { sizes <- dirSize(root) }()
@@ -223,6 +226,40 @@ func (a *app) runDirs() []runEntry {
 	return runs
 }
 
+func (a *app) trashDir() string {
+	return filepath.Join(filepath.Dir(a.p.DepsCache), "trash")
+}
+
+type cacheSnapshot struct {
+	total int64
+	runs  []runEntry
+}
+
+// scanCache gets the eviction inventory and its total in one pass over every
+// run. The old collector measured all runs and then walked all of them again
+// to split worktrees from output, keeping startup behind the cache lock for
+// both walks.
+func (a *app) scanCache() cacheSnapshot {
+	runs := a.runDirs()
+	total := dirSize(a.p.DepsCache) + dirSize(a.trashDir()) +
+		directFileSize(a.p.ReviewRuns) + directFileSize(a.p.BabysitRuns)
+	for _, run := range runs {
+		total += run.worktree + run.output
+	}
+	return cacheSnapshot{total: total, runs: runs}
+}
+
+func directFileSize(root string) int64 {
+	entries, _ := os.ReadDir(root)
+	var total int64
+	for _, entry := range entries {
+		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
 // legacyLiveRuns preserves the marker/state liveness contract used before run
 // claims existed. It can be removed after upgrades from v1.0.1 no longer need
 // to coexist with reviews started by that version.
@@ -287,9 +324,6 @@ func runSizes(dir string) (worktree, output int64) {
 // only then shared dependency trees, which cost a full install to rebuild.
 func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	limit := a.budgetBytes()
-	if limit <= 0 {
-		return 0, 0, nil
-	}
 	cacheRoot := filepath.Dir(a.p.DepsCache)
 	if _, err := os.Stat(cacheRoot); err != nil {
 		if os.IsNotExist(err) {
@@ -300,94 +334,216 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		}
 		return 0, 0, err
 	}
-	// Measuring a cold cache can take minutes, and the agent gets here every
-	// poll. A recent measurement from a previous process answers the usual
-	// question, is the cache still under its budget, without another walk;
-	// anything that goes on to delete re-measures fresh under the lock below.
-	if size, ok := a.rememberedCacheSize(); ok {
-		a.setCacheSize(size)
-	} else {
-		a.rememberCacheSize(a.measureCache())
+	// A killed collector may leave entries it already selected in trash. They
+	// cannot belong to a live run any more, so finish those removals without
+	// taking the startup lock.
+	trashSize := dirSize(a.trashDir())
+	if trashSize > 0 {
+		if dry {
+			freed += trashSize
+		} else if err := a.cacheRemoveAll(a.trashDir()); err != nil {
+			return 0, 0, fmt.Errorf("remove staged cache entries: %w", err)
+		} else {
+			freed += trashSize
+		}
 	}
-	if a.cacheBytes <= limit {
-		return 0, 0, nil
+	if limit <= 0 {
+		if !dry && freed > 0 {
+			a.invalidateRememberedCacheSize(0)
+		}
+		return freed, 0, nil
 	}
 
-	// Run startup takes the same lock while publishing its claim. Once this
-	// holds it, no run can appear between the liveness check and dependency
-	// eviction, and any run that claimed first is visible below.
+	// Measuring a cold cache can take minutes, and the agent gets here every
+	// poll. A recent under-budget measurement avoids the walk entirely. An
+	// over-budget cache needs a fresh inventory, but that scan stays outside the
+	// lock so reviews and babysit runs can start meanwhile.
+	if size, ok := a.rememberedCacheSize(); ok {
+		if size <= limit && trashSize == 0 {
+			if !dry {
+				a.setCacheSize(size)
+			}
+			return freed, 0, nil
+		}
+	}
+	snapshot := a.scanCache()
+	if dry {
+		// scanCache still sees trash because a dry run did not remove it. Count
+		// it once, then plan against what a real collection would retain.
+		snapshot.total -= trashSize
+	}
+	if snapshot.total <= limit {
+		if !dry {
+			a.rememberCacheSize(snapshot.total)
+		}
+		return freed, 0, nil
+	}
+
+	// Run startup takes the same lock while publishing its claim. Selection is
+	// made outside the lock, then each candidate is rechecked and atomically
+	// renamed to trash while holding it. Actual recursive deletion happens
+	// after unlock, so a large cache never freezes command startup for minutes.
 	unlock, err := proc.LockDir(cacheRoot)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer unlock()
-
-	// Another collector may have changed the cache before this acquired the
-	// lock. Measure again rather than deleting against the stale total above.
-	a.rememberCacheSize(a.measureCache())
-	total := a.cacheBytes
-	if total <= limit {
-		return 0, 0, nil
+	total := snapshot.total
+	batch := ""
+	type stagedEntry struct {
+		path   string
+		source string
+		size   int64
+		runDir bool
 	}
-	// What survives is the new total, so the next reader does not walk again.
-	// A dry run leaves the disk alone, so it must leave the number alone too.
-	if !dry {
-		defer func() { a.rememberCacheSize(total) }()
-	}
-
-	runs := a.runDirs()
-	removeAll := os.RemoveAll
-	if a.removeAll != nil {
-		removeAll = a.removeAll
-	}
-	drop := func(path string, size int64) error {
-		if !dry {
-			if err := removeAll(path); err != nil {
-				return fmt.Errorf("remove %s: %w", path, err)
+	var staged []stagedEntry
+	stage := func(source string, size int64, runDir bool) error {
+		if dry {
+			if _, err := os.Lstat(source); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			total -= size
+			freed += size
+			if runDir {
+				removed++
+			}
+			return nil
+		}
+		if _, err := os.Lstat(source); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				total -= size
+				return nil
+			}
+			return err
+		}
+		if batch == "" {
+			if err := os.MkdirAll(a.trashDir(), 0o755); err != nil {
+				return err
+			}
+			var err error
+			batch, err = os.MkdirTemp(a.trashDir(), "gc-")
+			if err != nil {
+				return err
 			}
 		}
+		target := filepath.Join(batch, fmt.Sprintf("%04d-%s", len(staged), filepath.Base(source)))
+		if err := os.Rename(source, target); err != nil {
+			return err
+		}
+		staged = append(staged, stagedEntry{path: target, source: source, size: size, runDir: runDir})
 		total -= size
-		freed += size
 		return nil
 	}
 
-	for _, r := range runs {
+	for _, r := range snapshot.runs {
 		if total <= limit {
-			return freed, removed, nil
+			break
 		}
-		if r.live {
+		if r.live || proc.Claimed(r.path) {
 			continue
 		}
-		if err := drop(filepath.Join(r.path, "worktree"), r.worktree); err != nil {
-			return freed, removed, err
+		if err := stage(filepath.Join(r.path, "worktree"), r.worktree, false); err != nil {
+			unlock()
+			return freed, removed, fmt.Errorf("stage %s for removal: %w", filepath.Join(r.path, "worktree"), err)
 		}
 	}
 	// Only the output is still there to free: the round above ends by returning,
 	// so reaching this point means it dropped every collectable worktree.
-	for _, r := range runs {
-		if total <= limit {
-			return freed, removed, nil
-		}
-		if r.live {
-			continue
-		}
-		if err := drop(r.path, r.output); err != nil {
-			return freed, removed, err
-		}
-		removed++
-	}
-	// A run that is still going owns its worktree, and through the symlinks in
-	// that worktree it owns shared trees this cannot tell apart from the rest.
-	if slices.ContainsFunc(runs, func(r runEntry) bool { return r.live }) {
-		return freed, removed, nil
-	}
-	for _, t := range (deps.Cache{Root: a.p.DepsCache}).Trees() {
+	for _, r := range snapshot.runs {
 		if total <= limit {
 			break
 		}
-		if err := drop(t.Path, dirSize(t.Path)); err != nil {
-			return freed, removed, err
+		if r.live || proc.Claimed(r.path) {
+			continue
+		}
+		if err := stage(r.path, r.output, true); err != nil {
+			unlock()
+			return freed, removed, fmt.Errorf("stage %s for removal: %w", r.path, err)
 		}
 	}
+	// A run that is still going owns its worktree, and through the symlinks in
+	// that worktree it owns shared trees this cannot tell apart from the rest.
+	live := slices.ContainsFunc(snapshot.runs, func(r runEntry) bool {
+		return r.live || proc.Claimed(r.path)
+	}) || a.claimedRunOutsideSnapshot(snapshot.runs)
+	if !live {
+		for _, tree := range (deps.Cache{Root: a.p.DepsCache}).Trees() {
+			if total <= limit {
+				break
+			}
+			size := dirSize(tree.Path)
+			if err := stage(tree.Path, size, false); err != nil {
+				unlock()
+				return freed, removed, fmt.Errorf("stage %s for removal: %w", tree.Path, err)
+			}
+		}
+	}
+	unlock()
+
+	for _, entry := range staged {
+		if err := a.cacheRemoveAll(entry.path); err != nil {
+			a.invalidateRememberedCacheSize(max(snapshot.total-freed, 0))
+			return freed, removed, fmt.Errorf("remove %s: %w", entry.source, err)
+		}
+		freed += entry.size
+		if entry.runDir {
+			removed++
+		}
+	}
+	if batch != "" {
+		if err := a.cacheRemoveAll(batch); err != nil {
+			a.invalidateRememberedCacheSize(max(snapshot.total-freed, 0))
+			return freed, removed, fmt.Errorf("remove empty staging directory: %w", err)
+		}
+	}
+	if !dry {
+		// Runs could start while the inventory was built. Keep the value for this
+		// command's report, but force the next process to measure instead of
+		// trusting a total that may not include that concurrent growth.
+		a.invalidateRememberedCacheSize(max(snapshot.total-freed, 0))
+	}
 	return freed, removed, nil
+}
+
+func (a *app) cacheRemoveAll(path string) error {
+	if a.removeAll != nil {
+		return a.removeAll(path)
+	}
+	return cachefs.RemoveAll(path)
+}
+
+func (a *app) invalidateRememberedCacheSize(size int64) {
+	a.setCacheSize(size)
+	os.Remove(a.rememberedSizePath())
+}
+
+// claimedRunOutsideSnapshot catches a run that started while the collector was
+// walking the cache. Startup cannot pass the lock while this check and any
+// dependency staging happen.
+func (a *app) claimedRunOutsideSnapshot(snapshot []runEntry) bool {
+	known := make(map[string]bool, len(snapshot))
+	for _, run := range snapshot {
+		known[filepath.Clean(run.path)] = true
+	}
+	for _, root := range []string{a.p.ReviewRuns, a.p.BabysitRuns} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return true
+			}
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(root, entry.Name())
+			if !known[filepath.Clean(path)] && proc.Claimed(path) {
+				return true
+			}
+		}
+	}
+	return false
 }

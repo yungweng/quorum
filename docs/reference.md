@@ -388,6 +388,7 @@ every run with `POST=0`. The four counts come from the bullets under the
 ~/.cache/quorum/babysit/                       babysit runs, logs and Codex messages
 ~/.cache/quorum/deps/                          shared dependency trees
 ~/.cache/quorum/repos/                         managed clones
+~/.cache/quorum/trash/                         interrupted GC staging, normally absent
 ~/Library/LaunchAgents/io.github.quorum.plist  the launchd agent
 ```
 
@@ -398,12 +399,25 @@ the state directory and the clone directory. The rest follow `XDG_CONFIG_HOME`,
 ### What gets cleaned up
 
 A successful run deletes its own worktree, which is nearly all of what it took
-up. A failed one keeps it so `--resume-run` can pick it up. Run directories are
-dropped a week after anything last looked at them, dependency trees after two
-weeks. `CACHE_BUDGET_GB` bounds the three cache directories together and every
-poll enforces it, so nothing waits for somebody to run `quorum gc`. The managed
-clones are outside the budget: one per repository, bounded by how many you
-review.
+up. A failed review keeps it for `--resume-run`; a failed babysit keeps it for
+diagnosis. Run directories are dropped a week after anything last looked at
+them, dependency trees after two weeks. `CACHE_BUDGET_GB` bounds the three
+cache directories together and every poll enforces it, so nothing waits for
+somebody to run `quorum gc`. The managed clones are outside the budget: one per
+repository, bounded by how many you review.
+
+The run cache never keeps a repository's `main`, `development` or other branch
+checkout. Its worktrees are detached snapshots made for one run. Successful
+runs remove those snapshots immediately; the directories that remain belong to
+failed or explicitly retained runs, plus their review output.
+
+Above the budget, collection removes inactive worktrees first, then old run
+output, then shared dependencies. Active runs are protected by their claim
+locks. Selected entries are atomically moved to `~/.cache/quorum/trash/` while
+the short startup lock is held and recursively deleted after the lock is
+released. Interrupted deletions resume on the next collection. Cache removal
+also handles the read-only directories produced by Go's module cache and other
+dependency managers.
 
 ### Shared dependency cache
 

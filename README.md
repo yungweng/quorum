@@ -95,6 +95,11 @@ A failed run keeps its worktree, so the expensive reviewer passes never have to
 run twice: `quorum review 1811 --resume-run <dir>` picks it up with the original
 target and base.
 
+Successful runs remove their detached worktree immediately. `quorum gc` keeps
+active runs protected, removes inactive worktrees before review output, and
+handles read-only dependency caches without blocking new run startup during
+the recursive deletion.
+
 A run refuses to post rather than post something misleading: on a moved PR head,
 on an `.envrc` the PR itself changed, and on an aggregator answer with the wrong
 shape. [The reference](docs/reference.md#safety-stops) says what each means.

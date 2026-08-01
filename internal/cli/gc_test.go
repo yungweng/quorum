@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -436,8 +437,68 @@ func TestCollectReportsRemovalErrors(t *testing.T) {
 		t.Fatalf("collection error is %v, want %v", err, removeErr)
 	}
 	assertCollected(t, freed, removed, 0, 0)
-	if !exists(filepath.Join(run, "worktree")) {
-		t.Error("worktree was removed despite the reported failure")
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("selected worktree was left at its live path after staging")
+	}
+	if size := dirSize(a.trashDir()); size == 0 {
+		t.Error("failed removal did not preserve its staged cache entry for the next collection")
+	}
+}
+
+// Dependency managers such as Go deliberately leave caches read-only. Cache
+// collection owns these worktrees and must make them removable rather than
+// failing every poll forever on the same file.
+func TestCollectRemovesReadOnlyDependencyDirectories(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(100)
+	run := staleRun(t, a.p.BabysitRuns, "owner-repo-pr-1", 0, 0)
+	module := filepath.Join(run, "worktree", ".devbox", "go", "pkg", "mod", "example.org", "module@v1.0.0")
+	fill(t, filepath.Join(module, "source.go"), 800)
+	if err := os.Chmod(module, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("read-only dependency tree survived collection")
+	}
+}
+
+// Recursive removal can take minutes on node_modules. Once a victim has been
+// atomically staged, startup no longer needs the cache lock and must not wait
+// for that slow deletion to finish.
+func TestCollectReleasesStartupLockBeforeRecursiveRemoval(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	staleRun(t, a.p.BabysitRuns, "owner-repo-pr-1", 800, 100)
+
+	removing := make(chan struct{})
+	finish := make(chan struct{})
+	var first sync.Once
+	a.removeAll = func(path string) error {
+		first.Do(func() {
+			close(removing)
+			<-finish
+		})
+		return os.RemoveAll(path)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := a.collect(false)
+		done <- err
+	}()
+	<-removing
+
+	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	if err != nil {
+		close(finish)
+		t.Fatal(err)
+	}
+	unlock()
+	close(finish)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -591,9 +652,10 @@ func TestCollectRemembersItsMeasurementForTheNextProcess(t *testing.T) {
 	}
 }
 
-// After an eviction the file holds the new total, so the next poll neither
-// walks nor evicts again.
-func TestCollectRemembersTheTotalAfterEviction(t *testing.T) {
+// A run can start while eviction scans outside the lock, so its growth may be
+// absent from that snapshot. Keep the result for this command's report but
+// make the next process measure instead of trusting a possible undercount.
+func TestCollectInvalidatesTheSharedMeasurementAfterEviction(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(500)
 	staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
@@ -601,12 +663,10 @@ func TestCollectRemembersTheTotalAfterEviction(t *testing.T) {
 	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 800, 0)
 
-	next := &app{cfg: a.cfg, p: a.p, log: a.log}
-	size, ok := next.rememberedCacheSize()
-	if !ok {
-		t.Fatal("eviction left no measurement for the next process")
+	if _, ok := a.rememberedCacheSize(); ok {
+		t.Fatal("eviction left a potentially incomplete measurement for the next process")
 	}
-	if want := int64(100 + len(staleClaim)); size != want {
-		t.Fatalf("remembered measurement is %d after eviction, want %d", size, want)
+	if got, want := a.cacheSize(), int64(100+len(staleClaim)); got != want {
+		t.Fatalf("current command cache size = %d after eviction, want %d", got, want)
 	}
 }

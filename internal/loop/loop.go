@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
@@ -931,7 +932,7 @@ func (r *run) gcOldRuns() {
 			continue
 		}
 		r.p.Git.WorktreeRemove(r.ctx, r.o.RepoRoot, filepath.Join(dir, "worktree"))
-		os.RemoveAll(dir)
+		_ = cachefs.RemoveAll(dir)
 	}
 	r.p.Git.WorktreePrune(r.ctx, r.o.RepoRoot)
 }

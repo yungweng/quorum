@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/yungweng/quorum/internal/cachefs"
 )
 
 // G runs git from a resolved binary.
@@ -95,10 +97,13 @@ func (g G) WorktreeAdd(ctx context.Context, repoRoot, path, sha string) error {
 	return err
 }
 
-// WorktreeRemove drops a worktree. Failure is not interesting: the caller is
-// cleaning up, and a leftover directory is handled by the next prune.
+// WorktreeRemove drops a worktree. Git can fail on dependency managers' read-
+// only directories, so cache-owned worktrees get a filesystem fallback. The
+// regular repository sweeps prune a registration left by that fallback.
 func (g G) WorktreeRemove(ctx context.Context, repoRoot, path string) {
-	_, _ = g.run(ctx, repoRoot, "worktree", "remove", path, "--force")
+	if _, err := g.run(ctx, repoRoot, "worktree", "remove", path, "--force"); err != nil {
+		_ = cachefs.RemoveAll(path)
+	}
 }
 
 // WorktreePrune clears worktree registrations whose directories are gone.

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/envexec"
@@ -638,7 +639,7 @@ func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 			// Unregister before deleting, or git keeps a dangling worktree
 			// entry that later prunes have to clean up.
 			r.Git.WorktreeRemove(ctx, o.RepoRoot, filepath.Join(dir, "worktree"))
-			if os.RemoveAll(dir) == nil {
+			if cachefs.RemoveAll(dir) == nil {
 				removed++
 			}
 		}

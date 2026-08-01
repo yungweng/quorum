@@ -24,6 +24,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/yungweng/quorum/internal/cachefs"
 )
 
 // lockFiles are the manifests that mark a directory as a JavaScript project.
@@ -164,7 +166,7 @@ func (c Cache) Capture() (links []string, cached []Project, err error) {
 
 		lock := shared + ".lock"
 		if lockIsStale(lock) {
-			os.RemoveAll(lock)
+			_ = cachefs.RemoveAll(lock)
 		}
 		// A directory is the atomic primitive here: mkdir either creates it or
 		// fails, with no window in between. Failing means another run is
@@ -178,13 +180,13 @@ func (c Cache) Capture() (links []string, cached []Project, err error) {
 		if exists(marker) {
 			// Another run published it while the hook was still installing
 			// ours. Theirs is as good as ours, so drop the duplicate.
-			os.RemoveAll(local)
+			_ = cachefs.RemoveAll(local)
 		} else {
-			os.RemoveAll(shared)
+			_ = cachefs.RemoveAll(shared)
 			if err := os.Rename(local, shared); err != nil {
 				// Crossing a filesystem boundary is the usual cause. Nothing
 				// was lost: the tree is still where the hook installed it.
-				os.RemoveAll(lock)
+				_ = cachefs.RemoveAll(lock)
 				continue
 			}
 			touch(marker)
@@ -194,7 +196,7 @@ func (c Cache) Capture() (links []string, cached []Project, err error) {
 		if err := os.Symlink(shared, local); err == nil {
 			links = append(links, local)
 		}
-		os.RemoveAll(lock)
+		_ = cachefs.RemoveAll(lock)
 	}
 	return links, cached, nil
 }
@@ -255,7 +257,7 @@ func (c Cache) GC(maxAge time.Duration) int {
 		if !t.Used.Before(cutoff) {
 			break
 		}
-		if os.RemoveAll(t.Path) == nil {
+		if cachefs.RemoveAll(t.Path) == nil {
 			removed++
 		}
 	}
