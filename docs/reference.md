@@ -254,7 +254,8 @@ After a posted review with zero Blockers and zero Critical findings, quorum:
 1. confirms that GitHub still reports the exact reviewed head;
 2. submits an approval tied to that commit, unless the same user already
    approved it; and
-3. calls GitHub's merge API with `merge_method=merge` and `sha=SHA`.
+3. reads the repository's allowed merge methods and calls GitHub's merge API
+   with `sha=SHA`, preferring `merge`, then `squash`, then `rebase`.
 
 Suggestions and Questions do not block. GitHub branch rules and required checks
 still apply; optional check failures do not block the merge wait. The merge is
@@ -262,9 +263,10 @@ one atomic request for the reviewed SHA, so it fails rather than leaving a new
 request that could survive a later push. Target branches that require a merge
 queue are rejected before approval. Quorum never
 disables an existing auto-merge or merge-queue request because it cannot prove
-who created it. Repositories with merge commits disabled are also rejected
-before approval. For an own PR, quorum skips approval and merge, reports
-`awaiting approval`, and leaves a per-PR macOS Notification Center item that
+who created it. Repositories that allow none of GitHub's merge, squash, or
+rebase methods are rejected before approval. For an own PR, quorum skips
+approval and merge, reports `awaiting approval`, and leaves a per-PR macOS
+Notification Center item that
 routine completion notifications cannot replace. It does not merge a moved
 head, a branch-only run, `POST=0`, `--dry-run`, or an accepted dispute whose
 last review still contains Blockers or Critical findings.

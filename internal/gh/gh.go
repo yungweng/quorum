@@ -264,28 +264,41 @@ func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Detail
 	return d, nil
 }
 
+// MergeSettings are the repository and branch rules that select a safe merge
+// path. A repository can allow more than one method.
+type MergeSettings struct {
+	QueueEnabled       bool
+	MergeCommitAllowed bool
+	SquashMergeAllowed bool
+	RebaseMergeAllowed bool
+}
+
 // MergePolicy reports the repository settings that select a safe merge path
 // and confirms that the queried pull request still has headSHA.
-func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headSHA string) (queueEnabled, mergeCommitAllowed bool, err error) {
+func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headSHA string) (MergeSettings, error) {
 	owner, name, ok := strings.Cut(repo, "/")
 	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || number <= 0 || headSHA == "" {
-		return false, false, fmt.Errorf("merge policy check needs owner/repository, pull request number, and head sha")
+		return MergeSettings{}, fmt.Errorf("merge policy check needs owner/repository, pull request number, and head sha")
 	}
 	const query = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     mergeCommitAllowed
+    squashMergeAllowed
+    rebaseMergeAllowed
     pullRequest(number: $number) { headRefOid isMergeQueueEnabled }
   }
 }`
 	out, err := c.run(ctx, "api", "graphql", "-f", "query="+query,
 		"-F", "owner="+owner, "-F", "name="+name, "-F", "number="+fmt.Sprint(number))
 	if err != nil {
-		return false, false, err
+		return MergeSettings{}, err
 	}
 	var response struct {
 		Data struct {
 			Repository struct {
 				MergeCommitAllowed bool `json:"mergeCommitAllowed"`
+				SquashMergeAllowed bool `json:"squashMergeAllowed"`
+				RebaseMergeAllowed bool `json:"rebaseMergeAllowed"`
 				PullRequest        *struct {
 					HeadRefOid        string `json:"headRefOid"`
 					MergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
@@ -294,16 +307,21 @@ func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headS
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out, &response); err != nil {
-		return false, false, fmt.Errorf("gh api merge policy check: %w", err)
+		return MergeSettings{}, fmt.Errorf("gh api merge policy check: %w", err)
 	}
 	pr := response.Data.Repository.PullRequest
 	if pr == nil || pr.HeadRefOid == "" {
-		return false, false, fmt.Errorf("%w: GitHub returned no pull request head during merge policy check", ErrTransient)
+		return MergeSettings{}, fmt.Errorf("%w: GitHub returned no pull request head during merge policy check", ErrTransient)
 	}
 	if pr.HeadRefOid != headSHA {
-		return false, false, fmt.Errorf("pull request head moved from %s to %s during merge policy check", headSHA, pr.HeadRefOid)
+		return MergeSettings{}, fmt.Errorf("pull request head moved from %s to %s during merge policy check", headSHA, pr.HeadRefOid)
 	}
-	return pr.MergeQueueEnabled, response.Data.Repository.MergeCommitAllowed, nil
+	return MergeSettings{
+		QueueEnabled:       pr.MergeQueueEnabled,
+		MergeCommitAllowed: response.Data.Repository.MergeCommitAllowed,
+		SquashMergeAllowed: response.Data.Repository.SquashMergeAllowed,
+		RebaseMergeAllowed: response.Data.Repository.RebaseMergeAllowed,
+	}, nil
 }
 
 // The states a pull request can be in, as GitHub spells them.

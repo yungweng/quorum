@@ -142,28 +142,55 @@ func TestApproveReturnsReviewID(t *testing.T) {
 
 func TestMergeHeadRejectsUnmergedResponse(t *testing.T) {
 	bin, _ := fakeGH(t, `echo '{"merged":false,"message":"Base branch was modified"}'`)
-	err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123")
+	err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123", MergeMethodMerge)
 	if err == nil || !strings.Contains(err.Error(), "Base branch was modified") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestMergePolicyChecksTheExactHead(t *testing.T) {
-	bin, _ := fakeGH(t, `
-if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"mergeCommitAllowed"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
+func TestMergeHeadUsesSelectedMethod(t *testing.T) {
+	for _, method := range []MergeMethod{MergeMethodMerge, MergeMethodSquash, MergeMethodRebase} {
+		t.Run(string(method), func(t *testing.T) {
+			bin, _ := fakeGH(t, `
+if [[ "$*" != *"merge_method=`+string(method)+`"* || "$*" != *"sha=abc123"* ]]; then
   echo "unexpected arguments: $*" >&2
   exit 1
 fi
-echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
-	required, allowed, err := testClient(bin).MergePolicy(context.Background(), "acme/api", 42, "abc123")
+echo '{"merged":true}'`)
+			if err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123", method); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMergeHeadRejectsUnknownMethodBeforeCallingGitHub(t *testing.T) {
+	bin, countFile := fakeGH(t, `echo '{"merged":true}'`)
+	err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123", MergeMethod("octopus"))
+	if err == nil || !strings.Contains(err.Error(), "unsupported merge method") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := calls(t, countFile); got != 0 {
+		t.Fatalf("gh called %d times, want none", got)
+	}
+}
+
+func TestMergePolicyChecksTheExactHead(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"mergeCommitAllowed"* || "$*" != *"squashMergeAllowed"* || "$*" != *"rebaseMergeAllowed"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
+  echo "unexpected arguments: $*" >&2
+  exit 1
+fi
+echo '{"data":{"repository":{"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
+	settings, err := testClient(bin).MergePolicy(context.Background(), "acme/api", 42, "abc123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !required {
+	if !settings.QueueEnabled {
 		t.Fatal("required merge queue was not detected")
 	}
-	if !allowed {
-		t.Fatal("allowed merge commits were not detected")
+	if !settings.MergeCommitAllowed || !settings.SquashMergeAllowed || settings.RebaseMergeAllowed {
+		t.Fatalf("merge settings = %+v", settings)
 	}
 }
 

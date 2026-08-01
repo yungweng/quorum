@@ -54,6 +54,7 @@ func Allowed(enabled, post bool, findings review.Findings) bool {
 // existing approval for that commit is reused, and a merged PR is success.
 func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string) (Result, error) {
 	var result Result
+	mergeMethod := gh.MergeMethodMerge
 	if repo == "" || number <= 0 || reviewedSHA == "" {
 		return result, fmt.Errorf("auto-merge needs a repository, pull request number, and reviewed head sha")
 	}
@@ -77,15 +78,17 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		return result, nil
 	}
 	if pr.BaseRefName != "" {
-		requiresQueue, mergeCommitAllowed, err := client.MergePolicy(ctx, repo, number, reviewedSHA)
+		settings, err := client.MergePolicy(ctx, repo, number, reviewedSHA)
 		if err != nil {
 			return result, fmt.Errorf("checking merge policy: %w", err)
 		}
-		if requiresQueue {
+		if settings.QueueEnabled {
 			return result, fmt.Errorf("refusing auto-merge: target branch %s requires a merge queue", pr.BaseRefName)
 		}
-		if !mergeCommitAllowed {
-			return result, fmt.Errorf("refusing auto-merge: repository %s does not allow merge commits", repo)
+		var ok bool
+		mergeMethod, ok = preferredMergeMethod(settings)
+		if !ok {
+			return result, fmt.Errorf("refusing auto-merge: repository %s does not allow a supported merge method", repo)
 		}
 	}
 
@@ -186,7 +189,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
 			fmt.Errorf("refusing auto-merge: pull request %s#%d has active change requests", repo, number))
 	}
-	if mergeErr := client.MergeHead(ctx, repo, number, reviewedSHA); mergeErr != nil {
+	if mergeErr := client.MergeHead(ctx, repo, number, reviewedSHA, mergeMethod); mergeErr != nil {
 		current, inspectErr := client.PRDetails(ctx, repo, number)
 		if inspectErr != nil {
 			cause := errors.Join(fmt.Errorf("merging reviewed head: %w", mergeErr),
@@ -214,6 +217,22 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	}
 	result.Status = Merged
 	return result, nil
+}
+
+// preferredMergeMethod preserves merge commits where they already work, then
+// falls back to the other methods GitHub exposes. GitHub repositories record
+// which methods are allowed, but do not expose a preferred method.
+func preferredMergeMethod(settings gh.MergeSettings) (gh.MergeMethod, bool) {
+	switch {
+	case settings.MergeCommitAllowed:
+		return gh.MergeMethodMerge, true
+	case settings.SquashMergeAllowed:
+		return gh.MergeMethodSquash, true
+	case settings.RebaseMergeAllowed:
+		return gh.MergeMethodRebase, true
+	default:
+		return "", false
+	}
 }
 
 func mergeReadinessPending(current gh.Details, mergeErr error) bool {

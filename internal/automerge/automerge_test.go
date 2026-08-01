@@ -167,20 +167,77 @@ esac`)
 	}
 }
 
-func TestRunRejectsDisabledMergeCommitsBeforeApproval(t *testing.T) {
+func TestRunRejectsMissingMergeMethodBeforeApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
-  3) echo '{"data":{"repository":{"mergeCommitAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":false}}}}' ;;
+  3) echo '{"data":{"repository":{"mergeCommitAllowed":false,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":false}}}}' ;;
 esac`)
 	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
-	if err == nil || !strings.Contains(err.Error(), "does not allow merge commits") {
+	if err == nil || !strings.Contains(err.Error(), "does not allow a supported merge method") {
 		t.Fatalf("err = %v", err)
 	}
 	args := readArgs(t, argsFile)
 	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("disabled merge method reached a side effect:\n%s", args)
+	}
+}
+
+func TestRunUsesRepositoryMergeMethod(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings string
+		method   gh.MergeMethod
+	}{
+		{"squash fallback", `"mergeCommitAllowed":false,"squashMergeAllowed":true,"rebaseMergeAllowed":false`, gh.MergeMethodSquash},
+		{"rebase fallback", `"mergeCommitAllowed":false,"squashMergeAllowed":false,"rebaseMergeAllowed":true`, gh.MergeMethodRebase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '{"data":{"repository":{`+tc.settings+`,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":false}}}}' ;;
+  4) echo '[{"id":77,"state":"APPROVED","commit_id":"abc123","user":{"login":"reviewer"}}]' ;;
+  5) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"merged":true}' ;;
+esac`)
+
+			result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != Merged {
+				t.Fatalf("result = %+v", result)
+			}
+			args := readArgs(t, argsFile)
+			want := "merge_method=" + string(tc.method)
+			if !strings.Contains(args, want) {
+				t.Fatalf("calls are missing %q:\n%s", want, args)
+			}
+		})
+	}
+}
+
+func TestPreferredMergeMethodPreservesPriority(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings gh.MergeSettings
+		method   gh.MergeMethod
+		ok       bool
+	}{
+		{"merge first", gh.MergeSettings{MergeCommitAllowed: true, SquashMergeAllowed: true, RebaseMergeAllowed: true}, gh.MergeMethodMerge, true},
+		{"squash second", gh.MergeSettings{SquashMergeAllowed: true, RebaseMergeAllowed: true}, gh.MergeMethodSquash, true},
+		{"rebase third", gh.MergeSettings{RebaseMergeAllowed: true}, gh.MergeMethodRebase, true},
+		{"none", gh.MergeSettings{}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			method, ok := preferredMergeMethod(tc.settings)
+			if method != tc.method || ok != tc.ok {
+				t.Fatalf("preferredMergeMethod() = %q, %v; want %q, %v", method, ok, tc.method, tc.ok)
+			}
+		})
 	}
 }
 

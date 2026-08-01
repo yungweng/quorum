@@ -196,12 +196,26 @@ func (c *Client) DismissReview(ctx context.Context, repo string, number int, rev
 	return err
 }
 
+// MergeMethod is one of GitHub's supported pull request merge methods.
+type MergeMethod string
+
+const (
+	MergeMethodMerge  MergeMethod = "merge"
+	MergeMethodSquash MergeMethod = "squash"
+	MergeMethodRebase MergeMethod = "rebase"
+)
+
 // MergeHead asks GitHub to merge one exact head. Unlike a persistent
 // auto-merge request, the REST operation cannot survive a later push.
-func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha string) error {
+func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha string, method MergeMethod) error {
+	switch method {
+	case MergeMethodMerge, MergeMethodSquash, MergeMethodRebase:
+	default:
+		return fmt.Errorf("unsupported merge method %q", method)
+	}
 	out, err := c.run(ctx, "api", "--method", "PUT",
 		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
-		"-f", "merge_method=merge", "-f", "sha="+sha)
+		"-f", "merge_method="+string(method), "-f", "sha="+sha)
 	if err != nil {
 		return err
 	}

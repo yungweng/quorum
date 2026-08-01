@@ -486,7 +486,7 @@ func TestDashboardShowsAutoMergeConfiguration(t *testing.T) {
 	a.cfg.AutoMergeAgent = true
 	a.cfg.AutoMergeBabysit = true
 	screen, _ = render(t, a, nil)
-	if !strings.Contains(ui.StripANSI(screen), "auto-merge agent+babysit (merge commit)") {
+	if !strings.Contains(ui.StripANSI(screen), "auto-merge agent+babysit (repo method)") {
 		t.Fatalf("dashboard did not name the enabled sources:\n%s", screen)
 	}
 }

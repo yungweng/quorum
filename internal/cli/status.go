@@ -1158,7 +1158,7 @@ func autoMergeSummary(cfg config.Config) string {
 	if len(sources) == 0 {
 		return "auto-merge off"
 	}
-	return "auto-merge " + strings.Join(sources, "+") + " (merge commit)"
+	return "auto-merge " + strings.Join(sources, "+") + " (repo method)"
 }
 
 func runLabelText(run history.Run) string {

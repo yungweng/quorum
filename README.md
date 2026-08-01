@@ -161,13 +161,14 @@ AUTO_MERGE_TIMEOUT="2h"
 
 A clean posted PR review has no Blockers or Critical findings; Suggestions and
 Questions are allowed. Quorum approves the exact reviewed commit, then asks
-GitHub to merge it with a merge commit after the repository's branch rules
-pass. It never uses administrator privileges. For an own PR, quorum skips both
-approval and merge, reports `awaiting approval`, and leaves a dedicated macOS
-Notification Center item. A moved head, a local report (`POST=0` or
-`--dry-run`), a branch without a PR, and a target branch that requires a merge
-queue are not merged. Repositories with merge commits disabled are rejected
-before approval.
+GitHub to merge it with a method the repository allows after its branch rules
+pass. It prefers a merge commit to preserve existing behavior, then squash,
+then rebase. It never uses administrator privileges. For an own PR, quorum
+skips both approval and merge, reports `awaiting approval`, and leaves a
+dedicated macOS Notification Center item. A moved head, a local report
+(`POST=0` or `--dry-run`), a branch without a PR, and a target branch that
+requires a merge queue are not merged. A repository with no supported merge
+method is rejected before approval.
 
 The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
 The other two settings apply only to the matching command started in a
