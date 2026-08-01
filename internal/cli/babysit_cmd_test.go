@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/ui"
 )
 
 func TestManualCommandsDefaultToCurrentBranchPR(t *testing.T) {
@@ -153,5 +156,63 @@ func TestDivergenceHasDistinctExitCode(t *testing.T) {
 	}
 	if exitDiverged == exitNotConverged {
 		t.Fatal("diverged and not-converged share an exit code")
+	}
+}
+
+func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		err      error
+		result   *loop.Result
+		mergeErr error
+		want     string
+		unwanted string
+	}{
+		{
+			name: "round limit",
+			err:  errors.Join(loop.ErrNotConverged, errors.New("after 12 review rounds")),
+			want: "not converged",
+		},
+		{
+			name:     "dirty worktree",
+			err:      errors.New("worktree still has uncommitted changes"),
+			want:     "failed: worktree still has uncommitted changes",
+			unwanted: "not converged",
+		},
+		{
+			name: "divergence",
+			err:  loop.ErrDiverged,
+			result: &loop.Result{
+				PR:         gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"},
+				Rounds:     12,
+				Divergence: &loop.DivergenceReport{Verdict: loop.DivergenceDiverged},
+			},
+			want:     "diverged; manual decision required",
+			unwanted: "failed:",
+		},
+		{
+			name:     "auto-merge failure",
+			err:      errors.New("auto-merge failed: permission denied"),
+			mergeErr: errors.New("auto-merge failed: permission denied"),
+			want:     "auto-merge failed: permission denied",
+			unwanted: "not converged",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			rep := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+			res := test.result
+			if res == nil {
+				res = &loop.Result{PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1}
+			}
+			rep.summary(res, test.err, "", test.mergeErr)
+			got := out.String()
+			if !strings.Contains(got, test.want) {
+				t.Fatalf("summary is missing %q:\n%s", test.want, got)
+			}
+			if test.unwanted != "" && strings.Contains(got, test.unwanted) {
+				t.Fatalf("summary contains %q:\n%s", test.unwanted, got)
+			}
+		})
 	}
 }

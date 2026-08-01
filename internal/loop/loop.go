@@ -163,9 +163,11 @@ func (p *Pipeline) Run(ctx context.Context, o Options) (*Result, error) {
 		r.releaseRunClaim()
 		return nil, err
 	}
-	defer r.cleanup()
+	succeeded := false
+	defer func() { r.cleanup(succeeded) }()
 
 	res, err := r.execute()
+	succeeded = err == nil
 	if res != nil {
 		res.Duration = time.Since(started)
 	}
@@ -609,14 +611,40 @@ func (r *run) ensureCommitted(tag string) error {
 	if err := r.questionGate(tag + "-commit"); err != nil {
 		return err
 	}
-	dirty, err = r.p.Git.Dirty(r.ctx, r.worktree)
+	return r.requireCleanWorktree(tag)
+}
+
+const dirtyStatusPreviewLimit = 10
+
+// requireCleanWorktree records enough evidence to diagnose files a fix session
+// left behind. The full status belongs in the run log; the error stays bounded
+// because history and the terminal both render it.
+func (r *run) requireCleanWorktree(tag string) error {
+	status, err := r.p.Git.StatusPorcelain(r.ctx, r.worktree)
 	if err != nil {
 		return err
 	}
-	if dirty {
-		return fmt.Errorf("worktree still has uncommitted changes; inspect %s", r.worktree)
+	if status == "" {
+		return nil
 	}
-	return nil
+
+	logPath := filepath.Join(r.logDir, tag+"-dirty.log")
+	if err := os.WriteFile(logPath, []byte(status+"\n"), 0o644); err != nil {
+		return fmt.Errorf("worktree still has uncommitted changes (%s); inspect %s; could not write full status to %s: %w",
+			dirtyStatusPreview(status), r.worktree, logPath, err)
+	}
+	return fmt.Errorf("worktree still has uncommitted changes (%s); inspect %s; full status: %s",
+		dirtyStatusPreview(status), r.worktree, logPath)
+}
+
+func dirtyStatusPreview(status string) string {
+	lines := strings.Split(status, "\n")
+	if len(lines) <= dirtyStatusPreviewLimit {
+		return strings.Join(lines, ", ")
+	}
+	remaining := len(lines) - dirtyStatusPreviewLimit
+	return strings.Join(lines[:dirtyStatusPreviewLimit], ", ") +
+		fmt.Sprintf(", ... and %d more path(s)", remaining)
 }
 
 // pushBranch is the safety net for a push the session forgot, and the barrier
@@ -858,10 +886,11 @@ func (r *run) gcOldRuns() {
 	r.p.Git.WorktreePrune(r.ctx, r.o.RepoRoot)
 }
 
-// cleanup stops a background review and removes the worktree on success.
-func (r *run) cleanup() {
+// cleanup stops a background review and removes a successful run's worktree.
+// Failed worktrees stay available for diagnosis until normal cache collection.
+func (r *run) cleanup(succeeded bool) {
 	r.killReview()
-	if !r.o.KeepWorktree {
+	if succeeded && !r.o.KeepWorktree {
 		r.p.Git.WorktreeRemove(r.ctx, r.o.RepoRoot, r.worktree)
 	}
 	r.releaseRunClaim()

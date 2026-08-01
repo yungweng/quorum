@@ -51,6 +51,7 @@ Standing rules for every step:
 - Write clean, descriptive commit messages. Never mention AI, agents, Codex, or automation anywhere.
 - You are on a detached checkout, so push with exactly: git push origin HEAD:refs/heads/%s
 - Only push when a step explicitly tells you to. Never create or edit PRs or comments, never rewrite published history.
+- Put screenshots and other disposable QA artifacts in $TMPDIR or /tmp, not in the worktree. Before finishing a step, leave git status --porcelain empty: commit task files and remove only temporary artifacts you created.
 - Make reasonable technical decisions yourself.
 %s
 - If an external review finding rated Blocker or Critical is factually wrong and no code change is warranted, do not change code just to satisfy the review. Instead end your final message with a line that is exactly:
@@ -119,7 +120,7 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 }
 
 // commitPrompt asks the session to commit what it left in the working tree.
-const commitPrompt = `There are uncommitted changes in the worktree. Review them and commit everything that belongs to the task (git add + git commit with a descriptive message). Do not push.`
+const commitPrompt = `There are uncommitted changes in the worktree. Review them and commit everything that belongs to the task (git add + git commit with a descriptive message). Move disposable QA artifacts that you created to $TMPDIR or /tmp, or delete them. Do not push. Finish with an empty git status --porcelain.`
 
 // bounceQuestionsPrompt sends open questions back in autonomous mode.
 const bounceQuestionsPrompt = `No human is available during this automated run. Decide these questions yourself: pick the most conservative reasonable option for each, apply it, and record the decision in the PR comment section of your final message. Continue with the current step. All rules from the initial instructions still apply.`

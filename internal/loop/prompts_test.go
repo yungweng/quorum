@@ -92,6 +92,20 @@ func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
 	}
 }
 
+func TestFixSessionPromptsRequireACleanWorktree(t *testing.T) {
+	rules := standingRules("main", true, false)
+	for _, want := range []string{"$TMPDIR or /tmp", "leave git status --porcelain empty", "remove only temporary artifacts you created"} {
+		if !strings.Contains(rules, want) {
+			t.Errorf("the standing rules are missing %q", want)
+		}
+	}
+	for _, want := range []string{"$TMPDIR or /tmp", "empty git status --porcelain"} {
+		if !strings.Contains(commitPrompt, want) {
+			t.Errorf("the commit prompt is missing %q", want)
+		}
+	}
+}
+
 // A fix round must be told not to wait for CI: the pipeline watches the checks,
 // and an earlier version had the session waiting too, which was idle time
 // billed to the fix session.

@@ -69,6 +69,10 @@ PR CI and PR comments.
 | `--keep-worktree` | Keep the worktree after success | off |
 | `-h`, `--help` | Show the help | |
 
+Failed runs always keep their worktree for inspection, regardless of
+`--keep-worktree`. The normal cache collector removes old failed runs after the
+retention period.
+
 ## Other commands
 
 | Command | Options |

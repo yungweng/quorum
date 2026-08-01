@@ -163,7 +163,7 @@ func (a *app) cmdBabysit(argv []string) int {
 
 	a.logRun(babysitHistory(repo, number, started, res, err))
 	if res != nil {
-		rep.summary(res, mergeStatus, mergeErr)
+		rep.summary(res, err, mergeStatus, mergeErr)
 	}
 	if err != nil {
 		return a.babysitExit(err)
@@ -436,7 +436,7 @@ func (l *loopTermReporter) Notify(title, body string) {
 }
 
 // summary prints the closing block of a run.
-func (l *loopTermReporter) summary(res *loop.Result, mergeStatus string, mergeErr error) {
+func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus string, mergeErr error) {
 	o := l.out
 	fmt.Println()
 	o.Rule()
@@ -514,8 +514,14 @@ func (l *loopTermReporter) summary(res *loop.Result, mergeStatus string, mergeEr
 		o.Row("result", o.Red("diverged; manual decision required"))
 		o.Rule()
 		l.Notify("Diverged", fmt.Sprintf("%s braucht eine manuelle Designentscheidung", babysitTargetLabel(res)))
-	default:
+	case errors.Is(runErr, loop.ErrNotConverged):
 		o.Row("result", o.Red("not converged"))
+		o.Rule()
+	case runErr != nil:
+		o.Row("result", o.Red("failed: "+runErr.Error()))
+		o.Rule()
+	default:
+		o.Row("result", o.Red("failed"))
 		o.Rule()
 	}
 }

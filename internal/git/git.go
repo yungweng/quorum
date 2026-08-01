@@ -107,11 +107,16 @@ func (g G) WorktreePrune(ctx context.Context, repoRoot string) {
 
 // Dirty reports whether the working tree has uncommitted changes.
 func (g G) Dirty(ctx context.Context, dir string) (bool, error) {
-	out, err := g.run(ctx, dir, "status", "--porcelain")
+	out, err := g.StatusPorcelain(ctx, dir)
 	if err != nil {
 		return false, err
 	}
 	return out != "", nil
+}
+
+// StatusPorcelain returns the stable, machine-readable working tree status.
+func (g G) StatusPorcelain(ctx context.Context, dir string) (string, error) {
+	return g.run(ctx, dir, "status", "--porcelain")
 }
 
 // LogOneline lists the commits in a range, one per line.
