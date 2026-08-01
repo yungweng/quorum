@@ -47,7 +47,13 @@ Options and positionals may interleave. Extra positional text becomes context
 for the fix session. Without a PR argument, quorum uses the current branch's
 open PR when one exists. With no open PR it works on the clean, pushed branch,
 runs repository checks in each fix step, confirms pushes on `origin`, and skips
-PR CI and PR comments.
+PR CI and PR comments. `--local` forces that branch mode even when an open PR
+exists, so a run can stay off the PR entirely.
+
+Draft PRs are refused unless the run says `--draft` or the config says
+`BABYSIT_DRAFTS=1`. When the branch conflicts with its base branch, the base is
+merged and the conflicts resolved through the fix session before the first
+review; `RESOLVE_CONFLICTS=0` or `--no-resolve-conflicts` turns that off.
 
 | Option | Meaning | Default |
 |---|---|---|
@@ -60,6 +66,9 @@ PR CI and PR comments.
 | `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
 | `--divergence-scan` | Analyze all rounds after the limit, write a report, then stop | off |
+| `--draft` | Work on a draft PR | off, or `BABYSIT_DRAFTS=1` |
+| `--local` | Ignore any open PR and work on the pushed branch only | off |
+| `--no-resolve-conflicts` | Do not merge the base branch on conflicts | resolution on |
 | `--sandboxed` | Use your codex sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
@@ -117,6 +126,12 @@ posting or committing something misleading.
 
 ### quorum babysit
 
+- **Draft PRs are refused** unless you pass `--draft` or set `BABYSIT_DRAFTS=1`.
+  A draft is a PR its author marked "not ready"; pushing fix commits and posting
+  comments to it needs an explicit go-ahead.
+- **A conflict resolution that did not resolve stops the run.** After the merge
+  session, the same conflict probe runs again; a merge that left conflict
+  markers or skipped a file cannot pass on the session's own say-so.
 - **The target changed an `.envrc`.** The run stops before loading it unless
   you pass `--allow-envrc-change` after reading the diff yourself.
 - **Do not push to the target branch while a run is active.** A review refuses
@@ -157,6 +172,7 @@ from the tools they replace.
 4  not converged after --max-iter rounds
 5  a fix round produced no changes although findings remain
 6  the review/fix history contains incompatible decisions
+7  merge conflicts with the base branch remain unresolved
 ```
 
 ## Configuration
@@ -205,6 +221,8 @@ FIX_TIMEOUT="2h"         # per fix step; keep it above your CI runtime
 DIVERGENCE_SCAN=0        # analyze the current run after MAX_ITER, then stop
 DIVERGENCE_ESCALATE_TO="" # users or org/team slugs to mention, without @
 SANDBOXED=0
+BABYSIT_DRAFTS=0         # 1 lets quorum babysit work on draft PRs without --draft
+RESOLVE_CONFLICTS=1      # merge the base branch and resolve conflicts before reviewing
 
 AGENT_ACTION="review"    # or "babysit"
 AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects

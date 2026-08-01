@@ -67,6 +67,13 @@ type Config struct {
 	// user's own codex config, which must allow commands, network and push or
 	// every fix round fails.
 	Sandboxed bool
+	// BabysitDrafts lets `quorum babysit` work on a draft pull request without
+	// passing --draft each time.
+	BabysitDrafts bool
+	// ResolveConflicts has babysit merge the base branch and resolve the
+	// conflicts before any review round, instead of polishing a branch that
+	// cannot land.
+	ResolveConflicts bool
 
 	// AgentAction is what the daemon does with a pull request that asks for a
 	// review: "review" posts one and stops, "babysit" runs the full fix loop.
@@ -124,9 +131,10 @@ func Default() Config {
 		ReviewTimeout: 45 * time.Minute,
 		Post:          true,
 
-		MaxIter:    12,
-		MaxCIFixes: 3,
-		FixTimeout: 2 * time.Hour,
+		MaxIter:          12,
+		MaxCIFixes:       3,
+		FixTimeout:       2 * time.Hour,
+		ResolveConflicts: true,
 
 		AgentAction:      ActionReview,
 		AutoMergeTimeout: 2 * time.Hour,
@@ -323,6 +331,10 @@ func (c *Config) set(key, value string) {
 		c.DivergenceEscalateTo = fields(value)
 	case "SANDBOXED":
 		c.Sandboxed = truthy(value)
+	case "BABYSIT_DRAFTS":
+		c.BabysitDrafts = truthy(value)
+	case "RESOLVE_CONFLICTS":
+		c.ResolveConflicts = truthy(value)
 	case "AGENT_ACTION":
 		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
 			c.AgentAction = v
@@ -463,7 +475,9 @@ func (c Config) Render() string {
 	w("DIVERGENCE_SCAN=%s\t# analyze the round history after MAX_ITER\n", bit(c.DivergenceScan))
 	w("DIVERGENCE_ESCALATE_TO=%q\t# users or org/team slugs, without @\n",
 		strings.Join(c.DivergenceEscalateTo, " "))
-	w("SANDBOXED=%s\t\t# 1 uses your codex sandbox defaults instead of bypassing them\n\n", bit(c.Sandboxed))
+	w("SANDBOXED=%s\t\t# 1 uses your codex sandbox defaults instead of bypassing them\n", bit(c.Sandboxed))
+	w("BABYSIT_DRAFTS=%s\t# 1 lets `quorum babysit` work on draft PRs without --draft\n", bit(c.BabysitDrafts))
+	w("RESOLVE_CONFLICTS=%s\t# merge the base branch and resolve conflicts before reviewing\n\n", bit(c.ResolveConflicts))
 
 	w("# What the agent does with a pull request that asks for your review:\n")
 	w("# \"review\" posts a review and stops, \"babysit\" runs the full fix loop.\n")

@@ -119,6 +119,30 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 %s`, number, MarkerComment, comment)
 }
 
+// conflictFixPrompt asks the session to merge the base branch and resolve the
+// conflicts. The direction is base into head: it keeps the branch's own
+// history intact and is the merge GitHub would attempt for the PR.
+func conflictFixPrompt(number int, base, branch string, branchOnly bool) string {
+	target := fmt.Sprintf("PR #%d", number)
+	if branchOnly {
+		target = "branch " + branch
+	}
+	prompt := fmt.Sprintf(`%s conflicts with its base branch %s and cannot be merged as it is.
+
+Merge the base into the current checkout with exactly: git merge origin/%s
+Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge %s into %s", and push.`,
+		target, base, base, base, branch)
+	if branchOnly {
+		return prompt
+	}
+	return prompt + fmt.Sprintf(`
+
+End your final message with a line that is exactly:
+%s
+followed by a short log comment for the PR: which files conflicted and how the conflicts were resolved. Write it in the language of the PR description, plain and factual, and never mention AI, agents, Codex, or automation in it. Use this marker for nothing else.`,
+		MarkerComment)
+}
+
 // commitPrompt asks the session to commit what it left in the working tree.
 const commitPrompt = `There are uncommitted changes in the worktree. Review them and commit everything that belongs to the task (git add + git commit with a descriptive message). Move disposable QA artifacts that you created to $TMPDIR or /tmp, or delete them. Do not push. Finish with an empty git status --porcelain.`
 

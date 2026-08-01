@@ -143,6 +143,16 @@ func TestLoadReportsUnparsableLines(t *testing.T) {
 	}
 }
 
+func TestBabysitDraftAndConflictDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.BabysitDrafts {
+		t.Error("drafts default to allowed; babysitting a draft must be an explicit choice")
+	}
+	if !cfg.ResolveConflicts {
+		t.Error("conflict resolution defaults to off; a conflicted branch would stall every run")
+	}
+}
+
 func TestRoundTrip(t *testing.T) {
 	want := Default()
 	want.Orgs = []string{"acme-inc", "myorg"}
@@ -163,6 +173,8 @@ func TestRoundTrip(t *testing.T) {
 	want.DivergenceScan = true
 	want.DivergenceEscalateTo = []string{"example-user", "acme/platform"}
 	want.Sandboxed = true
+	want.BabysitDrafts = true
+	want.ResolveConflicts = false
 	want.AgentAction = ActionBabysit
 	want.AutoMergeAgent = true
 	want.AutoMergeReview = true

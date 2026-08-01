@@ -320,14 +320,18 @@ func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number in
 		DivergenceEscalateTo: append([]string(nil), r.Cfg.DivergenceEscalateTo...),
 		DivergenceTimeout:    r.Cfg.ReviewTimeout,
 		Post:                 r.Cfg.Post,
-		Bypass:               !r.Cfg.Sandboxed,
-		Interactive:          false,
-		UseDirenv:            true,
-		RunsDir:              r.P.BabysitRuns,
-		ReviewRunsDir:        r.P.ReviewRuns,
-		DepsDir:              r.P.DepsCache,
-		CodexBin:             r.CodexBin,
-		DirenvBin:            r.DirenvBin,
+		// A draft only reaches the runner when SKIP_DRAFTS=0, which is the
+		// explicit opt-in the manual --draft flag provides in a terminal.
+		AllowDraft:       !r.Cfg.SkipDrafts,
+		ResolveConflicts: r.Cfg.ResolveConflicts,
+		Bypass:           !r.Cfg.Sandboxed,
+		Interactive:      false,
+		UseDirenv:        true,
+		RunsDir:          r.P.BabysitRuns,
+		ReviewRunsDir:    r.P.ReviewRuns,
+		DepsDir:          r.P.DepsCache,
+		CodexBin:         r.CodexBin,
+		DirenvBin:        r.DirenvBin,
 	})
 	if res == nil {
 		return review.Findings{}, "", "", "", err

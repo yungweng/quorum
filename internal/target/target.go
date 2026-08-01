@@ -35,9 +35,8 @@ func Resolve(
 	}
 
 	checkCheckout := branch == ""
-	var headSHA string
-	var err error
 	if checkCheckout {
+		var err error
 		branch, err = gitc.CurrentBranch(ctx, repoRoot)
 		if err != nil {
 			return Target{}, err
@@ -50,7 +49,37 @@ func Resolve(
 			return Target{PR: pr}, nil
 		}
 	}
+	return resolveBranch(ctx, ghc, gitc, repoRoot, branch, baseBranch, checkCheckout)
+}
 
+// ResolveLocal resolves the current pushed branch as a branch-only target and
+// deliberately never asks whether it has an open pull request: a local run
+// must leave the PR alone even when one exists. The checkout safety checks
+// still run.
+func ResolveLocal(
+	ctx context.Context,
+	ghc *gh.Client,
+	gitc git.G,
+	repoRoot string,
+	baseBranch string,
+) (Target, error) {
+	branch, err := gitc.CurrentBranch(ctx, repoRoot)
+	if err != nil {
+		return Target{}, err
+	}
+	return resolveBranch(ctx, ghc, gitc, repoRoot, branch, baseBranch, true)
+}
+
+// resolveBranch builds the branch-only target both entry points share.
+func resolveBranch(
+	ctx context.Context,
+	ghc *gh.Client,
+	gitc git.G,
+	repoRoot string,
+	branch string,
+	baseBranch string,
+	checkCheckout bool,
+) (Target, error) {
 	if baseBranch == "" {
 		var err error
 		baseBranch, err = ghc.DefaultBranch(ctx, repoRoot)
@@ -62,11 +91,9 @@ func Resolve(
 		return Target{}, fmt.Errorf("branch %s is the base branch; there is no branch diff to review", branch)
 	}
 
-	if headSHA == "" {
-		headSHA, err = pushedHead(ctx, gitc, repoRoot, branch)
-		if err != nil {
-			return Target{}, err
-		}
+	headSHA, err := pushedHead(ctx, gitc, repoRoot, branch)
+	if err != nil {
+		return Target{}, err
 	}
 	baseSHA, err := gitc.LsRemote(ctx, repoRoot, "origin", "refs/heads/"+baseBranch)
 	if err != nil {

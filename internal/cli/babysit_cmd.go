@@ -24,6 +24,7 @@ import (
 var babysitBoolFlags = map[string]bool{
 	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
 	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true, "divergence-scan": true,
+	"draft": true, "local": true, "no-resolve-conflicts": true,
 	"h": true, "help": true,
 }
 
@@ -68,6 +69,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	if err != nil {
 		return a.die("%v", err)
 	}
+	if args.boolean("local") && number > 0 {
+		return a.die("--local works on the current branch; do not pass a PR")
+	}
 
 	o := loop.Options{
 		Repo: repo, RepoRoot: repoRoot, Number: number,
@@ -85,6 +89,9 @@ func (a *app) cmdBabysit(argv []string) int {
 		CodexBin:             t.Codex,
 		DirenvBin:            t.Direnv,
 		Post:                 a.cfg.Post,
+		AllowDraft:           a.cfg.BabysitDrafts || args.boolean("draft"),
+		Local:                args.boolean("local"),
+		ResolveConflicts:     a.cfg.ResolveConflicts && !args.boolean("no-resolve-conflicts"),
 		DivergenceScan:       a.cfg.DivergenceScan || args.boolean("divergence-scan"),
 		DivergenceEscalateTo: slices.Clone(a.cfg.DivergenceEscalateTo),
 		DivergenceTimeout:    a.cfg.ReviewTimeout,
@@ -151,13 +158,19 @@ func (a *app) cmdBabysit(argv []string) int {
 	mergeStatus := ""
 	var mergeErr error
 	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMergeBabysit, a.cfg.Post, res.LastFindings) {
-		mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
-		mergeStatus, mergeErr = mergeResult.Status, finishErr
-		if mergeErr == nil && mergeStatus == automerge.ApprovalRequired {
-			a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
-		}
-		if mergeErr != nil {
-			err = mergeErr
+		if res.PR.IsDraft {
+			// The auto-merge path refuses drafts outright; a converged draft
+			// run must not turn that refusal into a failure of the whole run.
+			rep.Info("auto-merge: skipped, the PR is a draft")
+		} else {
+			mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
+			mergeStatus, mergeErr = mergeResult.Status, finishErr
+			if mergeErr == nil && mergeStatus == automerge.ApprovalRequired {
+				a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
+			}
+			if mergeErr != nil {
+				err = mergeErr
+			}
 		}
 	}
 
@@ -260,6 +273,8 @@ func (a *app) babysitExit(err error) int {
 		return exitNoProgress
 	case errors.Is(err, loop.ErrDiverged):
 		return exitDiverged
+	case errors.Is(err, loop.ErrConflicts):
+		return exitConflicts
 	default:
 		return exitError
 	}
@@ -273,6 +288,11 @@ Runs the review-fix cycle until a review reports zero Blockers and Critical
 findings. Without a PR argument, quorum uses the open PR for the current branch
 when one exists. Otherwise it works on the pushed branch and skips PR CI and PR
 comments. Extra positional text becomes context for the fix session.
+
+Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. When the
+branch conflicts with its base, the base is merged and the conflicts resolved
+before the first review; RESOLVE_CONFLICTS=0 or --no-resolve-conflicts turns
+that off.
 
 The fix sessions run with --dangerously-bypass-approvals-and-sandbox by
 default: they must run tests, use gh and push, all unattended. Pass
@@ -288,6 +308,10 @@ Options:
   --max-ci-fixes N       Max PR CI fix attempts per green-CI phase. Default: %d
   --fix-timeout DUR      Kill a fix step that runs longer. Default: %s
   --divergence-scan      Analyze the round history after --max-iter, then stop
+  --draft                Work on a draft PR (standing default: BABYSIT_DRAFTS=1)
+  --local                Ignore any open PR: review and fix the pushed branch,
+                         post nothing to GitHub
+  --no-resolve-conflicts Do not merge the base branch when the branch conflicts
   --sandboxed            Use your codex sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line
@@ -303,6 +327,7 @@ Exit codes:
   4  review not converged after --max-iter rounds
   5  a fix round produced no changes although findings remain
   6  the review/fix history contains incompatible decisions
+  7  merge conflicts with the base branch remain unresolved
 `, a.cfg.Reviewers, a.cfg.ReviewModel, a.cfg.ReviewEffort,
 		a.cfg.MaxIter, a.cfg.MaxCIFixes, durationText(a.cfg.FixTimeout))
 }
@@ -318,10 +343,13 @@ type loopTermReporter struct {
 func (l *loopTermReporter) Header(h loop.Header) {
 	o := l.out
 	o.Rule()
-	if h.BranchOnly {
+	switch {
+	case h.Local:
+		o.Row("target", o.Bold(h.Branch)+o.Dim("  ·  local run, any open PR is left alone"))
+	case h.BranchOnly:
 		o.Row("target", o.Bold(h.Branch)+o.Dim("  ·  no open PR"))
-	} else {
-		o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)))
+	default:
+		o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title))+draftTag(o, h.Draft))
 	}
 	o.Row("repo", h.Repo)
 	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
@@ -440,9 +468,12 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 	o := l.out
 	fmt.Println()
 	o.Rule()
-	if res.BranchOnly {
+	switch {
+	case res.Local:
+		o.Row("target", o.Bold(res.PR.HeadRefName)+o.Dim("  ·  local run, any open PR was left alone"))
+	case res.BranchOnly:
 		o.Row("target", o.Bold(res.PR.HeadRefName)+o.Dim("  ·  no open PR"))
-	} else {
+	default:
 		o.Row("pr", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+"  "+o.Link(o.Blue(res.PR.URL), res.PR.URL))
 	}
 	o.Row("branch", res.PR.HeadRefName)

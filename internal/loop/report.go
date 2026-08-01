@@ -15,6 +15,8 @@ type Header struct {
 	Branch         string
 	Base           string
 	BranchOnly     bool
+	Draft          bool
+	Local          bool
 	Model          string
 	Effort         string
 	Bypass         bool

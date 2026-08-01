@@ -19,12 +19,13 @@ const ProgressFile = "progress.json"
 // not always the only thing happening: the first review runs in the background
 // while the pipeline waits out the initial CI.
 const (
-	PhaseStarting   = "starting"
-	PhaseCI         = "ci"
-	PhaseReview     = "review"
-	PhaseFix        = "fix"
-	PhaseCIFix      = "ci-fix"
-	PhaseDivergence = "divergence"
+	PhaseStarting    = "starting"
+	PhaseCI          = "ci"
+	PhaseReview      = "review"
+	PhaseFix         = "fix"
+	PhaseCIFix       = "ci-fix"
+	PhaseConflictFix = "conflict-fix"
+	PhaseDivergence  = "divergence"
 )
 
 // Check states the progress file records. Empty means nothing is known yet.
