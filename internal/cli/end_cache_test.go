@@ -17,11 +17,13 @@ func TestEndStateCacheRoundTripsOnlyKnownStates(t *testing.T) {
 	want := map[string]string{
 		"acme/api#1": gh.StateMerged,
 		"acme/api#2": gh.StateOpen,
+		"acme/api#4": gh.StateUnavailable,
 	}
 	withInvalid := map[string]string{
 		"acme/api#1": gh.StateMerged,
 		"acme/api#2": gh.StateOpen,
 		"acme/api#3": "NOT_A_GITHUB_STATE",
+		"acme/api#4": gh.StateUnavailable,
 	}
 	if err := writeEndStateCache(path, withInvalid); err != nil {
 		t.Fatal(err)

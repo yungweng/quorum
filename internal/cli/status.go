@@ -464,7 +464,7 @@ func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]strin
 			continue
 		}
 		switch ends[e.Key] {
-		case gh.StateMerged, gh.StateClosed:
+		case gh.StateMerged, gh.StateClosed, gh.StateUnavailable:
 			continue
 		case gh.StateOpen, gh.StateAutoMerge:
 			if len(out) < openLimit {

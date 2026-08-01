@@ -76,7 +76,7 @@ func writeEndStateCache(path string, states map[string]string) error {
 
 func validEndState(state string) bool {
 	switch state {
-	case gh.StateOpen, gh.StateAutoMerge, gh.StateClosed, gh.StateMerged:
+	case gh.StateOpen, gh.StateAutoMerge, gh.StateClosed, gh.StateMerged, gh.StateUnavailable:
 		return true
 	default:
 		return false

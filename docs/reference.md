@@ -303,11 +303,11 @@ in the order the questions get asked:
   newest first, at most ten of them, with what the review found and a link to
   the comment. `auto-merge queued` means GitHub is waiting on branch rules or a
   merge queue; the other entries still need a person. A pull request drops out
-  when GitHub reports it merged or closed, while it is being reviewed again,
-  and two weeks after its last review. The two weeks matter because the state
-  file keeps two hundred records and most of them describe pull requests that
-  were merged long ago; where GitHub has not been asked, age is the only thing
-  the dashboard knows.
+  when GitHub reports it merged or closed, when GitHub no longer exposes its
+  repository or PR, while it is being reviewed again, and two weeks after its
+  last review. The two weeks matter because the state file keeps two hundred
+  records and most of them describe pull requests that were merged long ago;
+  where GitHub has not been asked, age is the only thing the dashboard knows.
 - **ACTIVE** is everything in flight, agent and terminal alike. Its count covers
   agent slots only.
 - **HISTORY** is one line per pull request, newest first, reporting its newest

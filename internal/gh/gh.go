@@ -80,11 +80,15 @@ func looksTransient(s string) bool {
 }
 
 // run executes gh and returns stdout. A transient failure is retried with a
-// linear backoff and finally reported wrapped in ErrTransient.
+// linear backoff and finally reported wrapped in ErrTransient. A failed command
+// may still return stdout: GraphQL uses partial JSON responses when one field
+// fails, and callers that understand those responses must be able to inspect
+// them. All other callers discard stdout when err is non-nil.
 func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	attempts := max(c.Attempts, 1)
 
 	var lastErr error
+	var lastOut []byte
 	for attempt := 1; attempt <= attempts; attempt++ {
 		runCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 		cmd := exec.CommandContext(runCtx, c.Bin, args...)
@@ -93,9 +97,10 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 		cmd.Stderr = &stderr
 		err := cmd.Run()
 		cancel()
+		lastOut = bytes.Clone(stdout.Bytes())
 
 		if err == nil {
-			return stdout.Bytes(), nil
+			return lastOut, nil
 		}
 
 		msg := strings.TrimSpace(stderr.String())
@@ -104,7 +109,7 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 		}
 		// A killed context is the caller shutting us down, not a GitHub problem.
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("gh %s: %w", args[0], ctx.Err())
+			return lastOut, fmt.Errorf("gh %s: %w", args[0], ctx.Err())
 		}
 		// cancel() has already run, so runCtx.Err() is non-nil either way. Only
 		// DeadlineExceeded means the command really ran out of time; Canceled
@@ -115,7 +120,7 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 		lastErr = fmt.Errorf("gh %s: %s", strings.Join(args, " "), firstLine(msg))
 
 		if !looksTransient(msg) {
-			return nil, lastErr
+			return lastOut, lastErr
 		}
 		if attempt < attempts {
 			wait := time.Duration(attempt) * c.Backoff
@@ -127,7 +132,7 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("%w: %v", ErrTransient, lastErr)
+	return lastOut, fmt.Errorf("%w: %v", ErrTransient, lastErr)
 }
 
 func firstLine(s string) string {
@@ -324,12 +329,14 @@ func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headS
 	}, nil
 }
 
-// The states a pull request can be in, as GitHub spells them.
+// Pull request states returned to dashboard callers. The first four are
+// GitHub states; UNAVAILABLE records a missing repository or pull request.
 const (
-	StateOpen      = "OPEN"
-	StateAutoMerge = "AUTO_MERGE"
-	StateClosed    = "CLOSED"
-	StateMerged    = "MERGED"
+	StateOpen        = "OPEN"
+	StateAutoMerge   = "AUTO_MERGE"
+	StateClosed      = "CLOSED"
+	StateMerged      = "MERGED"
+	StateUnavailable = "UNAVAILABLE"
 )
 
 // safeRepo matches the owner/name shapes GitHub actually allows. Repository
@@ -375,10 +382,7 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		return map[string]string{}, nil
 	}
 
-	out, err := c.run(ctx, "api", "graphql", "-f", "query="+q.String())
-	if err != nil {
-		return nil, err
-	}
+	out, runErr := c.run(ctx, "api", "graphql", "-f", "query="+q.String())
 	var resp struct {
 		Data map[string]*struct {
 			PullRequest *struct {
@@ -387,21 +391,49 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 				MergeQueueEntry  json.RawMessage `json:"mergeQueueEntry"`
 			} `json:"pullRequest"`
 		} `json:"data"`
+		Errors []struct {
+			Type    string   `json:"type"`
+			Path    []string `json:"path"`
+			Message string   `json:"message"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
+		if runErr != nil {
+			return nil, runErr
+		}
 		return nil, fmt.Errorf("gh api graphql: %w", err)
+	}
+	aliases := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		aliases[t.alias] = true
+	}
+	for _, graphErr := range resp.Errors {
+		missingRepo := graphErr.Type == "NOT_FOUND" && len(graphErr.Path) == 1 &&
+			aliases[graphErr.Path[0]] && resp.Data[graphErr.Path[0]] == nil
+		if !missingRepo {
+			if runErr != nil {
+				return nil, runErr
+			}
+			return nil, fmt.Errorf("gh api graphql: %s", graphErr.Message)
+		}
+	}
+	if runErr != nil && len(resp.Errors) == 0 {
+		return nil, runErr
 	}
 	states := make(map[string]string, len(targets))
 	for _, t := range targets {
-		// A repository that has gone away answers null, which is not an error
-		// worth failing the whole batch over: the other pull requests are fine.
-		if node := resp.Data[t.alias]; node != nil && node.PullRequest != nil {
-			state := node.PullRequest.State
-			if state == StateOpen && (present(node.PullRequest.AutoMergeRequest) || present(node.PullRequest.MergeQueueEntry)) {
-				state = StateAutoMerge
-			}
-			states[t.key] = state
+		// A deleted or inaccessible repository answers null. Record that fact so
+		// the dashboard drops a stale OPEN value instead of checking forever.
+		node := resp.Data[t.alias]
+		if node == nil || node.PullRequest == nil {
+			states[t.key] = StateUnavailable
+			continue
 		}
+		state := node.PullRequest.State
+		if state == StateOpen && (present(node.PullRequest.AutoMergeRequest) || present(node.PullRequest.MergeQueueEntry)) {
+			state = StateAutoMerge
+		}
+		states[t.key] = state
 	}
 	return states, nil
 }

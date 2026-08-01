@@ -366,23 +366,24 @@ func TestDashboardShowsPRAuthorInEverySection(t *testing.T) {
 	}
 }
 
-// Once it is merged or closed there is nothing left to do about it, and the
-// history section already records that it happened.
-func TestOpenSectionDropsMergedAndClosedPullRequests(t *testing.T) {
+// Once it is merged, closed or no longer available there is nothing left to do
+// about it, and the history section already records that it happened.
+func TestOpenSectionDropsFinishedAndUnavailablePullRequests(t *testing.T) {
 	a := testApp(t)
-	for _, key := range []string{"acme/api#42", "acme/api#43", "acme/api#44"} {
+	for _, key := range []string{"acme/api#42", "acme/api#43", "acme/api#44", "acme/api#45"} {
 		record(t, a, key, func(r *state.Record) { r.Mark(state.OK, "") })
 	}
 	ends := map[string]string{
 		"acme/api#42": gh.StateMerged,
 		"acme/api#43": gh.StateClosed,
 		"acme/api#44": gh.StateOpen,
+		"acme/api#45": gh.StateUnavailable,
 	}
 
 	screen, _ := render(t, a, ends)
 	open := sectionOf(t, screen, "OPEN")
-	if strings.Contains(open, "api #42") || strings.Contains(open, "api #43") {
-		t.Errorf("a merged or closed pull request stayed in the open section:\n%s", screen)
+	if strings.Contains(open, "api #42") || strings.Contains(open, "api #43") || strings.Contains(open, "api #45") {
+		t.Errorf("a finished or unavailable pull request stayed in the open section:\n%s", screen)
 	}
 	if !strings.Contains(open, "api #44") {
 		t.Errorf("the open pull request is missing:\n%s", screen)

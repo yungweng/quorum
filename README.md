@@ -247,8 +247,9 @@ OPEN lists pull requests quorum has reviewed that are still open, newest first,
 with what the review found. The bullet is red for blockers, yellow for critical
 findings and green for neither. A PR waiting on GitHub's Auto-Merge or merge
 queue says `auto-merge queued`; the others still need a person. A pull request
-leaves the section when it is merged or closed, when it is being reviewed again
-(ACTIVE has it then), and two weeks after its last review.
+leaves the section when it is merged, closed or no longer available on GitHub,
+when it is being reviewed again (ACTIVE has it then), and two weeks after its
+last review.
 
 ACTIVE is everything in flight: reviews the agent started, reviews you started
 in a terminal, fix loops, and what is waiting for a slot. The symbol and the

@@ -470,17 +470,43 @@ func TestPRStatesRecognisesMergeQueueEntry(t *testing.T) {
 // A repository that has gone away answers null. The other pull requests in the
 // same batch must still come back.
 func TestPRStatesSurvivesAMissingRepository(t *testing.T) {
-	bin, _ := fakeGH(t, `echo '{"data":{"p0":null,"p1":{"pullRequest":{"state":"MERGED"}}}}'`)
+	bin, _ := fakeGH(t, `cat <<'JSON'
+{"data":{"p0":null,"p1":{"pullRequest":{"state":"MERGED"}}},"errors":[{"type":"NOT_FOUND","path":["p0"],"message":"repository not found"}]}
+JSON
+echo 'gh: repository not found' >&2
+exit 1`)
 	got, err := testClient(bin).PRStates(context.Background(),
 		[]string{"gone/away#1", "acme/api#2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := got["gone/away#1"]; ok {
-		t.Error("a null repository produced a state")
+	if got["gone/away#1"] != StateUnavailable {
+		t.Errorf("gone/away#1 = %q, want UNAVAILABLE", got["gone/away#1"])
 	}
 	if got["acme/api#2"] != StateMerged {
 		t.Errorf("acme/api#2 = %q, want MERGED", got["acme/api#2"])
+	}
+}
+
+func TestPRStatesRejectsOtherPartialGraphQLErrors(t *testing.T) {
+	bin, _ := fakeGH(t, `cat <<'JSON'
+{"data":{"p0":null},"errors":[{"type":"FORBIDDEN","path":["p0"],"message":"permission denied"}]}
+JSON
+echo 'gh: permission denied' >&2
+exit 1`)
+	if _, err := testClient(bin).PRStates(context.Background(), []string{"acme/api#42"}); err == nil {
+		t.Fatal("a forbidden GraphQL field was reported as success")
+	}
+}
+
+func TestPRStatesRejectsNotFoundBelowRepository(t *testing.T) {
+	bin, _ := fakeGH(t, `cat <<'JSON'
+{"data":{"p0":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["p0","pullRequest"],"message":"field not found"}]}
+JSON
+echo 'gh: field not found' >&2
+exit 1`)
+	if _, err := testClient(bin).PRStates(context.Background(), []string{"acme/api#42"}); err == nil {
+		t.Fatal("an unexpected nested NOT_FOUND was reported as a missing repository")
 	}
 }
 
