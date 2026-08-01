@@ -133,8 +133,11 @@ type RoundEntry struct {
 
 // Result is what a finished pipeline run produced.
 type Result struct {
-	PR              gh.FullPR
-	BranchOnly      bool
+	PR         gh.FullPR
+	BranchOnly bool
+	// Local records that the run deliberately ignored any open PR, so the
+	// summary can say "local run" instead of claiming there is no PR.
+	Local           bool
 	Rounds          int
 	Converged       bool
 	DisputeAccepted bool
@@ -412,7 +415,7 @@ func refuseDraft(pr gh.FullPR, branchOnly, allow bool) error {
 
 // execute is the main loop.
 func (r *run) execute() (*Result, error) {
-	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, RunDir: r.root}
+	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, Local: r.o.Local, RunDir: r.root}
 	if r.o.DivergenceScan {
 		r.startDivergenceTrace()
 	}

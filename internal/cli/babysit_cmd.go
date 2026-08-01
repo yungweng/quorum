@@ -468,9 +468,12 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 	o := l.out
 	fmt.Println()
 	o.Rule()
-	if res.BranchOnly {
+	switch {
+	case res.Local:
+		o.Row("target", o.Bold(res.PR.HeadRefName)+o.Dim("  ·  local run, any open PR was left alone"))
+	case res.BranchOnly:
 		o.Row("target", o.Bold(res.PR.HeadRefName)+o.Dim("  ·  no open PR"))
-	} else {
+	default:
 		o.Row("pr", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+"  "+o.Link(o.Blue(res.PR.URL), res.PR.URL))
 	}
 	o.Row("branch", res.PR.HeadRefName)
