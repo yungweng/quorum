@@ -150,10 +150,15 @@ func (a *app) cmdReview(argv []string) int {
 			return a.reviewExit(mergeErr)
 		}
 		mergeStatus = mergeResult.Status
-		a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus))
+		if mergeStatus == automerge.ApprovalRequired {
+			a.out.Printf("auto-merge: %s\n", a.out.Yellow(mergeStatus))
+			a.notifyApprovalRequired(notify, repo, number, "")
+		} else {
+			a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus))
+		}
 	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
-	if notify {
+	if notify && mergeStatus != automerge.ApprovalRequired {
 		rep.mu.Lock()
 		branch := rep.branch
 		rep.mu.Unlock()
@@ -259,7 +264,7 @@ Options:
   --min-successful N       Reviewer outputs required. Default: a majority
   --no-direnv              Skip direnv
   --allow-envrc-change     Allow direnv allow when the target changed .envrc
-  --no-notify              No terminal notification when the run finishes
+  --no-notify              Disable completion and action notifications
   -h, --help               Show this help
 
 Exit codes:

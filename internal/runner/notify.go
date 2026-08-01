@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+
+	macnotify "github.com/yungweng/quorum/internal/notify"
 )
 
 // notify uses the terminal for foreground runs and terminal-notifier for the
@@ -28,6 +30,23 @@ func (r *Runner) notify(title, body, url string) {
 	}
 	if err := cmd.Run(); err != nil {
 		r.logNotificationError(err)
+	}
+}
+
+// notifyApprovalRequired always uses Notification Center, including for a
+// foreground run. Its per-PR group is not replaced by routine completion
+// notifications, so the action stays visible until the user dismisses it.
+func (r *Runner) notifyApprovalRequired(repo string, number int) {
+	if !r.Cfg.Notify {
+		return
+	}
+	url := fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
+	if err := macnotify.ApprovalRequired(repo, number, url); err != nil {
+		r.logNotificationError(err)
+		if r.TerminalNotify != nil {
+			r.TerminalNotify("quorum: approval required",
+				fmt.Sprintf("%s#%d is clean. Ask another reviewer to approve it.", repo, number))
+		}
 	}
 }
 

@@ -49,9 +49,11 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 `quorum --version`.
 
 Requires `gh` (authenticated), `git` and `codex`. `terminal-notifier` sends
-notifications from detached macOS agent runs; foreground commands notify
-through the terminal itself. `direnv` is optional and only needed for projects
-that have an `.envrc`.
+notifications from detached macOS agent runs. Foreground commands normally
+notify through the terminal. When an own pull request needs another person's
+approval, quorum leaves a dedicated macOS Notification Center item that later
+completion notifications cannot replace. `direnv` is optional and only needed
+for projects that have an `.envrc`.
 
 `make install-hooks` is needed once per clone and after a tracked hook changes.
 It copies the reviewed hooks into the clone's untracked Git directory and sets
@@ -153,10 +155,12 @@ AUTO_MERGE_TIMEOUT="2h"
 A clean posted PR review has no Blockers or Critical findings; Suggestions and
 Questions are allowed. Quorum approves the exact reviewed commit, then asks
 GitHub to merge it with a merge commit after the repository's branch rules
-pass. It never uses administrator privileges. A moved head, an own PR, a local
-report (`POST=0` or `--dry-run`), a branch without a PR, and a target branch
-that requires a merge queue are not merged. Repositories with merge commits
-disabled are rejected before approval.
+pass. It never uses administrator privileges. For an own PR, quorum skips both
+approval and merge, reports `awaiting approval`, and leaves a dedicated macOS
+Notification Center item. A moved head, a local report (`POST=0` or
+`--dry-run`), a branch without a PR, and a target branch that requires a merge
+queue are not merged. Repositories with merge commits disabled are rejected
+before approval.
 
 The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
 The other two settings apply only to the matching command started in a

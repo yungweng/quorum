@@ -162,8 +162,14 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		switch mergeStatus {
 		case automerge.Merged:
 			note += "; merged"
+		case automerge.ApprovalRequired:
+			note += "; awaiting approval"
 		}
-		r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
+		if mergeStatus == automerge.ApprovalRequired {
+			r.notifyApprovalRequired(repo, number)
+		} else {
+			r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
+		}
 		return nil
 	}
 

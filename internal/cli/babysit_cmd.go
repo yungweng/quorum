@@ -153,6 +153,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMergeBabysit, a.cfg.Post, res.LastFindings) {
 		mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
 		mergeStatus, mergeErr = mergeResult.Status, finishErr
+		if mergeErr == nil && mergeStatus == automerge.ApprovalRequired {
+			a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
+		}
 		if mergeErr != nil {
 			err = mergeErr
 		}
@@ -288,7 +291,7 @@ Options:
   --sandboxed            Use your codex sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line
-  --no-notify            Disable terminal notifications
+  --no-notify            Disable completion and action notifications
   --no-direnv            Skip direnv
   --allow-envrc-change   Allow direnv allow when the target changed .envrc
   --keep-worktree        Keep the worktree after success
@@ -500,9 +503,13 @@ func (l *loopTermReporter) summary(res *loop.Result, mergeStatus string, mergeEr
 		switch mergeStatus {
 		case automerge.Merged:
 			o.Row("auto-merge", o.Green("merged"))
+		case automerge.ApprovalRequired:
+			o.Row("auto-merge", o.Yellow(automerge.ApprovalRequired))
 		}
 		o.Rule()
-		l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
+		if mergeStatus != automerge.ApprovalRequired {
+			l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
+		}
 	case res.Divergence != nil && res.Divergence.Verdict == loop.DivergenceDiverged:
 		o.Row("result", o.Red("diverged; manual decision required"))
 		o.Rule()

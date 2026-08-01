@@ -21,7 +21,8 @@ const failureDismissalBody = "Automatic merge did not complete, so this approval
 const approvalCleanupTimeout = 30 * time.Second
 
 const (
-	Merged = "merged"
+	Merged           = "merged"
+	ApprovalRequired = "awaiting approval"
 )
 
 // ErrMergeNotReady means GitHub refused the exact-head merge because branch
@@ -67,6 +68,14 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		}
 		return result, err
 	}
+	login, err := client.Login(ctx)
+	if err != nil {
+		return result, err
+	}
+	if strings.EqualFold(pr.Author.Login, login) {
+		result.Status = ApprovalRequired
+		return result, nil
+	}
 	if pr.BaseRefName != "" {
 		requiresQueue, mergeCommitAllowed, err := client.MergePolicy(ctx, repo, number, reviewedSHA)
 		if err != nil {
@@ -78,14 +87,6 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		if !mergeCommitAllowed {
 			return result, fmt.Errorf("refusing auto-merge: repository %s does not allow merge commits", repo)
 		}
-	}
-
-	login, err := client.Login(ctx)
-	if err != nil {
-		return result, err
-	}
-	if strings.EqualFold(pr.Author.Login, login) {
-		return result, fmt.Errorf("cannot approve your own pull request %s#%d", repo, number)
 	}
 
 	reviews, err := client.Reviews(ctx, repo, number)

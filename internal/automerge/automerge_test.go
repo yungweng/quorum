@@ -154,7 +154,8 @@ func TestRunRejectsMergeQueueBeforeApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  2) echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}' ;;
 esac`)
 	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err == nil || !strings.Contains(err.Error(), "requires a merge queue") {
@@ -170,7 +171,8 @@ func TestRunRejectsDisabledMergeCommitsBeforeApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
-  2) echo '{"data":{"repository":{"mergeCommitAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":false}}}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '{"data":{"repository":{"mergeCommitAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":false}}}}' ;;
 esac`)
 	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
 	if err == nil || !strings.Contains(err.Error(), "does not allow merge commits") {
@@ -530,18 +532,21 @@ esac`)
 	}
 }
 
-func TestRunRejectsOwnPullRequest(t *testing.T) {
+func TestRunLeavesOwnPullRequestAwaitingApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"reviewer"}}' ;;
   2) echo 'reviewer' ;;
 esac`)
-	_, err := Run(context.Background(), client, "acme/api", 42, "abc123")
-	if err == nil || !strings.Contains(err.Error(), "your own pull request") {
-		t.Fatalf("err = %v", err)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != ApprovalRequired || result.ApprovalAttempted || result.ApprovalCreated {
+		t.Fatalf("result = %+v", result)
 	}
 	args := readArgs(t, argsFile)
-	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
+	if strings.Contains(args, "graphql") || strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("own PR reached a side effect:\n%s", args)
 	}
 }

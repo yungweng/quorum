@@ -31,7 +31,7 @@ match `origin`. Run the command from inside that repository's checkout.
 | `--min-successful N` | Reviewer outputs required to post | a majority |
 | `--no-direnv` | Skip direnv | off |
 | `--allow-envrc-change` | Allow `direnv allow` when the target changed `.envrc` | off |
-| `--no-notify` | No terminal notification when the run finishes | off |
+| `--no-notify` | Disable completion and action notifications | off |
 | `-h`, `--help` | Show the help | |
 
 `--post`, `--cleanup` and `--allow-base-drift` are accepted and do nothing. They
@@ -63,7 +63,7 @@ PR CI and PR comments.
 | `--sandboxed` | Use your codex sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
-| `--no-notify` | Disable terminal notifications | off |
+| `--no-notify` | Disable completion and action notifications | off |
 | `--no-direnv` | Skip direnv | off |
 | `--allow-envrc-change` | Allow `direnv allow` when the target changed `.envrc` | off |
 | `--keep-worktree` | Keep the worktree after success | off |
@@ -207,7 +207,7 @@ AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects
 AUTO_MERGE_REVIEW=0      # manual quorum review runs
 AUTO_MERGE_BABYSIT=0     # manual quorum babysit runs
 AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
-NOTIFY=1                 # terminal; detached macOS runs need terminal-notifier
+NOTIFY=1                 # terminal; macOS system alerts need terminal-notifier
 ```
 
 Durations accept a bare number of seconds or a value like `30m`, `45m`, `2h`.
@@ -241,14 +241,17 @@ request that could survive a later push. Target branches that require a merge
 queue are rejected before approval. Quorum never
 disables an existing auto-merge or merge-queue request because it cannot prove
 who created it. Repositories with merge commits disabled are also rejected
-before approval. It does not merge an own PR, a moved head, a branch-only run,
-`POST=0`, `--dry-run`, or an accepted dispute whose last review still contains
-Blockers or Critical findings.
+before approval. For an own PR, quorum skips approval and merge, reports
+`awaiting approval`, and leaves a per-PR macOS Notification Center item that
+routine completion notifications cannot replace. It does not merge a moved
+head, a branch-only run, `POST=0`, `--dry-run`, or an accepted dispute whose
+last review still contains Blockers or Critical findings.
 
 If branch requirements are still pending, Auto-Merge fails instead of queuing a
-persistent request. An Auto-Merge failure returns exit code 1. Agent runs record
-the review request as handled, so a failure after a successful review does not
-spend tokens repeating that review.
+persistent request. An Auto-Merge failure returns exit code 1. An own PR that
+is awaiting approval is a successful review, not an Auto-Merge failure. Agent
+runs record the review request as handled, so a failure after a successful
+review does not spend tokens repeating that review.
 
 ### Keeping the machine usable
 
