@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,9 @@ func (a *app) cmdGC(args []string) int {
 			dry = true
 		}
 	}
+	// Asked for by hand, so it must not answer from a remembered measurement.
+	// Forget it and walk the cache as it is now.
+	a.forgetCacheSize()
 	freed, removed, err := a.collect(dry)
 	if err != nil {
 		return a.die("cache collection: %v", err)
@@ -72,13 +76,69 @@ const cacheSizeTTL = time.Minute
 // bounded by how many repositories you review rather than by how often.
 func (a *app) cacheSize() int64 {
 	if time.Since(a.cacheAt) > cacheSizeTTL {
-		a.setCacheSize(a.measureCache())
+		a.rememberCacheSize(a.measureCache())
 	}
 	return a.cacheBytes
 }
 
 func (a *app) setCacheSize(n int64) {
 	a.cacheBytes, a.cacheAt = n, time.Now()
+}
+
+// rememberedSizeTTL is how long a measurement written by a previous process is
+// trusted. cacheSizeTTL only helps within one process, and the agent is a new
+// process every poll, so without the file every poll walked the whole cache;
+// on a cache of a couple of hundred thousand files that took polls past their
+// own interval. Ten minutes of staleness costs at most a few runs' worth of
+// growth before the budget is enforced again, which the budget's purpose,
+// keeping days of use from filling the disk, does not notice.
+const rememberedSizeTTL = 10 * time.Minute
+
+func (a *app) rememberedSizePath() string {
+	return filepath.Join(a.p.StateDir, "cache-size")
+}
+
+// rememberCacheSize keeps a measurement for this process and writes it down
+// for the next one.
+func (a *app) rememberCacheSize(n int64) {
+	a.setCacheSize(n)
+	line := time.Now().Format(time.RFC3339) + " " + strconv.FormatInt(n, 10) + "\n"
+	if err := os.WriteFile(a.rememberedSizePath(), []byte(line), 0o644); err != nil {
+		a.log.Printf("could not remember the cache size: %v", err)
+	}
+}
+
+// rememberedCacheSize reads the measurement a previous process left, if there
+// is one recent enough to trust. Anything unreadable counts as absent: the
+// answer to a broken file is a fresh walk, not an error.
+func (a *app) rememberedCacheSize() (int64, bool) {
+	data, err := os.ReadFile(a.rememberedSizePath())
+	if err != nil {
+		return 0, false
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 {
+		return 0, false
+	}
+	at, err := time.Parse(time.RFC3339, fields[0])
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	if age := time.Since(at); age < 0 || age > rememberedSizeTTL {
+		return 0, false
+	}
+	return n, true
+}
+
+// forgetCacheSize drops both copies of the measurement, so the next reader
+// walks the cache as it is now.
+func (a *app) forgetCacheSize() {
+	a.cacheBytes, a.cacheAt = 0, time.Time{}
+	os.Remove(a.rememberedSizePath())
 }
 
 // measureCache walks everything the budget covers.
@@ -240,10 +300,15 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		}
 		return 0, 0, err
 	}
-	// Measuring a cold cache can take minutes. Do that read-only work before
-	// taking the startup lock so a run is not held up when the cache already
-	// fits its budget.
-	a.setCacheSize(a.measureCache())
+	// Measuring a cold cache can take minutes, and the agent gets here every
+	// poll. A recent measurement from a previous process answers the usual
+	// question, is the cache still under its budget, without another walk;
+	// anything that goes on to delete re-measures fresh under the lock below.
+	if size, ok := a.rememberedCacheSize(); ok {
+		a.setCacheSize(size)
+	} else {
+		a.rememberCacheSize(a.measureCache())
+	}
 	if a.cacheBytes <= limit {
 		return 0, 0, nil
 	}
@@ -259,7 +324,7 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 
 	// Another collector may have changed the cache before this acquired the
 	// lock. Measure again rather than deleting against the stale total above.
-	a.setCacheSize(a.measureCache())
+	a.rememberCacheSize(a.measureCache())
 	total := a.cacheBytes
 	if total <= limit {
 		return 0, 0, nil
@@ -267,7 +332,7 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	// What survives is the new total, so the next reader does not walk again.
 	// A dry run leaves the disk alone, so it must leave the number alone too.
 	if !dry {
-		defer func() { a.setCacheSize(total) }()
+		defer func() { a.rememberCacheSize(total) }()
 	}
 
 	runs := a.runDirs()

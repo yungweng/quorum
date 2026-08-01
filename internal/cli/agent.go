@@ -13,6 +13,11 @@ import (
 
 // The launchd job. AbandonProcessGroup matters: reviews outlive the poll that
 // started them, and without it launchd kills the whole group when poll exits.
+// Deliberately neither ProcessType Background nor LowPriorityIO: both throttle
+// disk I/O for the poll and everything it inherits to, which stretched the
+// poll's cache walk from under a second to over a minute and made every poll
+// outlast its own StartInterval. Reviews stay polite through NICE instead,
+// which the runner sets on itself.
 const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -32,8 +37,6 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <key>PATH</key><string>%s</string>
     <key>HOME</key><string>%s</string>
   </dict>
-  <key>ProcessType</key><string>Background</string>
-  <key>LowPriorityIO</key><true/>
   <key>AbandonProcessGroup</key><true/>
 </dict>
 </plist>

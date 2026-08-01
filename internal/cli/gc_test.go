@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -510,5 +511,102 @@ func TestCollectSerializesDependencyEvictionWithRunStartup(t *testing.T) {
 	}
 	if !exists(tree) {
 		t.Error("dependency tree was deleted after a run claimed its worktree")
+	}
+}
+
+// rememberSize plants the measurement file an earlier process would have left.
+func rememberSize(t *testing.T, a *app, at time.Time, n int64) {
+	t.Helper()
+	line := at.Format(time.RFC3339) + " " + strconv.FormatInt(n, 10) + "\n"
+	if err := os.WriteFile(a.rememberedSizePath(), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The agent measures the cache on every poll, from a fresh process each time.
+// A recent measurement that was under budget is trusted as it stands, walk and
+// eviction included: that staleness is the price of polls that finish inside
+// their own interval.
+func TestCollectTrustsARecentMeasurementUnderBudget(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	rememberSize(t, a, time.Now(), 400)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 0, 0)
+	if !exists(filepath.Join(run, "worktree")) {
+		t.Error("collection walked and deleted despite a recent under-budget measurement")
+	}
+}
+
+// Once the measurement is too old it means nothing, and the walk is back.
+func TestCollectIgnoresAStaleMeasurement(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	rememberSize(t, a, time.Now().Add(-rememberedSizeTTL-time.Minute), 400)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree survived although the remembered measurement had expired")
+	}
+}
+
+// A measurement file that does not parse is treated as absent, not as an error.
+func TestCollectIgnoresAGarbageMeasurement(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	if err := os.WriteFile(a.rememberedSizePath(), []byte("not a measurement\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree survived although the measurement file was garbage")
+	}
+}
+
+// What one process measures, the next process reads. This is the whole point:
+// the agent's polls are each a fresh process, and only the file keeps them
+// from walking the cache every time.
+func TestCollectRemembersItsMeasurementForTheNextProcess(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(1000)
+	staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 0, 0)
+
+	next := &app{cfg: a.cfg, p: a.p, log: a.log}
+	size, ok := next.rememberedCacheSize()
+	if !ok {
+		t.Fatal("collection left no measurement for the next process")
+	}
+	if want := int64(100 + 100 + len(staleClaim)); size != want {
+		t.Fatalf("remembered measurement is %d, want %d", size, want)
+	}
+}
+
+// After an eviction the file holds the new total, so the next poll neither
+// walks nor evicts again.
+func TestCollectRemembersTheTotalAfterEviction(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+
+	next := &app{cfg: a.cfg, p: a.p, log: a.log}
+	size, ok := next.rememberedCacheSize()
+	if !ok {
+		t.Fatal("eviction left no measurement for the next process")
+	}
+	if want := int64(100 + len(staleClaim)); size != want {
+		t.Fatalf("remembered measurement is %d after eviction, want %d", size, want)
 	}
 }
