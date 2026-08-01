@@ -304,6 +304,38 @@ func (a *app) settings() []setting {
 			return nil
 		}},
 
+		{"draft babysit", func(c config.Config) string {
+			if c.BabysitDrafts {
+				return "quorum babysit works on drafts without --draft"
+			}
+			return "drafts need an explicit --draft"
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			return a.pick(in, "Let quorum babysit work on draft pull requests?", c, []option{
+				{"only with --draft", "each run has to say so",
+					func(c *config.Config) { c.BabysitDrafts = false },
+					func(c config.Config) bool { return !c.BabysitDrafts }},
+				{"always", "drafts are handled like ready PRs",
+					func(c *config.Config) { c.BabysitDrafts = true },
+					func(c config.Config) bool { return c.BabysitDrafts }},
+			}, nil)
+		}},
+
+		{"conflict resolution", func(c config.Config) string {
+			if c.ResolveConflicts {
+				return "merge the base branch and resolve conflicts before reviewing"
+			}
+			return "off, conflicted branches stop the run"
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			return a.pick(in, "Resolve merge conflicts with the base branch during babysit?", c, []option{
+				{"resolve them", "merge the base, fix the conflicts, then review",
+					func(c *config.Config) { c.ResolveConflicts = true },
+					func(c config.Config) bool { return c.ResolveConflicts }},
+				{"off", "leave conflicted branches to a human",
+					func(c *config.Config) { c.ResolveConflicts = false },
+					func(c config.Config) bool { return !c.ResolveConflicts }},
+			}, nil)
+		}},
+
 		{"divergence scan", func(c config.Config) string {
 			if c.DivergenceScan {
 				return "analyze the review/fix history after the round limit"

@@ -33,6 +33,7 @@ const (
 	exitNotConverged = 4
 	exitNoProgress   = 5
 	exitDiverged     = 6
+	exitConflicts    = 7
 )
 
 // app carries what every command needs.

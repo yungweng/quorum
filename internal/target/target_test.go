@@ -53,6 +53,40 @@ esac`)
 	return gh.New(bin)
 }
 
+func TestResolveLocalNeverAsksForThePR(t *testing.T) {
+	// The gh fake fails on any `pr view`: a local run must leave the open PR
+	// alone, and the only way to guarantee that is to never even look it up.
+	bin := fakeTool(t, "gh", `
+case "$*" in
+  "repo view --json defaultBranchRef -q .defaultBranchRef.name") echo "main" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac`)
+	got, err := ResolveLocal(context.Background(), gh.New(bin),
+		branchGit(t, false, "head-sha"), t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.BranchOnly {
+		t.Fatal("a local run did not resolve to a branch-only target")
+	}
+	if got.PR.HeadRefName != "feature/crumb-tray" || got.PR.BaseRefName != "main" {
+		t.Fatalf("target = %+v", got.PR)
+	}
+}
+
+func TestResolveLocalStillRefusesADirtyCheckout(t *testing.T) {
+	bin := fakeTool(t, "gh", `
+case "$*" in
+  "repo view --json defaultBranchRef -q .defaultBranchRef.name") echo "main" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac`)
+	_, err := ResolveLocal(context.Background(), gh.New(bin),
+		branchGit(t, true, "head-sha"), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("dirty local checkout resolved anyway: %v", err)
+	}
+}
+
 func TestResolveFallsBackToAPushedBranchWithoutAnOpenPR(t *testing.T) {
 	got, err := Resolve(context.Background(), branchGH(t, ""),
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")

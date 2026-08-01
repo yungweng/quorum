@@ -45,6 +45,9 @@ var (
 	// ErrDiverged is exit 6: the bounded analysis found incompatible review/fix
 	// decisions and produced a report for manual resolution.
 	ErrDiverged = errors.New("review loop diverged")
+	// ErrConflicts is exit 7: the branch conflicts with its base and the
+	// resolution session did not produce a conflict-free merge.
+	ErrConflicts = errors.New("merge conflicts with the base branch remain")
 )
 
 // Defaults for a run.
@@ -87,6 +90,17 @@ type Options struct {
 	DivergenceTimeout    time.Duration
 	// Post controls every pull request comment produced by the run.
 	Post bool
+
+	// AllowDraft permits the run to work on a draft pull request. Drafts are
+	// refused otherwise: pushing fix commits and posting comments to a PR its
+	// author marked "not ready" needs an explicit go-ahead.
+	AllowDraft bool
+	// Local ignores any open pull request and runs branch-only on the current
+	// pushed branch: no PR comments, no PR CI wait, no auto-merge.
+	Local bool
+	// ResolveConflicts merges origin/<base> through the fix session whenever
+	// the branch conflicts with its base, before any review round.
+	ResolveConflicts bool
 
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
 	// sandbox. They must run tests, use gh and push, unattended, and a
@@ -215,6 +229,7 @@ type run struct {
 
 	roundLog        []RoundEntry
 	ciFixTotal      int
+	conflictFixes   int
 	disputeAccepted bool
 	disputeText     string
 	divergenceTrace DivergenceTrace
@@ -227,13 +242,22 @@ type run struct {
 // prepare resolves the PR or current pushed branch, checks the preconditions
 // and sets up the worktree.
 func (r *run) prepare() error {
-	tgt, err := target.Resolve(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot, r.o.Number, "", "")
+	var tgt target.Target
+	var err error
+	if r.o.Local {
+		tgt, err = target.ResolveLocal(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot, "")
+	} else {
+		tgt, err = target.Resolve(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot, r.o.Number, "", "")
+	}
 	if err != nil {
 		return err
 	}
 	pr := tgt.PR
 	if !tgt.BranchOnly && pr.State != "OPEN" {
 		return fmt.Errorf("PR is %s, expected an open PR", pr.State)
+	}
+	if err := refuseDraft(pr, tgt.BranchOnly, r.o.AllowDraft); err != nil {
+		return err
 	}
 	// The pipeline fetches and pushes refs/heads/<branch> on origin. For a fork
 	// PR that branch lives in the fork, so a same-named origin branch would be
@@ -361,15 +385,29 @@ func (r *run) prepare() error {
 	r.rep.Header(Header{
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
+		Draft: pr.IsDraft, Local: r.o.Local,
 		Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		DivergenceScan: r.o.DivergenceScan,
 		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
 	})
-	if tgt.BranchOnly {
+	switch {
+	case r.o.Local:
+		r.rep.Warn("local run: any open PR is left alone; GitHub PR checks and PR comments are skipped; fix steps still run repository tests")
+	case tgt.BranchOnly:
 		r.rep.Warn("no open PR: GitHub PR checks and PR comments are skipped; fix steps still run repository tests")
 	}
 	return nil
+}
+
+// refuseDraft is the draft gate: a draft PR is one its author marked "not
+// ready", so pushing fixes and posting comments to it needs an explicit
+// go-ahead via --draft or BABYSIT_DRAFTS=1.
+func refuseDraft(pr gh.FullPR, branchOnly, allow bool) error {
+	if branchOnly || !pr.IsDraft || allow {
+		return nil
+	}
+	return fmt.Errorf("PR #%d is a draft; rerun with --draft, or set BABYSIT_DRAFTS=1 to always allow drafts", pr.Number)
 }
 
 // execute is the main loop.
@@ -377,6 +415,13 @@ func (r *run) execute() (*Result, error) {
 	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, RunDir: r.root}
 	if r.o.DivergenceScan {
 		r.startDivergenceTrace()
+	}
+
+	// Conflicts are handled before anything else: a conflicted PR cannot merge,
+	// GitHub never even starts its pull_request checks, and a review of the
+	// unmerged head would polish code that cannot land as it is.
+	if err := r.ensureMergeable(); err != nil {
+		return res, err
 	}
 
 	r.startReview(1)
@@ -486,6 +531,12 @@ func (r *run) execute() (*Result, error) {
 		}
 		if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
 			fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA); err != nil {
+			return res, err
+		}
+
+		// The base may have moved during the round. Re-checking here, while no
+		// review is running, keeps a late conflict from surviving to the merge.
+		if err := r.ensureMergeable(); err != nil {
 			return res, err
 		}
 
@@ -919,6 +970,9 @@ func (o Options) withDefaults() Options {
 func (o Options) validate() error {
 	if o.MaxIter < 1 {
 		return fmt.Errorf("max-iter must be >= 1")
+	}
+	if o.Local && o.Number > 0 {
+		return fmt.Errorf("a local run works on the current branch; it cannot take a pull request")
 	}
 	if o.DivergenceScan {
 		for _, target := range o.DivergenceEscalateTo {

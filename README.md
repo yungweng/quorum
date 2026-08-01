@@ -118,7 +118,14 @@ pipeline watches CI, posts a comment logging what was fixed, and reviews again.
 If the current branch has no open PR, `babysit` runs the same review-fix rounds
 on the clean, pushed branch. It still runs repository checks in each fix step
 and confirms every push on `origin`, but it skips PR CI and PR comments because
-neither exists yet.
+neither exists yet. `--local` forces that mode even when an open PR exists, for
+a run that must not touch the PR.
+
+Draft PRs need a `--draft` flag (or `BABYSIT_DRAFTS=1` in the config) before
+babysit will push fixes and comments to them. And when the branch conflicts
+with its base, babysit first merges the base and resolves the conflicts through
+the fix session, then reviews the merged result; `--no-resolve-conflicts` turns
+that off.
 
 Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.

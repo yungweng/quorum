@@ -159,6 +159,31 @@ func TestDivergenceHasDistinctExitCode(t *testing.T) {
 	}
 }
 
+func TestUnresolvedConflictsHaveADistinctExitCode(t *testing.T) {
+	a := testApp(t)
+	if got := a.babysitExit(loop.ErrConflicts); got != exitConflicts {
+		t.Fatalf("babysitExit(ErrConflicts) = %d, want %d", got, exitConflicts)
+	}
+	if exitConflicts == exitDiverged || exitConflicts == exitNotConverged {
+		t.Fatal("conflicts share an exit code with another failure")
+	}
+}
+
+func TestBabysitDraftLocalAndConflictFlagsAreBoolean(t *testing.T) {
+	args, err := parseArgs([]string{"--draft", "--local", "--no-resolve-conflicts", "42"}, babysitBoolFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"draft", "local", "no-resolve-conflicts"} {
+		if !args.boolean(flag) {
+			t.Errorf("--%s was not parsed as a boolean", flag)
+		}
+	}
+	if !reflect.DeepEqual(args.pos, []string{"42"}) {
+		t.Fatalf("positionals = %q", args.pos)
+	}
+}
+
 func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 	for _, test := range []struct {
 		name     string
