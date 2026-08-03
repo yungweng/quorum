@@ -13,6 +13,11 @@ import (
 	"github.com/yungweng/quorum/internal/review"
 )
 
+// Functional retry tests spawn several fake gh processes. Their deadline is
+// only a guard against a hang; TestRetryBoundsChecksWatch owns the exact timeout
+// contract. Leave enough headroom for loaded developer and CI machines.
+const functionalRetryTimeout = 10 * time.Second
+
 func fakeGH(t *testing.T, cases string) (*gh.Client, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -304,7 +309,7 @@ esac`)
 		t.Fatalf("reused automatic approval was not tracked: %+v", result)
 	}
 
-	result, err = RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", result, time.Second)
+	result, err = RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", result, functionalRetryTimeout)
 	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
 		t.Fatalf("err = %v", err)
 	}
@@ -708,7 +713,7 @@ case "$n" in
 esac`)
 	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{
 		ApprovalCreated: true, approvalReviewID: 99,
-	}, time.Second)
+	}, functionalRetryTimeout)
 	if err == nil || !strings.Contains(err.Error(), "refusing auto-merge") {
 		t.Fatalf("err = %v", err)
 	}
@@ -757,7 +762,7 @@ case "$n" in
 esac`)
 	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{
 		ApprovalCreated: true, approvalReviewID: 99,
-	}, time.Second)
+	}, functionalRetryTimeout)
 	if err == nil || !strings.Contains(err.Error(), "required checks failed") {
 		t.Fatalf("err = %v", err)
 	}
@@ -802,7 +807,7 @@ case "$n" in
   9) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   10) echo '{"merged":true}' ;;
 esac`)
-	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{}, 2*time.Second)
+	result, err := RetryWhenReady(context.Background(), client, t.TempDir(), "acme/api", 42, "abc123", Result{}, functionalRetryTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}
