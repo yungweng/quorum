@@ -176,3 +176,24 @@ func TestPRContextIncludesExtraUserContext(t *testing.T) {
 		t.Error("an empty extra context still produced a section")
 	}
 }
+
+func TestFinalDescriptionPromptDescribesStateWithoutHistory(t *testing.T) {
+	got := finalDescriptionPrompt(42, "Bound retries", "main")
+	for _, want := range []string{
+		"finished local diff against origin/main",
+		"must stand alone",
+		"Do not write a changelog or development narrative",
+		"materially departs from that intent",
+		"one short blockquote",
+		"Do not exaggerate",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("final description prompt is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"always add a warning", "list every fix", "summarize the review rounds"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("final description prompt contains %q", unwanted)
+		}
+	}
+}

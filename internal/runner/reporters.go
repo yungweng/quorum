@@ -63,10 +63,19 @@ func (l *logReporter) Aggregating(reviewers, attempt int) {
 	l.printf("aggregating %d reviewer output(s)", reviewers)
 }
 
+func (l *logReporter) Verifying(attempt int) {
+	if attempt > 1 {
+		l.printf("verifying findings, attempt %d", attempt)
+		return
+	}
+	l.printf("verifying findings")
+}
+
 func (l *logReporter) Comment(path string) { l.printf("comment written to %s", path) }
 
 func (l *logReporter) Done(res review.Result) {
 	l.printf("done in %s: %s", res.Duration.Round(time.Second), res.Findings.Summary())
+	l.printf("verification changes written to %s", res.VerificationChangesFile)
 	if res.Posted {
 		l.printf("posted -> %s", res.CommentURL)
 	}

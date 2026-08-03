@@ -458,8 +458,8 @@ func (c Config) Render() string {
 	w("SKIP_BOTS=%s\n", bit(c.SkipBots))
 	w("SKIP_OWN=%s\t\t\t# your own PRs; review one on purpose with `quorum run`\n\n", bit(c.SkipOwn))
 
-	w("# Reviews. POST=0 writes the comment to disk instead of posting it,\n")
-	w("# which is the cautious way to start until you trust the output.\n")
+	w("# Reviews. POST=0 keeps review output on disk, disables every PR write,\n")
+	w("# and skips babysit's final description generation.\n")
 	w("REVIEW_MODEL=%q\n", c.ReviewModel)
 	w("REVIEW_EFFORT=%q\t# minimal, low, medium, high, xhigh\n", c.ReviewEffort)
 	w("REVIEW_TIMEOUT=%q\t# per reviewer pass, 0 disables\n", FormatDuration(c.ReviewTimeout))

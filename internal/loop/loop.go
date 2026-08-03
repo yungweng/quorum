@@ -89,7 +89,8 @@ type Options struct {
 	DivergenceScan       bool
 	DivergenceEscalateTo []string
 	DivergenceTimeout    time.Duration
-	// Post controls every pull request comment produced by the run.
+	// Post controls every pull request write produced by the run and enables
+	// final-description candidate generation after convergence.
 	Post bool
 
 	// AllowDraft permits the run to work on a draft pull request. Drafts are
@@ -155,6 +156,8 @@ type Result struct {
 	Divergence           *DivergenceReport
 	DivergenceReportPath string
 	DivergenceCommentURL string
+	PRDescriptionFile    string
+	PRDescriptionCurrent bool
 }
 
 // Pipeline runs the review-fix cycle.
@@ -569,6 +572,9 @@ func (r *run) execute() (*Result, error) {
 		}
 		r.rep.Notify("Nicht konvergiert", fmt.Sprintf("%s hat nach %d Runden weiter Findings", r.targetLabel(), r.o.MaxIter))
 		return res, fmt.Errorf("%w after %d review rounds", ErrNotConverged, r.o.MaxIter)
+	}
+	if err := r.finishPRDescription(res); err != nil {
+		return res, err
 	}
 	return res, nil
 }

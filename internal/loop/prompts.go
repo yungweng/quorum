@@ -149,6 +149,21 @@ const commitPrompt = `There are uncommitted changes in the worktree. Review them
 // bounceQuestionsPrompt sends open questions back in autonomous mode.
 const bounceQuestionsPrompt = `No human is available during this automated run. Decide these questions yourself: pick the most conservative reasonable option for each, apply it, and record the decision in the PR comment section of your final message. Continue with the current step. All rules from the initial instructions still apply.`
 
+// finalDescriptionPrompt asks a fresh read-only session to replace the PR body
+// with a description of the finished diff. The original body arrives on stdin:
+// it is evidence of intent, not a template that must preserve stale claims.
+func finalDescriptionPrompt(number int, title, base string) string {
+	return fmt.Sprintf(`Write the final Markdown description for PR #%d, titled %q. The original PR description is on stdin. Inspect the finished local diff against origin/%s and the relevant code.
+
+Describe the PR as it exists now. The result must stand alone for a reviewer who has not seen its development. Preserve still-relevant issue links, rollout notes, test instructions, screenshots, and useful structure from the original description. Correct stale claims and cover material behavior present in the final diff. Keep it concise and use the language of the original description; if it is empty, use the language of the PR title.
+
+Do not write a changelog or development narrative. Do not mention that the description was rewritten or updated. Do not mention review rounds, findings, fix steps, comments, agents, Codex, AI, automation, or how the implementation evolved. Do not invent test results or product decisions.
+
+Compare the original stated intent with the finished implementation. If the final behavior, scope, or architecture materially departs from that intent, put one short blockquote at the very top with a calm warning label in the description's language, one sentence naming the difference, and one sentence asking for review before merge. Use this only for a material directional change, not ordinary refinements, bug fixes, or implementation details. Do not exaggerate.
+
+Return only the complete Markdown PR description. Do not wrap it in a code fence and do not post or edit the PR yourself.`, number, title, base)
+}
+
 // forceRecheckPrompt is the adversarial pass a dispute has to survive before it
 // is accepted. Without it, the session could end any round it disliked by
 // declaring the findings wrong, and the run would finish on its own say-so.

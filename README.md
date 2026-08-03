@@ -1,9 +1,11 @@
 # quorum
 
 Several Codex reviewers read your pull request independently. Their findings are
-merged into one comment and posted. From there quorum can keep going on its own:
-hand the findings to a fix session, wait for CI, review again, until the PR is
-clean.
+merged, then a separate evidence pass checks each one against the code. It may
+preserve, correct, remove or add findings when the repository supports that
+result. Only the final report is posted or handed to a fix session. From there
+quorum can keep going on its own: wait for CI, review again, and repeat until
+the PR is clean.
 
 ```bash
 quorum watch           # follow running, queued and finished work
@@ -12,18 +14,21 @@ quorum babysit 1811    # review, fix, CI, repeat until it is clean
 ```
 
 The name is the mechanism: no single reviewer decides anything. Six of them run
-against the same diff, the aggregation keeps only what the reviewer outputs
-actually support, and a run that cannot produce enough successful reviewers
-refuses to post at all.
+against the same diff, an aggregator deduplicates their claims, and an
+independent verifier judges every resulting finding from the code evidence.
+A run that cannot produce enough reviewer outputs or a valid verified report
+refuses to post.
 
 ## What it costs
 
-One review is six Codex reviewer passes plus an aggregator. `quorum babysit`
-multiplies that by the number of rounds and adds a fix session per round. Lower
-`REVIEWERS` for cheaper runs.
+One review is six Codex reviewer passes, an aggregator and a verifier. `quorum
+babysit` multiplies that by the number of rounds, adds a fix session per round,
+and adds one final description pass after convergence. Lower `REVIEWERS` for
+cheaper runs.
 
-**The comment is posted from your GitHub account, under your name.** Start with
-`POST=0`, which writes the comment to disk instead, until you trust the output.
+**PR writes come from your GitHub account, under your name.** Start with
+`POST=0`, which keeps review output on disk and disables comments and final
+description generation, until you trust the output.
 
 Because the agent's trigger is the review request rather than the code, a PR
 costs one review no matter how many times it is pushed to.
@@ -87,9 +92,13 @@ It builds a detached worktree under `~/.cache/quorum/reviews/`, runs `direnv
 allow` unless the target itself changed an `.envrc`, links in cached dependency
 trees and enters the environment once so the install hook runs one time per run
 rather than once per reviewer, then fans out `codex exec review`. The outputs
-are merged into one report and checked for structure. PR reviews post it;
-branch-only reviews keep it on disk. Each run also writes a machine-readable
-`findings.json` beside the report.
+are merged into a candidate report. A fresh verifier inspects the diff and code
+in a read-only sandbox. It can keep, correct, remove or add well-supported
+findings. Afterward Go also requires the original HEAD and an empty Git status.
+PR reviews post only the final report; branch-only reviews keep it on disk. Each
+run also writes a machine-readable `findings.json`. The unfiltered
+`aggregated-pr-comment.md` and local `verification-changes.md` remain beside it
+for audit.
 
 A failed run keeps its worktree, so the expensive reviewer passes never have to
 run twice: `quorum review 1811 --resume-run <dir>` picks it up with the original
@@ -100,9 +109,11 @@ active runs protected, removes inactive worktrees before review output, and
 handles read-only dependency caches without blocking new run startup during
 the recursive deletion.
 
-A run refuses to post rather than post something misleading: on a moved PR head,
-on an `.envrc` the PR itself changed, and on an aggregator answer with the wrong
-shape. [The reference](docs/reference.md#safety-stops) says what each means.
+A run refuses to post rather than post something misleading: on a moved PR
+head, on an `.envrc` the PR itself changed, on a malformed aggregator or
+verifier answer, and when the verifier changes HEAD or leaves staged, unstaged
+or untracked files. [The reference](docs/reference.md#safety-stops) says what
+each means.
 
 ## quorum babysit
 
@@ -116,9 +127,18 @@ quorum babysit 1811 --effort high "Focus on the time-tracking module"
 ```
 
 The loop: wait for CI, review, decide. Zero Blockers and Critical means done.
-Otherwise the review comment goes into a Codex session that checks each finding
-for whether it is real or intended, fixes the real ones, commits and pushes. The
-pipeline watches CI, posts a comment logging what was fixed, and reviews again.
+Otherwise the already verified review comment goes into a Codex session that
+checks each remaining finding for whether it is real or intended, fixes the
+real ones, commits and pushes. The pipeline watches CI, posts a comment logging
+what was fixed, and reviews again.
+
+After a posted PR run converges with green CI, a fresh read-only pass writes a
+local PR-description candidate that describes the final implementation rather
+than the review and fix history. It preserves still-relevant links and
+instructions. If the final implementation materially departs from the original
+direction, it adds one short, calm warning at the top. GitHub has no conditional
+PR-body update, so quorum never replaces the remote description: an
+unconditional write could overwrite a human edit or target a moved head.
 
 If the current branch has no open PR, `babysit` runs the same review-fix rounds
 on the clean, pushed branch. It still runs repository checks in each fix step

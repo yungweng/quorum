@@ -44,6 +44,7 @@ type Reporter interface {
 	ReviewerDone(idx int, elapsed time.Duration, rank, total int)
 	ReviewerFailed(idx, exitCode int, elapsed time.Duration, logPath string)
 	Aggregating(reviewers, attempt int)
+	Verifying(attempt int)
 	// Comment is called with the path to the finished comment, before posting.
 	Comment(path string)
 	Done(Result)
@@ -61,6 +62,7 @@ func (NopReporter) ReviewerStarted(int)                                {}
 func (NopReporter) ReviewerDone(_ int, _ time.Duration, _, _ int)      {}
 func (NopReporter) ReviewerFailed(_, _ int, _ time.Duration, _ string) {}
 func (NopReporter) Aggregating(_, _ int)                               {}
+func (NopReporter) Verifying(int)                                      {}
 func (NopReporter) Comment(string)                                     {}
 func (NopReporter) Done(Result)                                        {}
 

@@ -235,7 +235,7 @@ func (a *app) reviewExit(err error) int {
 		return 2
 	case errors.Is(err, review.ErrHeadDrifted):
 		return 3
-	case errors.Is(err, review.ErrAggregatorInvalid):
+	case errors.Is(err, review.ErrAggregatorInvalid), errors.Is(err, review.ErrVerifierInvalid):
 		return 4
 	default:
 		return exitError
@@ -254,7 +254,7 @@ posting.
 Options:
   -n, --runs N             Number of Codex reviewer passes. Default: %d
   --concurrency N          Max reviewer passes at once. Default: same as --runs
-  --model MODEL            Model for reviewers and aggregator. Default: %s
+  --model MODEL            Model for reviewers, aggregator and verifier. Default: %s
   --effort LEVEL           minimal, low, medium, high, xhigh. Default: %s
   --base BRANCH            Base branch. Default: PR base or repository default
   --dry-run                Write the report to disk without posting it
@@ -270,7 +270,7 @@ Options:
 Exit codes:
   2  refused: the target changes an .envrc
   3  refused: the target head moved during the review
-  4  the aggregator could not produce a valid report
+  4  the aggregator or verifier could not produce a valid report
 `, a.cfg.Reviewers, a.cfg.ReviewModel, a.cfg.ReviewEffort,
 		durationText(a.cfg.ReviewTimeout))
 }
@@ -510,6 +510,17 @@ func (t *termReporter) Aggregating(reviewers, attempt int) {
 	t.status.Draw(label)
 }
 
+func (t *termReporter) Verifying(attempt int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.panel.Freeze()
+	label := "verifying findings"
+	if attempt > 1 {
+		label += fmt.Sprintf(", attempt %d", attempt)
+	}
+	t.status.Draw(label)
+}
+
 // Comment renders the finished comment, through glow when it is available.
 func (t *termReporter) Comment(path string) {
 	t.clear()
@@ -549,6 +560,7 @@ func (t *termReporter) Done(res review.Result) {
 	o.Row("findings", summary)
 	o.Row("duration", ui.Duration(res.Duration))
 	o.Row("comment", o.Link(o.Dim(filepath.Base(res.CommentFile)), "file://"+res.CommentFile))
+	o.Row("verification", o.Link(o.Dim(filepath.Base(res.VerificationChangesFile)), "file://"+res.VerificationChangesFile))
 	if res.Posted {
 		o.Row("posted", o.Green("yes")+"  "+o.Link(o.Blue(res.CommentURL), res.CommentURL))
 	} else {

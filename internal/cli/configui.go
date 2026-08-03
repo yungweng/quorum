@@ -225,7 +225,7 @@ func (a *app) settings() []setting {
 		{"review model", func(c config.Config) string {
 			return fmt.Sprintf("%s, effort %s", c.ReviewModel, c.ReviewEffort)
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "model for the reviewers and the aggregator", c.ReviewModel)
+			v, err := a.askText(in, "model for the reviewers, aggregator and verifier", c.ReviewModel)
 			if err != nil {
 				return err
 			}
