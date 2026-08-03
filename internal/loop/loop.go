@@ -89,8 +89,8 @@ type Options struct {
 	DivergenceScan       bool
 	DivergenceEscalateTo []string
 	DivergenceTimeout    time.Duration
-	// Post controls every pull request write produced by the run, including
-	// comments and the final description refresh.
+	// Post controls every pull request write produced by the run and enables
+	// final-description candidate generation after convergence.
 	Post bool
 
 	// AllowDraft permits the run to work on a draft pull request. Drafts are
@@ -157,7 +157,7 @@ type Result struct {
 	DivergenceReportPath string
 	DivergenceCommentURL string
 	PRDescriptionFile    string
-	PRDescriptionUpdated bool
+	PRDescriptionCurrent bool
 }
 
 // Pipeline runs the review-fix cycle.

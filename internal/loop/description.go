@@ -15,9 +15,11 @@ const (
 	maxPRDescriptionBytes   = 64 * 1024
 )
 
-// finishPRDescription refreshes the PR body only after the pipeline has
+// finishPRDescription writes a final PR body candidate after the pipeline has
 // converged. It uses a fresh read-only session rather than the fix session so
 // the body describes the final state instead of narrating the fix history.
+// GitHub has no conditional body-update API, so the candidate stays local: an
+// unconditional update could overwrite a human edit or target a moved head.
 func (r *run) finishPRDescription(res *Result) error {
 	if r.target.BranchOnly || !r.o.Post {
 		return nil
@@ -69,45 +71,29 @@ func (r *run) finishPRDescription(res *Result) error {
 		return err
 	}
 	if strings.TrimSpace(body) == strings.TrimSpace(r.pr.Body) {
+		res.PRDescriptionCurrent = true
 		ok = true
 		return nil
 	}
-
-	if err := r.p.GH.EditPRBody(r.ctx, r.o.RepoRoot, r.pr.Number, bodyPath); err != nil {
-		return fmt.Errorf("updating PR description: %w", err)
-	}
-	latest, err := r.p.GH.ViewPR(r.ctx, r.o.RepoRoot, r.pr.Number)
-	if err != nil {
-		return fmt.Errorf("verifying updated PR description: %w", err)
-	}
-	if latest.HeadRefOid != finalHead {
-		return fmt.Errorf("PR head moved while updating its description: expected %s, got %s", finalHead, latest.HeadRefOid)
-	}
-	if strings.TrimSpace(latest.Body) != strings.TrimSpace(body) {
-		return fmt.Errorf("GitHub did not retain the generated PR description; inspect %s", bodyPath)
-	}
-	r.pr.Body = body
-	res.PR.Body = body
-	res.PRDescriptionUpdated = true
+	r.rep.Warn(fmt.Sprintf("GitHub has no conditional PR-description update; generated candidate left at %s", bodyPath))
 	ok = true
 	return nil
 }
 
-// checkPRDescriptionTarget is the overwrite guard. A human edit during the
-// run is more valuable than an automatic refresh and must never be replaced.
+// checkPRDescriptionTarget rejects a candidate based on stale PR state.
 func (r *run) checkPRDescriptionTarget(expectedHead string) error {
 	latest, err := r.p.GH.ViewPR(r.ctx, r.o.RepoRoot, r.pr.Number)
 	if err != nil {
-		return fmt.Errorf("checking PR before updating its description: %w", err)
+		return fmt.Errorf("checking PR before generating its final description: %w", err)
 	}
 	if latest.State != "OPEN" {
-		return fmt.Errorf("PR #%d became %s before its description could be updated", r.pr.Number, latest.State)
+		return fmt.Errorf("PR #%d became %s before its final description could be generated", r.pr.Number, latest.State)
 	}
 	if latest.HeadRefOid != expectedHead {
-		return fmt.Errorf("PR head moved before its description could be updated: expected %s, got %s", expectedHead, latest.HeadRefOid)
+		return fmt.Errorf("PR head moved during final description generation: expected %s, got %s", expectedHead, latest.HeadRefOid)
 	}
 	if latest.Body != r.pr.Body {
-		return fmt.Errorf("PR description changed during babysit; refusing to overwrite the newer text")
+		return fmt.Errorf("PR description changed during babysit; rejecting the stale generated candidate")
 	}
 	return nil
 }

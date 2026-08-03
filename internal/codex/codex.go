@@ -35,7 +35,7 @@ type Options struct {
 	// need it: they run tests, use gh and push, unattended, and a sandboxed or
 	// approval-gated exec would silently skip exactly those commands. The
 	// review side never sets it: reviewers and aggregation run read-only, while
-	// verification uses a guarded workspace-write sandbox.
+	// verification also uses the read-only sandbox.
 	Bypass bool
 
 	// DisableSerena turns the Serena MCP server off. It adds nothing to a diff
@@ -133,14 +133,12 @@ func (o Options) Aggregate(ctx context.Context, env envexec.Env, timeout time.Du
 	})
 }
 
-// Verify runs the independent evidence pass. Its workspace-write sandbox lets
-// validation commands and tests create their normal temporary output. The
-// review layer checks HEAD and git status around the call and refuses any
-// source-tree mutation. The candidate report arrives on stdin and the verified
-// report is the final message written to outFile.
+// Verify runs the independent evidence pass in the same read-only sandbox as
+// aggregation. The candidate report arrives on stdin and the verified report
+// is the final message written to outFile.
 func (o Options) Verify(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
 	args := append([]string{"exec"}, o.flags()...)
-	args = append(args, "--sandbox", "workspace-write", "--ephemeral", "-o", outFile, prompt)
+	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
 	return env.Run(ctx, timeout, envexec.Cmd{
 		Name: o.bin(), Args: args, Stdin: stdin, Stdout: log, Stderr: log,
 	})

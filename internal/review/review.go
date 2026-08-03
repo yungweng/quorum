@@ -283,7 +283,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	rep.Comment(run.comment)
 
 	if o.Post {
-		url, err := r.GH.Comment(ctx, o.RepoRoot, pr.Number, run.comment)
+		url, err := r.postVerifiedComment(ctx, o, tgt, baseBranch, reviewedBase, reviewedHead, run.comment)
 		if err != nil {
 			return nil, fmt.Errorf("posting the comment: %w", err)
 		}
@@ -309,6 +309,16 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	rep.Done(*res)
 	return res, nil
+}
+
+// postVerifiedComment rechecks the remote head after verification, which can
+// take as long as another review pass. Findings for an older head must never be
+// posted on the current pull request.
+func (r *Runner) postVerifiedComment(ctx context.Context, o Options, tgt target.Target, baseBranch, reviewedBase, reviewedHead, comment string) (string, error) {
+	if _, err := r.checkDrift(ctx, o, tgt, baseBranch, reviewedBase, reviewedHead); err != nil {
+		return "", err
+	}
+	return r.GH.Comment(ctx, o.RepoRoot, tgt.PR.Number, comment)
 }
 
 // runPaths are the files one run works with.

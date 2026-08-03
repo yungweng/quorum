@@ -766,7 +766,7 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 	case loop.PhaseDivergence:
 		what = "analyzing divergence"
 	case loop.PhaseDescription:
-		what = "updating PR description"
+		what = "generating final PR description"
 	default:
 		return "", ""
 	}

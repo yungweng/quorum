@@ -56,12 +56,14 @@ merged and the conflicts resolved through the fix session before the first
 review; `RESOLVE_CONFLICTS=0` or `--no-resolve-conflicts` turns that off.
 
 After a posted PR run converges with green CI, a fresh read-only Codex pass
-updates the PR description once. The result describes the final implementation,
-not the sequence of findings and fixes. It keeps relevant links, rollout notes,
-test instructions and screenshots. When the final behavior, scope or architecture
-materially departs from the original direction, it adds one short warning at the
-top. Refinements and bug fixes do not trigger that warning. `POST=0`, `--local`
-and branch-only runs skip both generation and the GitHub update.
+writes a local PR-description candidate. The result describes the final
+implementation, not the sequence of findings and fixes. It keeps relevant
+links, rollout notes, test instructions and screenshots. When the final
+behavior, scope or architecture materially departs from the original direction,
+it adds one short warning at the top. Refinements and bug fixes do not trigger
+that warning. GitHub has no conditional PR-body update, so quorum leaves the
+remote description unchanged. `POST=0`, `--local` and branch-only runs skip
+generation.
 
 | Option | Meaning | Default |
 |---|---|---|
@@ -111,10 +113,9 @@ what that means. An agent with full file and network access on your machine, for
 up to `--fix-timeout` per step.
 
 `--sandboxed` opts out, but then your `~/.codex/config.toml` must allow
-commands, network and push or every fix round fails. Reviewers and the
-aggregator remain read-only. The verifier uses a workspace-write sandbox so it
-can run focused tests, but it gets no bypass and a Git integrity gate rejects
-any changed HEAD or staged, unstaged or untracked file.
+commands, network and push or every fix round fails. Reviewers, the aggregator
+and the verifier remain read-only. A separate Git integrity gate rejects any
+changed HEAD or staged, unstaged or untracked file after verification.
 
 ## Safety stops
 
@@ -136,11 +137,10 @@ posting or committing something misleading.
 - **The evidence verifier failed or changed the repository.** A fresh pass
   checks each aggregated finding against the diff and code. It may preserve,
   correct, remove or add findings when the evidence supports that result. It
-  runs in a workspace-write sandbox so focused tests can execute, but its prompt
-  forbids repository edits. Go checks the pinned HEAD and full porcelain status
-  before and after every attempt. Any mutation stops immediately. A timeout or
-  malformed report gets one retry, then the run stops before posting or writing
-  `findings.json`.
+  runs in a read-only sandbox, and Go checks the pinned HEAD and full porcelain
+  status before and after every attempt. Any mutation stops immediately. A
+  timeout or malformed report gets one retry, then the run stops before posting
+  or writing `findings.json`.
 
 ### quorum babysit
 
@@ -155,12 +155,13 @@ posting or committing something misleading.
 - **Do not push to the target branch while a run is active.** A review refuses
   to use stale findings when the head moves under it, and the pipeline treats
   that as fatal.
-- **The final PR-description update is guarded against concurrent edits.** It
-  checks the PR head and exact description before generation and again before
-  writing. If either changed, the run refuses to overwrite it. The generator
-  runs in a fresh read-only session without the fix history or sandbox bypass;
-  any local Git mutation, empty body, fenced output or oversized body stops the
-  run before the GitHub update.
+- **Final PR-description generation is guarded against stale input.** It checks
+  the PR head and exact description before generation and again afterward. If
+  either changed, the run rejects the candidate. The generator runs in a fresh
+  read-only session without the fix history or sandbox bypass; any local Git
+  mutation, empty body, fenced output or oversized body also stops the run.
+  Quorum keeps the candidate local because GitHub provides no conditional
+  PR-body update that could protect a human edit and the target head together.
 - The pipeline refuses to start on a dirty checkout of the target branch, or when
   your local branch differs from origin: it reviews the pushed head and would
   otherwise silently ignore your work.
@@ -234,7 +235,7 @@ SKIP_OWN=1               # review one of your own with `quorum run`
 REVIEW_MODEL="gpt-5.6-terra"
 REVIEW_EFFORT="medium"
 REVIEW_TIMEOUT="45m"     # per reviewer pass, not per run. 0 disables
-POST=1                   # 0 disables PR comments and final description updates
+POST=1                   # 0 disables PR comments and final description generation
 
 # Babysit
 FIX_MODEL=""             # empty keeps your codex default
@@ -404,8 +405,8 @@ and `verifier.log` records the verifier run. These are local audit artifacts;
 only `final-pr-comment.md` is posted.
 
 A successful posted `quorum babysit` also writes
-`messages/final-pr-description.md`. This is the exact final body sent to GitHub
-or, when it already matches, the body that required no update.
+`messages/final-pr-description.md`. This is a local candidate for the final PR
+body. Quorum reports when the existing remote body already matches it.
 
 ## Files
 

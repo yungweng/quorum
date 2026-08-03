@@ -78,6 +78,37 @@ func TestPinnedBranchReviewRefusesAMovedRemoteHead(t *testing.T) {
 	}
 }
 
+func TestPostVerifiedCommentRechecksRemoteHead(t *testing.T) {
+	root := t.TempDir()
+	gitBin := filepath.Join(root, "git")
+	gitScript := `#!/bin/sh
+set -eu
+case "$*" in
+  "ls-remote origin refs/heads/main") printf 'base-sha\trefs/heads/main\n' ;;
+  "ls-remote origin refs/pull/42/head") printf 'new-head\trefs/pull/42/head\n' ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(gitBin, []byte(gitScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	called := filepath.Join(root, "gh-called")
+	ghBin := filepath.Join(root, "gh")
+	if err := os.WriteFile(ghBin, []byte("#!/bin/sh\ntouch \""+called+"\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Git: git.New(gitBin), GH: gh.New(ghBin)}
+	tgt := target.Target{PR: gh.FullPR{Number: 42}}
+	_, err := r.postVerifiedComment(context.Background(), Options{RepoRoot: root}, tgt,
+		"main", "base-sha", "reviewed-head", filepath.Join(root, "comment.md"))
+	if !errors.Is(err, ErrHeadDrifted) {
+		t.Fatalf("post error = %v, want ErrHeadDrifted", err)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatal("comment was posted after the remote head moved")
+	}
+}
+
 func TestAllowDirenvFailsClosedWhenChangedFilesCannotBeChecked(t *testing.T) {
 	worktree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(worktree, ".envrc"), []byte("export UNSAFE=1\n"), 0o644); err != nil {

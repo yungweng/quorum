@@ -40,6 +40,7 @@ func fakeVerifier(t *testing.T, result string, mutate bool) (runPaths, envexec.E
 	runTestGit(t, worktree, "init", "-q")
 	runTestGit(t, worktree, "config", "user.email", "example@example.invalid")
 	runTestGit(t, worktree, "config", "user.name", "Example User")
+	runTestGit(t, worktree, "config", "commit.gpgSign", "false")
 	if err := os.WriteFile(filepath.Join(worktree, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +61,8 @@ func fakeVerifier(t *testing.T, result string, mutate bool) (runPaths, envexec.E
 	script := `#!/bin/sh
 set -eu
 case " $* " in
-  *" --sandbox workspace-write "*) ;;
-  *) echo "workspace-write sandbox missing" >&2; exit 9 ;;
+  *" --sandbox read-only "*) ;;
+  *) echo "read-only sandbox missing" >&2; exit 9 ;;
 esac
 case " $* " in
   *" --dangerously-bypass-approvals-and-sandbox "*) echo "sandbox bypass present" >&2; exit 10 ;;

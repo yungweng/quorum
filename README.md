@@ -27,8 +27,8 @@ and adds one final description pass after convergence. Lower `REVIEWERS` for
 cheaper runs.
 
 **PR writes come from your GitHub account, under your name.** Start with
-`POST=0`, which keeps review output on disk and disables comments and description
-updates, until you trust the output.
+`POST=0`, which keeps review output on disk and disables comments and final
+description generation, until you trust the output.
 
 Because the agent's trigger is the review request rather than the code, a PR
 costs one review no matter how many times it is pushed to.
@@ -93,11 +93,10 @@ allow` unless the target itself changed an `.envrc`, links in cached dependency
 trees and enters the environment once so the install hook runs one time per run
 rather than once per reviewer, then fans out `codex exec review`. The outputs
 are merged into a candidate report. A fresh verifier inspects the diff and code
-in a workspace-write sandbox, where it may run focused tests but may not change
-the repository. It can keep, correct, remove or add well-supported findings.
-Afterward Go requires the original HEAD and an empty Git status. PR reviews
-post only the final report; branch-only reviews keep it on disk. Each run also
-writes a machine-readable `findings.json`. The unfiltered
+in a read-only sandbox. It can keep, correct, remove or add well-supported
+findings. Afterward Go also requires the original HEAD and an empty Git status.
+PR reviews post only the final report; branch-only reviews keep it on disk. Each
+run also writes a machine-readable `findings.json`. The unfiltered
 `aggregated-pr-comment.md` and local `verification-changes.md` remain beside it
 for audit.
 
@@ -133,12 +132,13 @@ checks each remaining finding for whether it is real or intended, fixes the
 real ones, commits and pushes. The pipeline watches CI, posts a comment logging
 what was fixed, and reviews again.
 
-After a posted PR run converges with green CI, a fresh read-only pass rewrites
-the PR description once so it describes the final implementation rather than
-the review and fix history. It preserves still-relevant links and instructions.
-If the final implementation materially departs from the original direction, it
-adds one short, calm warning at the top. A changed PR head or a description that
-someone edited during the run stops the update instead of overwriting newer work.
+After a posted PR run converges with green CI, a fresh read-only pass writes a
+local PR-description candidate that describes the final implementation rather
+than the review and fix history. It preserves still-relevant links and
+instructions. If the final implementation materially departs from the original
+direction, it adds one short, calm warning at the top. GitHub has no conditional
+PR-body update, so quorum never replaces the remote description: an
+unconditional write could overwrite a human edit or target a moved head.
 
 If the current branch has no open PR, `babysit` runs the same review-fix rounds
 on the clean, pushed branch. It still runs repository checks in each fix step

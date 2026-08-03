@@ -27,7 +27,7 @@ func descriptionTestGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func descriptionFixture(t *testing.T, original, final string) (*run, *Result, string, string) {
+func descriptionFixture(t *testing.T, original, final string) (*run, *Result, string) {
 	t.Helper()
 	root := t.TempDir()
 	worktree := filepath.Join(root, "worktree")
@@ -39,6 +39,7 @@ func descriptionFixture(t *testing.T, original, final string) (*run, *Result, st
 	descriptionTestGit(t, worktree, "init", "-q")
 	descriptionTestGit(t, worktree, "config", "user.email", "example@example.invalid")
 	descriptionTestGit(t, worktree, "config", "user.name", "Example User")
+	descriptionTestGit(t, worktree, "config", "commit.gpgSign", "false")
 	if err := os.WriteFile(filepath.Join(worktree, "retry.go"), []byte("package retry\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -77,20 +78,12 @@ cp "` + resultPath + `" "$out"
 		Number: 42, Title: "Bound retries", Body: original, State: "OPEN",
 		HeadRefName: "feature/retries", HeadRefOid: head, BaseRefName: "main",
 	}
-	finalPR := originalPR
-	finalPR.Body = strings.TrimSpace(final) + "\n"
 	originalJSON, _ := json.Marshal(originalPR)
-	finalJSON, _ := json.Marshal(finalPR)
 	originalJSONPath := filepath.Join(root, "original.json")
-	finalJSONPath := filepath.Join(root, "final.json")
 	if err := os.WriteFile(originalJSONPath, originalJSON, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(finalJSONPath, finalJSON, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	countPath := filepath.Join(root, "gh-count")
-	editedPath := filepath.Join(root, "edited-body")
 	ghBin := filepath.Join(root, "gh")
 	ghScript := `#!/bin/sh
 set -eu
@@ -98,8 +91,6 @@ n=$(cat "` + countPath + `" 2>/dev/null || echo 0)
 n=$((n+1)); echo "$n" > "` + countPath + `"
 case "$n" in
   1|2) cat "` + originalJSONPath + `" ;;
-  3) test "$1 $2 $3 $4" = "pr edit 42 --body-file"; cp "$5" "` + editedPath + `" ;;
-  4) cat "` + finalJSONPath + `" ;;
   *) echo "unexpected gh call $n: $*" >&2; exit 1 ;;
 esac
 `
@@ -121,17 +112,17 @@ esac
 		worktree: worktree, msgDir: filepath.Join(root, "messages"), logDir: filepath.Join(root, "logs"),
 		env: envexec.Env{Worktree: worktree},
 	}
-	return r, &Result{PR: originalPR, Converged: true}, stdinPath, editedPath
+	return r, &Result{PR: originalPR, Converged: true}, stdinPath
 }
 
-func TestFinishPRDescriptionUpdatesExactlyOnce(t *testing.T) {
+func TestFinishPRDescriptionGeneratesCandidateWithoutEditingPR(t *testing.T) {
 	original := "## Summary\n\nBound retry attempts.\n"
 	final := "## Summary\n\nBounds retries by the caller deadline.\n"
-	r, result, stdinPath, editedPath := descriptionFixture(t, original, final)
+	r, result, stdinPath := descriptionFixture(t, original, final)
 	if err := r.finishPRDescription(result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.PRDescriptionUpdated || result.PRDescriptionFile == "" {
+	if result.PRDescriptionCurrent || result.PRDescriptionFile == "" {
 		t.Fatalf("result = %+v", result)
 	}
 	stdin, err := os.ReadFile(stdinPath)
@@ -141,12 +132,23 @@ func TestFinishPRDescriptionUpdatesExactlyOnce(t *testing.T) {
 	if string(stdin) != original {
 		t.Fatalf("generator stdin = %q, want original body", stdin)
 	}
-	edited, err := os.ReadFile(editedPath)
+	generated, err := os.ReadFile(result.PRDescriptionFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(edited) != strings.TrimSpace(final)+"\n" {
-		t.Fatalf("edited body = %q", edited)
+	if string(generated) != strings.TrimSpace(final)+"\n" {
+		t.Fatalf("generated body = %q", generated)
+	}
+}
+
+func TestFinishPRDescriptionRecognizesCurrentBody(t *testing.T) {
+	body := "## Summary\n\nBound retry attempts.\n"
+	r, result, _ := descriptionFixture(t, body, body)
+	if err := r.finishPRDescription(result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.PRDescriptionCurrent {
+		t.Fatalf("result = %+v", result)
 	}
 }
 
@@ -164,7 +166,7 @@ func TestCheckPRDescriptionTargetRefusesConcurrentChanges(t *testing.T) {
 	}{
 		"body edit": {
 			mutate: func(pr *gh.FullPR) { pr.Body = "A human clarified the rollout.\n" },
-			want:   "refusing to overwrite",
+			want:   "rejecting the stale generated candidate",
 		},
 		"head move": {
 			mutate: func(pr *gh.FullPR) { pr.HeadRefOid = strings.Repeat("b", 40) },

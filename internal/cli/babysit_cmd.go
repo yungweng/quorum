@@ -287,9 +287,9 @@ func (a *app) babysitUsage() {
 Runs the review-fix cycle until a review reports zero Blockers and Critical
 findings. Without a PR argument, quorum uses the open PR for the current branch
 when one exists. Otherwise it works on the pushed branch and skips PR CI and PR
-comments. After a posted PR run converges, a fresh read-only pass updates the PR
-description to describe the final state. Extra positional text becomes context
-for the fix session.
+comments. After a posted PR run converges, a fresh read-only pass writes a local
+PR-description candidate for the final state. Extra positional text becomes
+context for the fix session.
 
 Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. When the
 branch conflicts with its base, the base is merged and the conflicts resolved
@@ -500,9 +500,9 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 		}
 	}
 	if res.PRDescriptionFile != "" {
-		status := "already current"
-		if res.PRDescriptionUpdated {
-			status = "updated"
+		status := "generated locally"
+		if res.PRDescriptionCurrent {
+			status = "already current"
 		}
 		o.Row("description", o.Green(status)+"  "+o.Link(o.Dim(filepath.Base(res.PRDescriptionFile)), "file://"+res.PRDescriptionFile))
 	}
