@@ -41,6 +41,9 @@ var (
 	// ErrAggregatorInvalid means the aggregator could not produce a comment
 	// with the required structure, twice.
 	ErrAggregatorInvalid = errors.New("aggregator output invalid")
+	// ErrVerifierInvalid means the evidence pass failed, produced a malformed
+	// report twice, or changed the checked-out repository.
+	ErrVerifierInvalid = errors.New("verifier output invalid")
 	// ErrTooFewReviewers means not enough reviewer passes succeeded.
 	ErrTooFewReviewers = errors.New("too few reviewer outputs")
 )
@@ -94,13 +97,14 @@ type Options struct {
 
 // Result is what a finished run produced.
 type Result struct {
-	RunDir      string
-	OutputDir   string
-	CommentFile string
-	CommentURL  string
-	Posted      bool
-	Findings    Findings
-	Duration    time.Duration
+	RunDir                  string
+	OutputDir               string
+	CommentFile             string
+	VerificationChangesFile string
+	CommentURL              string
+	Posted                  bool
+	Findings                Findings
+	Duration                time.Duration
 	// BaseDriftNote is set when the base branch moved during the review. The
 	// head staying put is what makes the findings still valid, so this is a
 	// note on the comment rather than a failure.
@@ -253,10 +257,18 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err := r.aggregate(ctx, o, run, env, opts, prompt, len(indices), rep); err != nil {
 		return nil, err
 	}
+	if err := r.verify(ctx, o, run, env, opts, verifierPrompt(promptMeta{
+		URL: pr.URL, Title: pr.Title, Author: pr.Author.Login, BaseRef: baseRef,
+		BaseSHA: reviewedBase, HeadSHA: reviewedHead,
+		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
+	}), reviewedHead, rep); err != nil {
+		return nil, err
+	}
 
 	res := &Result{
 		RunDir: run.root, OutputDir: run.output, CommentFile: run.comment,
-		BaseDriftNote: driftNote,
+		VerificationChangesFile: run.changes,
+		BaseDriftNote:           driftNote,
 	}
 	res.Findings = Findings{
 		Schema: 1, PR: pr.Number, HeadSHA: reviewedHead, BaseSHA: reviewedBase,
@@ -301,13 +313,15 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 
 // runPaths are the files one run works with.
 type runPaths struct {
-	root     string
-	output   string
-	worktree string
-	target   string
-	comment  string
-	all      string
-	findings string
+	root      string
+	output    string
+	worktree  string
+	target    string
+	comment   string
+	candidate string
+	changes   string
+	all       string
+	findings  string
 }
 
 func (o Options) runDir(number int, branch string) (runPaths, error) {
@@ -330,13 +344,15 @@ func (o Options) runDir(number int, branch string) (runPaths, error) {
 	}
 	out := filepath.Join(root, "output")
 	return runPaths{
-		root:     root,
-		output:   out,
-		worktree: filepath.Join(root, "worktree"),
-		target:   filepath.Join(root, "target.json"),
-		comment:  filepath.Join(out, "final-pr-comment.md"),
-		all:      filepath.Join(out, "all-reviewers.md"),
-		findings: filepath.Join(out, "findings.json"),
+		root:      root,
+		output:    out,
+		worktree:  filepath.Join(root, "worktree"),
+		target:    filepath.Join(root, "target.json"),
+		comment:   filepath.Join(out, "final-pr-comment.md"),
+		candidate: filepath.Join(out, "aggregated-pr-comment.md"),
+		changes:   filepath.Join(out, "verification-changes.md"),
+		all:       filepath.Join(out, "all-reviewers.md"),
+		findings:  filepath.Join(out, "findings.json"),
 	}, nil
 }
 
@@ -575,12 +591,13 @@ func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, b
 	return "", nil
 }
 
-// aggregate merges the reviewer outputs into the final comment, retrying once
-// when the structure is wrong. A run that still cannot produce it fails rather
-// than posting something findings.json would misread.
+// aggregate merges the reviewer outputs into the candidate comment, retrying
+// once when the structure is wrong. A run that still cannot produce it fails
+// rather than passing malformed input to the verifier.
 func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env envexec.Env, opts codex.Options, prompt string, reviewers int, rep Reporter) error {
 	logPath := filepath.Join(run.output, "aggregator.log")
 	var lastErr error
+	appendEvent(run.output, "aggregate")
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		rep.Aggregating(reviewers, attempt)
@@ -596,13 +613,13 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 		}
 		// The shell version ran the aggregator without any timeout at all, so a
 		// hung pass stalled the run indefinitely. It gets the reviewer timeout.
-		err = opts.Aggregate(ctx, env, o.ReviewTimeout, prompt, run.comment, all, logFile)
+		err = opts.Aggregate(ctx, env, o.ReviewTimeout, prompt, run.candidate, all, logFile)
 		all.Close()
 		logFile.Close()
 
 		if err != nil {
 			lastErr = fmt.Errorf("codex exited nonzero, see %s", logPath)
-		} else if lastErr = ValidateComment(run.comment); lastErr == nil {
+		} else if lastErr = ValidateComment(run.candidate); lastErr == nil {
 			return nil
 		}
 		if attempt == 1 {
@@ -610,7 +627,80 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 		}
 	}
 	return fmt.Errorf("%w after 2 attempts (%v); refusing to post, see %s",
-		ErrAggregatorInvalid, lastErr, run.comment)
+		ErrAggregatorInvalid, lastErr, run.candidate)
+}
+
+// verify independently checks every aggregated finding against the worktree.
+// The model may refine the report, but HEAD and the complete porcelain status
+// must remain unchanged. Any repository mutation fails immediately; malformed
+// report output gets one retry. Nothing is posted before both gates pass.
+func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexec.Env, opts codex.Options, prompt, expectedHead string, rep Reporter) error {
+	logPath := filepath.Join(run.output, "verifier.log")
+	var lastErr error
+	appendEvent(run.output, "verify")
+	if err := r.verifierWorktreeUnchanged(ctx, run.worktree, expectedHead); err != nil {
+		return fmt.Errorf("%w before execution: %v", ErrVerifierInvalid, err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		rep.Verifying(attempt)
+		attemptPrompt := prompt
+		if attempt > 1 {
+			attemptPrompt += fmt.Sprintf("\n\nYour previous output was rejected: %v. Correct that error and return the complete report again.", lastErr)
+		}
+
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			return err
+		}
+		candidate, err := os.Open(run.candidate)
+		if err != nil {
+			logFile.Close()
+			return err
+		}
+		err = opts.Verify(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
+		candidate.Close()
+		logFile.Close()
+		if stateErr := r.verifierWorktreeUnchanged(ctx, run.worktree, expectedHead); stateErr != nil {
+			return fmt.Errorf("%w: %v; refusing to retry or post", ErrVerifierInvalid, stateErr)
+		}
+
+		validationErr := ValidateComment(run.comment)
+		switch {
+		case err != nil:
+			lastErr = fmt.Errorf("codex exited nonzero, see %s", logPath)
+		case validationErr != nil:
+			lastErr = validationErr
+		default:
+			if err := writeVerificationChanges(run.candidate, run.comment, run.changes); err != nil {
+				return err
+			}
+			return nil
+		}
+		if attempt == 1 {
+			rep.Warn(fmt.Sprintf("verifier: attempt 1 produced invalid output (%v), retrying", lastErr))
+		}
+	}
+	return fmt.Errorf("%w after 2 attempts (%v); refusing to post, see %s",
+		ErrVerifierInvalid, lastErr, run.comment)
+}
+
+func (r *Runner) verifierWorktreeUnchanged(ctx context.Context, worktree, expectedHead string) error {
+	head, err := r.Git.RevParse(ctx, worktree, "HEAD")
+	if err != nil {
+		return fmt.Errorf("checking verifier HEAD: %w", err)
+	}
+	if head != expectedHead {
+		return fmt.Errorf("verifier changed HEAD from %s to %s", expectedHead, head)
+	}
+	status, err := r.Git.StatusPorcelain(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("checking verifier worktree status: %w", err)
+	}
+	if status != "" {
+		return fmt.Errorf("verifier left staged, unstaged, or untracked changes:\n%s", status)
+	}
+	return nil
 }
 
 // gc drops run directories and shared dependency trees nothing has needed for a

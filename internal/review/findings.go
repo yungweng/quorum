@@ -112,6 +112,119 @@ func CountFile(path, heading string) int {
 	return Count(string(data), heading)
 }
 
+// writeVerificationChanges records every finding block that differs between
+// the aggregated candidate and final report. Exact matches disappear from the
+// log. A rewrite therefore leaves both its old form under "Candidate" and its
+// new form under "Final", without adding a second PR comment.
+func writeVerificationChanges(candidatePath, verifiedPath, changesPath string) error {
+	candidate, err := os.ReadFile(candidatePath)
+	if err != nil {
+		return fmt.Errorf("reading the aggregated candidate: %w", err)
+	}
+	verified, err := os.ReadFile(verifiedPath)
+	if err != nil {
+		return fmt.Errorf("reading the verified comment: %w", err)
+	}
+
+	var b strings.Builder
+	b.WriteString("# Verification changes\n\n")
+	b.WriteString("Local audit only. The final PR comment is the verified report.\n")
+	changed := false
+	for _, section := range countedSections {
+		before, _ := sectionFindings(string(candidate), section)
+		after, _ := sectionFindings(string(verified), section)
+		removed, added := findingDifference(before, after)
+		if len(removed) == 0 && len(added) == 0 {
+			continue
+		}
+		changed = true
+		fmt.Fprintf(&b, "\n## %s\n", section)
+		writeChangedFindings(&b, "Candidate findings removed or rewritten", removed)
+		writeChangedFindings(&b, "Final findings added or rewritten", added)
+	}
+	if !changed {
+		b.WriteString("\nNo finding changes.\n")
+	}
+	if err := os.WriteFile(changesPath, []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("writing verification changes: %w", err)
+	}
+	return nil
+}
+
+func findingDifference(before, after []string) (removed, added []string) {
+	afterCount := make(map[string]int, len(after))
+	for _, finding := range after {
+		afterCount[finding]++
+	}
+	for _, finding := range before {
+		if afterCount[finding] > 0 {
+			afterCount[finding]--
+			continue
+		}
+		removed = append(removed, finding)
+	}
+
+	beforeCount := make(map[string]int, len(before))
+	for _, finding := range before {
+		beforeCount[finding]++
+	}
+	for _, finding := range after {
+		if beforeCount[finding] > 0 {
+			beforeCount[finding]--
+			continue
+		}
+		added = append(added, finding)
+	}
+	return removed, added
+}
+
+func writeChangedFindings(b *strings.Builder, title string, findings []string) {
+	if len(findings) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n### %s\n\n", title)
+	for _, finding := range findings {
+		for _, line := range strings.Split(finding, "\n") {
+			fmt.Fprintf(b, "> %s\n", line)
+		}
+		b.WriteByte('\n')
+	}
+}
+
+// sectionFindings returns complete top-level finding blocks. A block starts at
+// a bullet and includes its continuation lines through the next bullet, so the
+// changelog compares the complete old and new wording. stray is non-empty prose
+// before the first bullet; "None." is allowed for an empty section.
+func sectionFindings(text, heading string) (out []string, stray string) {
+	var current []string
+	flush := func() {
+		for len(current) > 1 && strings.TrimSpace(current[len(current)-1]) == "" {
+			current = current[:len(current)-1]
+		}
+		if len(current) > 0 {
+			out = append(out, strings.Join(current, "\n"))
+		}
+		current = nil
+	}
+
+	forEachLineIn(text, heading, func(line string) {
+		if bulletRe.MatchString(line) {
+			flush()
+			current = []string{line}
+			return
+		}
+		if current != nil {
+			current = append(current, line)
+			return
+		}
+		if trimmed := strings.TrimSpace(line); trimmed != "" && !isNone(trimmed) && stray == "" {
+			stray = trimmed
+		}
+	})
+	flush()
+	return out, stray
+}
+
 // sectionContentOK accepts a section that either holds bullets or says "None."
 // and nothing else. A section with prose but no bullets would count as zero
 // findings while actually describing some, so it fails instead.

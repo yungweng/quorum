@@ -642,7 +642,9 @@ func reviewProgress(runDir string, requested int) string {
 		if p.Failed > 0 {
 			progress += fmt.Sprintf(", %d failed", p.Failed)
 		}
-		if p.Done+p.Failed >= p.Requested {
+		if p.Phase == "verify" {
+			progress = "verifying findings"
+		} else if p.Phase == "aggregate" || p.Done+p.Failed >= p.Requested {
 			progress = "aggregating"
 		}
 	}
@@ -763,6 +765,8 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 		what = "resolving merge conflicts"
 	case loop.PhaseDivergence:
 		what = "analyzing divergence"
+	case loop.PhaseDescription:
+		what = "updating PR description"
 	default:
 		return "", ""
 	}

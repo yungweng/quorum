@@ -476,6 +476,7 @@ type Progress struct {
 	Done      int
 	Failed    int
 	Requested int
+	Phase     string
 }
 
 // ReadProgress counts finished reviewers of a run in flight, from the events
@@ -503,6 +504,10 @@ func ReadProgress(runDir string, requested int) (Progress, bool) {
 			p.Done++
 		case strings.HasPrefix(sc.Text(), "fail "):
 			p.Failed++
+		case sc.Text() == "aggregate":
+			p.Phase = "aggregate"
+		case sc.Text() == "verify":
+			p.Phase = "verify"
 		}
 	}
 	return p, true

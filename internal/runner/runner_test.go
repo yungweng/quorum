@@ -129,6 +129,22 @@ func TestReadProgressStarted(t *testing.T) {
 	}
 }
 
+func TestReadProgressTracksAggregationAndVerification(t *testing.T) {
+	runDir := t.TempDir()
+	out := filepath.Join(runDir, "output")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(out, "events.log")
+	if err := os.WriteFile(path, []byte("start\nok 1 10 1\naggregate\nverify\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := ReadProgress(runDir, 1)
+	if !ok || p.Phase != "verify" {
+		t.Fatalf("progress = %+v, ok = %v", p, ok)
+	}
+}
+
 func TestSummaryLine(t *testing.T) {
 	if got := summaryLine(review.Findings{}); got != "nothing found" {
 		t.Errorf("empty findings rendered as %q", got)

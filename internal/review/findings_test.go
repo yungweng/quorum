@@ -3,6 +3,7 @@ package review
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,55 @@ func TestCountsBulletsPerSection(t *testing.T) {
 		if got := CountFile(path, tc.heading); got != tc.want {
 			t.Errorf("%s = %d, want %d", tc.heading, got, tc.want)
 		}
+	}
+}
+
+func TestVerificationChangesRecordsBothSidesWithoutUnchangedFindings(t *testing.T) {
+	final := strings.ReplaceAll(goodComment,
+		"- `parseAmount` returns cents where callers expect euros.\n", "")
+	final = strings.ReplaceAll(final,
+		"- The retry loop has no upper bound.",
+		"- The retry loop has no upper bound and can exhaust the request budget.")
+	final = strings.ReplaceAll(final, "## Questions\n\nNone.",
+		"## Questions\n\n- Should retries share the caller's deadline?")
+
+	changes := filepath.Join(t.TempDir(), "verification-changes.md")
+	if err := writeVerificationChanges(write(t, goodComment), write(t, final), changes); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"Candidate findings removed or rewritten",
+		"`parseAmount` returns cents where callers expect euros",
+		"The retry loop has no upper bound.",
+		"Final findings added or rewritten",
+		"can exhaust the request budget",
+		"Should retries share the caller's deadline?",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("change log is missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "migration drops the column") {
+		t.Errorf("unchanged finding leaked into the change log:\n%s", got)
+	}
+}
+
+func TestVerificationChangesSaysWhenReportPassedThrough(t *testing.T) {
+	changes := filepath.Join(t.TempDir(), "verification-changes.md")
+	if err := writeVerificationChanges(write(t, goodComment), write(t, goodComment), changes); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "No finding changes.") {
+		t.Fatalf("unchanged report log = %s", data)
 	}
 }
 

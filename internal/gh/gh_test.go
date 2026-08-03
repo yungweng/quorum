@@ -140,6 +140,37 @@ func TestApproveReturnsReviewID(t *testing.T) {
 	}
 }
 
+func TestEditPRBodyUsesABodyFile(t *testing.T) {
+	dir := t.TempDir()
+	bodyPath := filepath.Join(dir, "final-description.md")
+	want := "## Summary\n\nUses `$HOME` literally.\n"
+	if err := os.WriteFile(bodyPath, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argsPath := filepath.Join(dir, "args")
+	copiedPath := filepath.Join(dir, "copied")
+	bin, _ := fakeGH(t, `
+printf '%s\n' "$*" > `+argsPath+`
+cat "$5" > `+copiedPath)
+	if err := testClient(bin).EditPRBody(context.Background(), dir, 42, bodyPath); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(args)) != "pr edit 42 --body-file "+bodyPath {
+		t.Fatalf("gh args = %q", args)
+	}
+	copied, err := os.ReadFile(copiedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(copied) != want {
+		t.Fatalf("body = %q, want %q", copied, want)
+	}
+}
+
 func TestMergeHeadRejectsUnmergedResponse(t *testing.T) {
 	bin, _ := fakeGH(t, `echo '{"merged":false,"message":"Base branch was modified"}'`)
 	err := testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123", MergeMethodMerge)

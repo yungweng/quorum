@@ -80,6 +80,45 @@ Important execution rules:
 	return b.String()
 }
 
+// verifierPrompt asks a fresh pass to judge the aggregated findings against
+// the checked-out code. It sees the candidate report, not the raw reviewer
+// discussion, so repetition cannot replace evidence. The prompt is neutral:
+// true findings survive, false findings go, and useful corrections stay
+// visible through the changelog Go derives from both reports.
+func verifierPrompt(m promptMeta) string {
+	var target strings.Builder
+	if m.BranchOnly {
+		fmt.Fprintf(&target, "Branch: %s\nTitle: %s\n", m.Branch, m.Title)
+	} else {
+		fmt.Fprintf(&target, "PR: %s\nTitle: %s\nAuthor: @%s\n", m.URL, m.Title, m.Author)
+	}
+	fmt.Fprintf(&target, "Base: %s\nBase SHA reviewed: %s\nHead SHA: %s", m.BaseRef, m.BaseSHA, m.HeadSHA)
+
+	return fmt.Sprintf(`Act as an independent evidence verifier for the candidate code-review report on stdin.
+
+%s
+
+The candidate report contains claims that require checking. Some may be true positives, some may be false positives, and some may identify a real issue imprecisely. Do not aim for any predetermined outcome or proportion. Judge each finding on the repository evidence, independent of reviewer agreement or wording.
+
+Inspect the local diff and relevant code for every bullet under Blockers, Critical, Suggestions, and Questions. Trace the actual control and error paths. Use read-only inspection first. You may run focused commands or tests when they materially help verify a claim. Do not edit source, tests, configuration, generated files, or repository metadata. Do not stage or commit anything. Put any disposable artifact you intentionally create under $TMPDIR or /tmp, outside the repository.
+
+For each candidate finding:
+- Preserve it unchanged when it is accurate, sufficiently specific, and correctly rated.
+- Rewrite it when the underlying issue is real but its scope, severity, conditions, location, explanation, or evidence needs correction. Keep the final wording concise and concrete.
+- Remove the entire finding when it is wrong, already handled, intended behavior, outside the changed code's responsibility, purely speculative, or unsupported after reasonable investigation.
+- Add a new finding only when verification directly reveals a distinct, high-confidence defect within the changed code or its immediate behavior. Do not add unrelated cleanup, style preferences, or speculative hardening.
+
+Do not favor keeping, changing, adding, or removing findings. Apply the same evidence standard to every outcome.
+
+Output rules:
+- Return only the complete final Markdown report body. Do not wrap it in a code fence.
+- Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- List every final finding as a top-level bullet beginning with "- ". If a section has no findings, write "None." as its only content.
+- Rewrite the summary so it describes only the final findings. Do not discuss discarded claims or the verification process.
+- Preserve a concise opening suitable for the candidate's target. Do not mention reviewers, verification, Codex, or automation.
+- Do not use the network, post comments, or run gh, curl, or xh.`, target.String())
+}
+
 // promptMeta is what the aggregator needs to know about the run.
 type promptMeta struct {
 	URL           string

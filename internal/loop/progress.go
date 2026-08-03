@@ -26,6 +26,7 @@ const (
 	PhaseCIFix       = "ci-fix"
 	PhaseConflictFix = "conflict-fix"
 	PhaseDivergence  = "divergence"
+	PhaseDescription = "description"
 )
 
 // Check states the progress file records. Empty means nothing is known yet.

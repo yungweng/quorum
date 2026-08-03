@@ -50,7 +50,8 @@ func TestSerenaIsDisabledWhenAsked(t *testing.T) {
 }
 
 // The sandbox bypass is what lets a fix session run tests, use gh and push
-// unattended. It must never appear on a review, which runs read-only.
+// unattended. It must never appear on the review side; even its verifier stays
+// inside a workspace-write sandbox with a separate Git integrity gate.
 func TestBypassOnlyWhenRequested(t *testing.T) {
 	const bypass = "--dangerously-bypass-approvals-and-sandbox"
 	if !strings.Contains(strings.Join(Options{Bypass: true}.flags(), " "), bypass) {
