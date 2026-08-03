@@ -19,6 +19,8 @@ type Header struct {
 	Local          bool
 	Model          string
 	Effort         string
+	ReviewModel    string
+	ReviewEffort   string
 	Bypass         bool
 	Interactive    bool
 	MaxIter        int

@@ -282,18 +282,18 @@ func (a *app) settings() []setting {
 		}},
 
 		{"fix sessions", func(c config.Config) string {
-			model := c.FixModel
-			if model == "" {
-				model = "your codex default"
-			}
 			return fmt.Sprintf("%s, up to %d rounds, %s per step",
-				model, c.MaxIter, config.FormatDuration(c.FixTimeout))
+				modelDesc(c.FixModel, c.FixEffort), c.MaxIter, config.FormatDuration(c.FixTimeout))
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
 			v, err := a.askText(in, "model for the fix sessions (empty keeps your codex default)", c.FixModel)
 			if err != nil {
 				return err
 			}
 			c.FixModel = strings.TrimSpace(v)
+			if err := a.pick(in, "How hard should the fix sessions think?", c, defaultEffortOptions(
+				func(c *config.Config) *string { return &c.FixEffort }), nil); err != nil {
+				return err
+			}
 			n, err := a.askText(in, "maximum review to fix rounds", fmt.Sprint(c.MaxIter))
 			if err != nil {
 				return err
@@ -663,6 +663,19 @@ func effortOptions(field func(*config.Config) *string) []option {
 		}})
 	}
 	return out
+}
+
+func defaultEffortOptions(field func(*config.Config) *string) []option {
+	out := []option{{
+		label:  "your codex default",
+		detail: "do not override the reasoning effort",
+		apply:  func(c *config.Config) { *field(c) = "" },
+		match: func(c config.Config) bool {
+			cc := c
+			return *field(&cc) == ""
+		},
+	}}
+	return append(out, effortOptions(field)...)
 }
 
 // secs turns a configured interval in seconds into a duration.

@@ -394,6 +394,7 @@ func (r *run) prepare() error {
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Draft: pr.IsDraft, Local: r.o.Local,
 		Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
+		ReviewModel: r.o.ReviewModel, ReviewEffort: r.o.ReviewEffort,
 		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		DivergenceScan: r.o.DivergenceScan,
 		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,

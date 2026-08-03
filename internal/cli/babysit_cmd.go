@@ -355,7 +355,8 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	}
 	o.Row("repo", h.Repo)
 	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
-	o.Row("model", modelDesc(h.Model, h.Effort))
+	o.Row("review model", modelDesc(h.ReviewModel, h.ReviewEffort))
+	o.Row("fix model", modelDesc(h.Model, h.Effort))
 	// The sandbox line is the one thing here worth reading twice: bypassed
 	// means these sessions push and run tests unattended.
 	if h.Bypass {

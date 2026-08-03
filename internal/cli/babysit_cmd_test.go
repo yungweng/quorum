@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
@@ -131,6 +132,55 @@ func TestBabysitDivergenceFlagIsBoolean(t *testing.T) {
 	}
 	if !reflect.DeepEqual(args.pos, []string{"42", "focus on retries"}) {
 		t.Fatalf("positionals = %q", args.pos)
+	}
+}
+
+func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
+	var out bytes.Buffer
+	rep := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+	rep.Header(loop.Header{
+		Repo: "acme/api", Branch: "feature", Base: "main",
+		ReviewModel: "gpt-5.6-terra", ReviewEffort: "medium",
+		Model: "", Effort: "", MaxIter: 12, FixTimeout: 2 * time.Hour,
+	})
+
+	got := out.String()
+	for _, want := range []string{
+		"review model", "gpt-5.6-terra (effort medium)",
+		"fix model", "codex default",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("header is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestFixSessionSettingShowsModelAndEffort(t *testing.T) {
+	a := testApp(t)
+	var fix setting
+	for _, s := range a.settings() {
+		if s.name == "fix sessions" {
+			fix = s
+			break
+		}
+	}
+	if fix.value == nil {
+		t.Fatal("fix sessions setting is missing")
+	}
+
+	cfg := a.cfg
+	cfg.FixModel = "gpt-5.6-sol"
+	cfg.FixEffort = "high"
+	got := fix.value(cfg)
+	if !strings.Contains(got, "gpt-5.6-sol (effort high)") {
+		t.Fatalf("fix sessions value = %q", got)
+	}
+}
+
+func TestDefaultEffortOptionHasAVisibleLabel(t *testing.T) {
+	opts := defaultEffortOptions(func(c *config.Config) *string { return &c.FixEffort })
+	if len(opts) == 0 || opts[0].label != "your codex default" {
+		t.Fatalf("effort options = %+v", opts)
 	}
 }
 
