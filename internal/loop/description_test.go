@@ -27,7 +27,14 @@ func descriptionTestGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func descriptionFixture(t *testing.T, original, final string) (*run, *Result, string) {
+type descriptionPaths struct {
+	stdin    string
+	editArgs string
+	ghBin    string
+	original string
+}
+
+func descriptionFixture(t *testing.T, original, final string) (*run, *Result, descriptionPaths) {
 	t.Helper()
 	root := t.TempDir()
 	worktree := filepath.Join(root, "worktree")
@@ -84,11 +91,15 @@ cp "` + resultPath + `" "$out"
 		t.Fatal(err)
 	}
 	countPath := filepath.Join(root, "gh-count")
+	editArgsPath := filepath.Join(root, "gh-edit-args")
 	ghBin := filepath.Join(root, "gh")
 	ghScript := `#!/bin/sh
 set -eu
 n=$(cat "` + countPath + `" 2>/dev/null || echo 0)
 n=$((n+1)); echo "$n" > "` + countPath + `"
+case " $* " in
+  *" edit "*) echo "$*" > "` + editArgsPath + `"; exit 0 ;;
+esac
 case "$n" in
   1|2) cat "` + originalJSONPath + `" ;;
   *) echo "unexpected gh call $n: $*" >&2; exit 1 ;;
@@ -112,20 +123,23 @@ esac
 		worktree: worktree, msgDir: filepath.Join(root, "messages"), logDir: filepath.Join(root, "logs"),
 		env: envexec.Env{Worktree: worktree},
 	}
-	return r, &Result{PR: originalPR, Converged: true}, stdinPath
+	paths := descriptionPaths{
+		stdin: stdinPath, editArgs: editArgsPath, ghBin: ghBin, original: originalJSONPath,
+	}
+	return r, &Result{PR: originalPR, Converged: true}, paths
 }
 
-func TestFinishPRDescriptionGeneratesCandidateWithoutEditingPR(t *testing.T) {
+func TestFinishPRDescriptionUpdatesChangedBody(t *testing.T) {
 	original := "## Summary\n\nBound retry attempts.\n"
 	final := "## Summary\n\nBounds retries by the caller deadline.\n"
-	r, result, stdinPath := descriptionFixture(t, original, final)
+	r, result, paths := descriptionFixture(t, original, final)
 	if err := r.finishPRDescription(result); err != nil {
 		t.Fatal(err)
 	}
-	if result.PRDescriptionCurrent || result.PRDescriptionFile == "" {
+	if result.PRDescriptionCurrent || !result.PRDescriptionUpdated || result.PRDescriptionFile == "" {
 		t.Fatalf("result = %+v", result)
 	}
-	stdin, err := os.ReadFile(stdinPath)
+	stdin, err := os.ReadFile(paths.stdin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,16 +153,56 @@ func TestFinishPRDescriptionGeneratesCandidateWithoutEditingPR(t *testing.T) {
 	if string(generated) != strings.TrimSpace(final)+"\n" {
 		t.Fatalf("generated body = %q", generated)
 	}
+	editArgs, err := os.ReadFile(paths.editArgs)
+	if err != nil {
+		t.Fatalf("gh received no edit call: %v", err)
+	}
+	want := "pr edit 42 --body-file " + result.PRDescriptionFile
+	if strings.TrimSpace(string(editArgs)) != want {
+		t.Fatalf("gh edit args = %q, want %q", editArgs, want)
+	}
 }
 
 func TestFinishPRDescriptionRecognizesCurrentBody(t *testing.T) {
 	body := "## Summary\n\nBound retry attempts.\n"
-	r, result, _ := descriptionFixture(t, body, body)
+	r, result, paths := descriptionFixture(t, body, body)
 	if err := r.finishPRDescription(result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.PRDescriptionCurrent {
+	if !result.PRDescriptionCurrent || result.PRDescriptionUpdated {
 		t.Fatalf("result = %+v", result)
+	}
+	if _, err := os.Stat(paths.editArgs); err == nil {
+		t.Fatal("gh received an edit call for an unchanged body")
+	}
+}
+
+func TestFinishPRDescriptionKeepsCandidateWhenUpdateFails(t *testing.T) {
+	original := "## Summary\n\nBound retry attempts.\n"
+	final := "## Summary\n\nBounds retries by the caller deadline.\n"
+	r, result, paths := descriptionFixture(t, original, final)
+	ghScript := `#!/bin/sh
+set -eu
+case " $* " in
+  *" edit "*) echo "update rejected" >&2; exit 1 ;;
+esac
+cat "` + paths.original + `"
+`
+	if err := os.WriteFile(paths.ghBin, []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := r.finishPRDescription(result)
+	if err == nil || !strings.Contains(err.Error(), "updating PR description") {
+		t.Fatalf("error = %v, want update failure", err)
+	}
+	if result.PRDescriptionUpdated {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.PRDescriptionFile == "" {
+		t.Fatal("candidate path was not recorded")
+	}
+	if _, statErr := os.Stat(result.PRDescriptionFile); statErr != nil {
+		t.Fatalf("candidate file missing: %v", statErr)
 	}
 }
 

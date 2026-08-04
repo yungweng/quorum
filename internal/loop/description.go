@@ -15,11 +15,13 @@ const (
 	maxPRDescriptionBytes   = 64 * 1024
 )
 
-// finishPRDescription writes a final PR body candidate after the pipeline has
+// finishPRDescription writes the final PR body after the pipeline has
 // converged. It uses a fresh read-only session rather than the fix session so
 // the body describes the final state instead of narrating the fix history.
-// GitHub has no conditional body-update API, so the candidate stays local: an
-// unconditional update could overwrite a human edit or target a moved head.
+// GitHub has no conditional body-update API, so the closest safe equivalent is
+// used: re-read the PR and compare immediately before writing, and reject the
+// candidate on any drift in state, head or description. The remaining window
+// between that read and the write is one gh call wide.
 func (r *run) finishPRDescription(res *Result) error {
 	if r.target.BranchOnly || !r.o.Post {
 		return nil
@@ -75,7 +77,10 @@ func (r *run) finishPRDescription(res *Result) error {
 		ok = true
 		return nil
 	}
-	r.rep.Warn(fmt.Sprintf("GitHub has no conditional PR-description update; generated candidate left at %s", bodyPath))
+	if err := r.p.GH.EditPRBody(r.ctx, r.o.RepoRoot, r.pr.Number, bodyPath); err != nil {
+		return fmt.Errorf("updating PR description: %w; candidate left at %s", err, bodyPath)
+	}
+	res.PRDescriptionUpdated = true
 	ok = true
 	return nil
 }

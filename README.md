@@ -136,9 +136,10 @@ After a posted PR run converges with green CI, a fresh read-only pass writes a
 local PR-description candidate that describes the final implementation rather
 than the review and fix history. It preserves still-relevant links and
 instructions. If the final implementation materially departs from the original
-direction, it adds one short, calm warning at the top. GitHub has no conditional
-PR-body update, so quorum never replaces the remote description: an
-unconditional write could overwrite a human edit or target a moved head.
+direction, it adds one short, calm warning at the top. Immediately before
+writing, quorum re-reads the PR: if the description was edited or the head
+moved during the run, it keeps the candidate local instead of overwriting that
+work; otherwise it replaces the remote description.
 
 If the current branch has no open PR, `babysit` runs the same review-fix rounds
 on the clean, pushed branch. It still runs repository checks in each fix step

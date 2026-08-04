@@ -128,6 +128,15 @@ func (c *Client) CommentBody(ctx context.Context, dir string, number int, body s
 	return strings.TrimSpace(string(out)), nil
 }
 
+// EditPRBody replaces the pull request description from a file. GitHub has no
+// compare-and-swap for the body, so callers must re-read the PR and compare
+// immediately before calling; retrying is safe because re-sending the same
+// body is idempotent.
+func (c *Client) EditPRBody(ctx context.Context, dir string, number int, bodyFile string) error {
+	_, err := c.runIn(ctx, dir, "pr", "edit", fmt.Sprint(number), "--body-file", bodyFile)
+	return err
+}
+
 // PRReview is the part of a submitted GitHub review needed to make approval
 // idempotent. GitHub changes State to DISMISSED when an approval no longer
 // counts, so only APPROVED reviews are reusable.

@@ -61,8 +61,9 @@ implementation, not the sequence of findings and fixes. It keeps relevant
 links, rollout notes, test instructions and screenshots. When the final
 behavior, scope or architecture materially departs from the original direction,
 it adds one short warning at the top. Refinements and bug fixes do not trigger
-that warning. GitHub has no conditional PR-body update, so quorum leaves the
-remote description unchanged. `POST=0`, `--local` and branch-only runs skip
+that warning. Immediately before writing, quorum re-reads the PR and rejects
+the candidate if the description or head changed during the run; otherwise it
+replaces the remote description. `POST=0`, `--local` and branch-only runs skip
 generation.
 
 | Option | Meaning | Default |
@@ -155,13 +156,14 @@ posting or committing something misleading.
 - **Do not push to the target branch while a run is active.** A review refuses
   to use stale findings when the head moves under it, and the pipeline treats
   that as fatal.
-- **Final PR-description generation is guarded against stale input.** It checks
-  the PR head and exact description before generation and again afterward. If
-  either changed, the run rejects the candidate. The generator runs in a fresh
-  read-only session without the fix history or sandbox bypass; any local Git
-  mutation, empty body, fenced output or oversized body also stops the run.
-  Quorum keeps the candidate local because GitHub provides no conditional
-  PR-body update that could protect a human edit and the target head together.
+- **The final PR-description update is guarded against stale input.** It checks
+  the PR head and exact description before generation and again immediately
+  before the write. If either changed, the run rejects the candidate and keeps
+  it local. The generator runs in a fresh read-only session without the fix
+  history or sandbox bypass; any local Git mutation, empty body, fenced output
+  or oversized body also stops the run. GitHub provides no conditional PR-body
+  update, so the final re-read directly before the write is what protects a
+  human edit and the target head; the remaining race window is one API call.
 - The pipeline refuses to start on a dirty checkout of the target branch, or when
   your local branch differs from origin: it reviews the pushed head and would
   otherwise silently ignore your work.
@@ -405,8 +407,10 @@ and `verifier.log` records the verifier run. These are local audit artifacts;
 only `final-pr-comment.md` is posted.
 
 A successful posted `quorum babysit` also writes
-`messages/final-pr-description.md`. This is a local candidate for the final PR
-body. Quorum reports when the existing remote body already matches it.
+`messages/final-pr-description.md`, the final PR body. Quorum updates the
+remote description from it after a last drift check, reports when the remote
+body already matched, and keeps the file local when that check or the update
+fails.
 
 ## Files
 

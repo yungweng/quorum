@@ -502,7 +502,10 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 	}
 	if res.PRDescriptionFile != "" {
 		status := "generated locally"
-		if res.PRDescriptionCurrent {
+		switch {
+		case res.PRDescriptionUpdated:
+			status = "updated"
+		case res.PRDescriptionCurrent:
 			status = "already current"
 		}
 		o.Row("description", o.Green(status)+"  "+o.Link(o.Dim(filepath.Base(res.PRDescriptionFile)), "file://"+res.PRDescriptionFile))

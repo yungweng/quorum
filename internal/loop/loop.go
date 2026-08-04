@@ -158,6 +158,9 @@ type Result struct {
 	DivergenceCommentURL string
 	PRDescriptionFile    string
 	PRDescriptionCurrent bool
+	// PRDescriptionUpdated means the candidate replaced the remote body after
+	// the final drift check passed.
+	PRDescriptionUpdated bool
 }
 
 // Pipeline runs the review-fix cycle.
