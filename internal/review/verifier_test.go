@@ -181,7 +181,7 @@ func TestVerifierFailsClosedAfterTwoMalformedReports(t *testing.T) {
 
 func TestVerifierRejectsAnUnexpectedHead(t *testing.T) {
 	run, _, _, g, _ := fakeVerifier(t, goodComment, false)
-	err := (&Runner{Git: g}).verifierWorktreeUnchanged(context.Background(), run.worktree,
+	err := (&Runner{Git: g}).worktreeUnchanged(context.Background(), run.worktree,
 		"ffffffffffffffffffffffffffffffffffffffff")
 	if err == nil || !strings.Contains(err.Error(), "changed HEAD") {
 		t.Fatalf("HEAD check error = %v", err)

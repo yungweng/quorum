@@ -235,7 +235,7 @@ func (a *app) reviewExit(err error) int {
 		return 2
 	case errors.Is(err, review.ErrHeadDrifted):
 		return 3
-	case errors.Is(err, review.ErrAggregatorInvalid), errors.Is(err, review.ErrVerifierInvalid):
+	case errors.Is(err, review.ErrAggregatorInvalid), errors.Is(err, review.ErrReviewerInvalid), errors.Is(err, review.ErrVerifierInvalid):
 		return 4
 	default:
 		return exitError

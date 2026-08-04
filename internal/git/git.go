@@ -125,6 +125,21 @@ func (g G) StatusPorcelain(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "status", "--porcelain")
 }
 
+// StatusPorcelainTracked returns staged and unstaged changes to tracked files,
+// excluding untracked paths. Callers use it when generated files may be safe
+// to discard but changes to the checked-out source are not.
+func (g G) StatusPorcelainTracked(ctx context.Context, dir string) (string, error) {
+	return g.run(ctx, dir, "status", "--porcelain", "--untracked-files=no")
+}
+
+// CleanUntracked removes untracked files and directories while preserving
+// ignored paths. It is deliberately narrower than reset: tracked changes are
+// evidence of a bad run and must remain available for diagnosis.
+func (g G) CleanUntracked(ctx context.Context, dir string) error {
+	_, err := g.run(ctx, dir, "clean", "-fd")
+	return err
+}
+
 // LogOneline lists the commits in a range, one per line.
 func (g G) LogOneline(ctx context.Context, dir, revRange string) string {
 	out, _ := g.run(ctx, dir, "log", "--oneline", revRange)

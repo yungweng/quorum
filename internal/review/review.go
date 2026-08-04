@@ -41,6 +41,9 @@ var (
 	// ErrAggregatorInvalid means the aggregator could not produce a comment
 	// with the required structure, twice.
 	ErrAggregatorInvalid = errors.New("aggregator output invalid")
+	// ErrReviewerInvalid means a reviewer changed HEAD or a tracked file, or
+	// its untracked artifacts could not be removed safely.
+	ErrReviewerInvalid = errors.New("reviewer output invalid")
 	// ErrVerifierInvalid means the evidence pass failed, produced a malformed
 	// report twice, or changed the checked-out repository.
 	ErrVerifierInvalid = errors.New("verifier output invalid")
@@ -215,6 +218,9 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		if err := r.runReviewers(ctx, o, run, env, opts, baseRef, rep); err != nil {
 			return nil, err
 		}
+	}
+	if err := r.cleanReviewerArtifacts(ctx, run, reviewedHead, rep); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrReviewerInvalid, err)
 	}
 
 	indices, err := reviewerOutputs(run.output)
@@ -572,6 +578,50 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 	return ctx.Err()
 }
 
+// cleanReviewerArtifacts restores the disposable worktree to its checked-out
+// state after the reviewer fan-out. Reviewers may run builds and tests that
+// leave untracked caches behind; those are safe to discard because a fresh
+// worktree starts without untracked files. A moved HEAD or tracked mutation is
+// not repaired: reviewers may already have based findings on the changed code.
+func (r *Runner) cleanReviewerArtifacts(ctx context.Context, run runPaths, expectedHead string, rep Reporter) error {
+	head, err := r.Git.RevParse(ctx, run.worktree, "HEAD")
+	if err != nil {
+		return fmt.Errorf("checking reviewer HEAD: %w", err)
+	}
+	if head != expectedHead {
+		return fmt.Errorf("reviewers changed HEAD from %s to %s", expectedHead, head)
+	}
+
+	tracked, err := r.Git.StatusPorcelainTracked(ctx, run.worktree)
+	if err != nil {
+		return fmt.Errorf("checking reviewer tracked status: %w", err)
+	}
+	if tracked != "" {
+		return fmt.Errorf("reviewers left staged or unstaged tracked changes:\n%s", tracked)
+	}
+
+	status, err := r.Git.StatusPorcelain(ctx, run.worktree)
+	if err != nil {
+		return fmt.Errorf("checking reviewer worktree status: %w", err)
+	}
+	if status == "" {
+		return nil
+	}
+
+	logPath := filepath.Join(run.output, "reviewer-cleanup.log")
+	if err := os.WriteFile(logPath, []byte(status+"\n"), 0o644); err != nil {
+		return fmt.Errorf("recording reviewer artifacts: %w", err)
+	}
+	if err := r.Git.CleanUntracked(ctx, run.worktree); err != nil {
+		return fmt.Errorf("removing reviewer artifacts: %w", err)
+	}
+	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead); err != nil {
+		return fmt.Errorf("reviewer cleanup incomplete: %w", err)
+	}
+	rep.Warn(fmt.Sprintf("removed untracked reviewer artifacts; details in %s", logPath))
+	return nil
+}
+
 // checkDrift compares what was reviewed against what the remote holds now.
 func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, baseBranch, reviewedBase, reviewedHead string) (string, error) {
 	latestBase, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", "refs/heads/"+baseBranch)
@@ -648,7 +698,7 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 	logPath := filepath.Join(run.output, "verifier.log")
 	var lastErr error
 	appendEvent(run.output, "verify")
-	if err := r.verifierWorktreeUnchanged(ctx, run.worktree, expectedHead); err != nil {
+	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead); err != nil {
 		return fmt.Errorf("%w before execution: %v", ErrVerifierInvalid, err)
 	}
 
@@ -671,8 +721,8 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 		err = opts.Verify(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
 		candidate.Close()
 		logFile.Close()
-		if stateErr := r.verifierWorktreeUnchanged(ctx, run.worktree, expectedHead); stateErr != nil {
-			return fmt.Errorf("%w: %v; refusing to retry or post", ErrVerifierInvalid, stateErr)
+		if stateErr := r.worktreeUnchanged(ctx, run.worktree, expectedHead); stateErr != nil {
+			return fmt.Errorf("%w: verifier changed repository state: %v; refusing to retry or post", ErrVerifierInvalid, stateErr)
 		}
 
 		validationErr := ValidateComment(run.comment)
@@ -695,20 +745,20 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 		ErrVerifierInvalid, lastErr, run.comment)
 }
 
-func (r *Runner) verifierWorktreeUnchanged(ctx context.Context, worktree, expectedHead string) error {
+func (r *Runner) worktreeUnchanged(ctx context.Context, worktree, expectedHead string) error {
 	head, err := r.Git.RevParse(ctx, worktree, "HEAD")
 	if err != nil {
-		return fmt.Errorf("checking verifier HEAD: %w", err)
+		return fmt.Errorf("checking worktree HEAD: %w", err)
 	}
 	if head != expectedHead {
-		return fmt.Errorf("verifier changed HEAD from %s to %s", expectedHead, head)
+		return fmt.Errorf("worktree changed HEAD from %s to %s", expectedHead, head)
 	}
 	status, err := r.Git.StatusPorcelain(ctx, worktree)
 	if err != nil {
-		return fmt.Errorf("checking verifier worktree status: %w", err)
+		return fmt.Errorf("checking worktree status: %w", err)
 	}
 	if status != "" {
-		return fmt.Errorf("verifier left staged, unstaged, or untracked changes:\n%s", status)
+		return fmt.Errorf("worktree has staged, unstaged, or untracked changes:\n%s", status)
 	}
 	return nil
 }
