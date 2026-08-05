@@ -234,6 +234,10 @@ func widenPath() {
 	// npm puts globally installed tools into its own prefix, which is often
 	// somewhere non-standard. Asking npm costs a subprocess, so skip it only
 	// when the shell's existing PATH already resolves every supported tool.
+	// The optional tools stay in this list on purpose: npm's global prefix is
+	// the standard install location for claude and a common one for direnv,
+	// so a setup missing one pays the one subprocess rather than losing the
+	// tool.
 	allResolved := true
 	for _, name := range []string{"gh", "git", "codex", "claude", "direnv"} {
 		if _, err := exec.LookPath(name); err != nil {

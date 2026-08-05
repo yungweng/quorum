@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -117,6 +118,50 @@ func TestFinishReviewDoesNotRetryATooFewReviewersFailure(t *testing.T) {
 	}
 	if len(fake.calls) != 1 {
 		t.Fatalf("review ran %d times, want 1", len(fake.calls))
+	}
+}
+
+// A run handed a prior run's reviewer output (the agent's cross-poll resume
+// after a usage limit) must actually reuse it for its first round.
+func TestFirstRoundReusesAHandedInResumeDirectory(t *testing.T) {
+	fake := &fakeReviewer{}
+	fake.queue(&review.Result{RunDir: "/run/prior", CommentFile: commentFile(t)}, nil)
+
+	r := testRunWith(t, fake)
+	r.o.ResumeRun = "/run/prior"
+	r.startReviewWith(1, r.o.ResumeRun)
+	if _, _, err := r.finishReview(1); err != nil {
+		t.Fatalf("finishReview: %v", err)
+	}
+	if len(fake.calls) != 1 || fake.calls[0].ResumeRun != "/run/prior" {
+		t.Fatalf("review calls = %+v, want one resumed call", fake.calls)
+	}
+}
+
+// A handed-in directory that turns out unusable says nothing about the pull
+// request; the round must fall back to one fresh fan-out instead of failing.
+func TestFirstRoundFallsBackToAFreshRunWhenTheResumeIsUnusable(t *testing.T) {
+	for name, resumeErr := range map[string]error{
+		"unusable": fmt.Errorf("%w: output directory does not exist", review.ErrResumeUnusable),
+		"too few":  fmt.Errorf("%w: 2 available, need 3", review.ErrTooFewReviewers),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeReviewer{}
+			fake.queue(nil, resumeErr)
+			fake.queue(&review.Result{RunDir: "/run/2", CommentFile: commentFile(t)}, nil)
+
+			r := testRunWith(t, fake)
+			r.startReviewWith(1, "/run/stale")
+			if _, _, err := r.finishReview(1); err != nil {
+				t.Fatalf("finishReview: %v", err)
+			}
+			if len(fake.calls) != 2 {
+				t.Fatalf("review ran %d times, want 2", len(fake.calls))
+			}
+			if fake.calls[0].ResumeRun != "/run/stale" || fake.calls[1].ResumeRun != "" {
+				t.Fatalf("review calls = %+v, want a resumed call then a fresh one", fake.calls)
+			}
+		})
 	}
 }
 

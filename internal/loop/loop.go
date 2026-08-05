@@ -107,6 +107,11 @@ type Options struct {
 	// ResolveConflicts merges origin/<base> through the fix session whenever
 	// the branch conflicts with its base, before any review round.
 	ResolveConflicts bool
+	// ResumeRun reuses a prior review run's completed reviewer output for the
+	// first review round, the way a failed round's in-run retry does. Later
+	// rounds always fan out fresh: they review a head the saved output has
+	// never seen.
+	ResumeRun string
 
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
 	// sandbox. They must run tests, use gh and push, unattended, and a
@@ -464,7 +469,14 @@ func (r *run) execute() (*Result, error) {
 		return res, err
 	}
 
-	r.startReview(1)
+	// A conflict fix above moved the head, so a handed-in resume would replay
+	// reviewer output for a head that no longer exists; only an untouched head
+	// may reuse it.
+	resume := r.o.ResumeRun
+	if r.conflictFixes > 0 {
+		resume = ""
+	}
+	r.startReviewWith(1, resume)
 	if !r.target.BranchOnly {
 		r.rep.Step("CI")
 		r.enter(PhaseCI)

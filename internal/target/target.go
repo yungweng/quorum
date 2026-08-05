@@ -116,6 +116,13 @@ func resolveBranch(
 			return Target{}, err
 		}
 		if localSHA != headSHA {
+			// headSHA came from ls-remote and may not exist in the local object
+			// database yet; fetch the branch so the ancestor check below has
+			// the commit to compare against.
+			if ferr := gitc.Fetch(ctx, repoRoot, "origin",
+				"+refs/heads/"+branch+":refs/remotes/origin/"+branch); ferr != nil {
+				return Target{}, ferr
+			}
 			// A checkout that is merely behind origin loses nothing: the run
 			// works on origin's head. Only local commits of its own, which a
 			// push from elsewhere would overtake, are refused.

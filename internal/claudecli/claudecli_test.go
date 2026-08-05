@@ -61,8 +61,11 @@ func TestClassifyRecognisesQuotaRefusals(t *testing.T) {
 	if classify("Claude usage limit reached, resets at 3am") == nil {
 		t.Error("usage limit line was not classified")
 	}
-	if classify("API rate limit exceeded") == nil {
-		t.Error("rate limit line was not classified")
+	// A per-minute throttle is transient, not account exhaustion: with every
+	// reviewer starting at once it happens routinely and must not pause the
+	// agent.
+	if classify("API rate limit exceeded") != nil {
+		t.Error("a transient rate-limit throttle was classified as a quota refusal")
 	}
 	if classify("something else entirely broke") != nil {
 		t.Error("an unrelated failure was classified as a quota refusal")

@@ -122,7 +122,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	switch action {
 	case config.ActionBabysit:
 		findings, runDir, divergenceVerdict, divergenceURL, runErr =
-			r.babysit(ctx, key, clone, repo, number, runLog)
+			r.babysit(ctx, clone, repo, number, resumeDir, runLog)
 	default:
 		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, resumeDir, runLog)
 	}
@@ -192,6 +192,12 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			r.Log.Printf("%s: could not record the usage-limit pause: %v", key, pauseErr)
 		}
 		r.Log.Printf("%s: usage limit hit, pausing new reviews until %s", key, until.Format(time.RFC3339))
+		// A babysit failure reports the pipeline's own root as runDir, but the
+		// reviewer output worth resuming lives in the review round's directory,
+		// which travels in the error chain.
+		if reviewDir := runDirOf(runErr); reviewDir != "" {
+			runDir = reviewDir
+		}
 		r.recordUsageLimit(key, sha, runDir, runLog, until, runErr)
 		if wrote {
 			r.notify("Usage limit hit", "Pausing new reviews until "+until.Format(time.RFC1123), "")
@@ -391,7 +397,7 @@ func (r *Runner) recordUsageLimit(key, sha, runDir, runLog string, until time.Ti
 // This is what the three separate tools could not do: the daemon knew how to
 // start a review but had no way to reach the fix pipeline, because that was a
 // different binary with its own idea of where things live.
-func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, string, string, error) {
+func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, resumeDir, runLog string) (review.Findings, string, string, string, error) {
 	logFile, err := os.Create(runLog)
 	if err != nil {
 		return review.Findings{}, "", "", "", err
@@ -430,6 +436,7 @@ func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number in
 		// explicit opt-in the manual --draft flag provides in a terminal.
 		AllowDraft:       !r.Cfg.SkipDrafts,
 		ResolveConflicts: r.Cfg.ResolveConflicts,
+		ResumeRun:        resumeDir,
 		Bypass:           !r.Cfg.Sandboxed,
 		Interactive:      false,
 		UseDirenv:        true,

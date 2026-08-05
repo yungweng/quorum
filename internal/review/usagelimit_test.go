@@ -179,6 +179,21 @@ exit 1`)}
 	}
 }
 
+// A resume must never shrink the panel a run is measured against: two
+// surviving outputs of a six-reviewer fan-out are a shortfall, not a complete
+// two-reviewer panel. Extra outputs from a larger earlier run stay usable.
+func TestRequestedReviewersKeepsTheConfiguredPanelAsTheFloor(t *testing.T) {
+	if got := requestedReviewers(6, 2, true); got != 6 {
+		t.Fatalf("requestedReviewers(6, 2, resumed) = %d, want 6", got)
+	}
+	if got := requestedReviewers(2, 6, true); got != 6 {
+		t.Fatalf("requestedReviewers(2, 6, resumed) = %d, want 6", got)
+	}
+	if got := requestedReviewers(6, 4, false); got != 6 {
+		t.Fatalf("requestedReviewers(6, 4, fresh) = %d, want 6", got)
+	}
+}
+
 func TestResumeUnusableWrapsMissingRunDir(t *testing.T) {
 	o := Options{ResumeRun: filepath.Join(t.TempDir(), "gone")}
 	run, err := o.runDir(0, "")

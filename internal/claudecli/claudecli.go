@@ -122,25 +122,24 @@ func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration
 	return envl, nil
 }
 
-// classify recognises Claude's quota refusals. Unlike Codex there is no
-// single message to match, so this goes by the two phrasings the CLI uses;
-// no reset time is parsed because the messages do not carry a full date.
+// classify recognises Claude's quota refusals. Only "usage limit" phrasings
+// count as account exhaustion: a transient per-minute throttle says "rate
+// limit" too, and with every reviewer starting at once that is routine and
+// must fail like any other error instead of pausing the agent for an hour.
+// No reset time is parsed because the messages do not carry a full date.
 func classify(output string) *usagelimit.Error {
-	lower := strings.ToLower(output)
-	for _, marker := range []string{"usage limit", "rate limit"} {
-		if !strings.Contains(lower, marker) {
-			continue
-		}
-		line := output
-		for l := range strings.SplitSeq(output, "\n") {
-			if strings.Contains(strings.ToLower(l), marker) {
-				line = strings.TrimSpace(l)
-				break
-			}
-		}
-		return &usagelimit.Error{Line: line}
+	const marker = "usage limit"
+	if !strings.Contains(strings.ToLower(output), marker) {
+		return nil
 	}
-	return nil
+	line := output
+	for l := range strings.SplitSeq(output, "\n") {
+		if strings.Contains(strings.ToLower(l), marker) {
+			line = strings.TrimSpace(l)
+			break
+		}
+	}
+	return &usagelimit.Error{Line: line}
 }
 
 func firstLine(s string) string {

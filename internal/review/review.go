@@ -285,10 +285,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	requested := o.Runs
-	if o.ResumeRun != "" && len(indices) > 0 {
-		requested = len(indices)
-	}
+	requested := requestedReviewers(o.Runs, len(indices), o.ResumeRun != "")
 	minOK := o.MinSuccessful
 	if minOK == 0 {
 		minOK = (requested + 1) / 2
@@ -960,6 +957,20 @@ func (r *Runner) reporter() Reporter {
 		return NopReporter{}
 	}
 	return r.Rep
+}
+
+// requestedReviewers is the panel size a run is measured against: the
+// majority bar and the ReviewersRequested count both derive from it. A
+// resumed directory may hold more outputs than the current -n when the
+// configuration shrank between runs; those are all reused. It must never
+// lower the bar, though: a fan-out a usage limit cut short after two of six
+// reviewers would otherwise pass as a complete two-reviewer panel and be
+// reported as one.
+func requestedReviewers(runs, available int, resumed bool) int {
+	if resumed && available > runs {
+		return available
+	}
+	return runs
 }
 
 // reviewerOutputs lists the indices of reviewer passes that produced output.
