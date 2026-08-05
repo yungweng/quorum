@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/codex"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/review"
 )
 
@@ -226,9 +226,12 @@ func (r *run) analyzeDivergence() (*DivergenceReport, error) {
 	}
 	defer logFile.Close()
 
-	opts := codex.Options{
-		Bin: r.o.CodexBin, Model: r.o.ReviewModel, Effort: r.o.ReviewEffort,
-		DisableSerena: true,
+	eng, model, effort := review.ReviewEngineDefaults(r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
+	opts, err := engine.NewReviewer(eng, engine.ReviewerOptions{
+		Bin: r.o.engineBin(eng), Model: model, Effort: effort,
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := opts.Aggregate(r.ctx, r.env, r.o.DivergenceTimeout,
 		divergencePrompt(), rawPath, bytes.NewReader(trace), logFile); err != nil {

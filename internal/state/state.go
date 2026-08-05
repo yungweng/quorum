@@ -98,6 +98,10 @@ type Record struct {
 	// RunDir is pr-codex-review's run directory. status reads its events.log to
 	// show reviewer progress while a review is in flight.
 	RunDir string `json:"run_dir,omitempty"`
+	// ResumableRun reports that RunDir holds completed reviewer output worth
+	// reusing: the last attempt failed at aggregation, verification or a
+	// usage limit, not for a reason that invalidates the reviewer passes.
+	ResumableRun bool `json:"resumable_run,omitempty"`
 }
 
 // File is the on-disk document.

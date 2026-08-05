@@ -17,6 +17,7 @@ import (
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
+	"github.com/yungweng/quorum/internal/usagelimit"
 
 	"golang.org/x/term"
 )
@@ -29,8 +30,9 @@ var babysitBoolFlags = map[string]bool{
 }
 
 var babysitValueFlags = map[string]bool{
-	"model": true, "effort": true, "reviewers": true, "review-model": true,
-	"review-effort": true, "max-iter": true, "max-ci-fixes": true, "fix-timeout": true,
+	"engine": true, "model": true, "effort": true, "reviewers": true,
+	"review-engine": true, "review-model": true, "review-effort": true,
+	"max-iter": true, "max-ci-fixes": true, "fix-timeout": true,
 }
 
 func (a *app) cmdBabysit(argv []string) int {
@@ -76,9 +78,11 @@ func (a *app) cmdBabysit(argv []string) int {
 	o := loop.Options{
 		Repo: repo, RepoRoot: repoRoot, Number: number,
 		Context:              strings.Join(extraContext, " "),
+		Engine:               a.cfg.FixEngine,
 		Model:                a.cfg.FixModel,
 		Effort:               a.cfg.FixEffort,
 		Reviewers:            a.cfg.Reviewers,
+		ReviewEngine:         a.cfg.ReviewEngine,
 		ReviewModel:          a.cfg.ReviewModel,
 		ReviewEffort:         a.cfg.ReviewEffort,
 		Bypass:               !a.cfg.Sandboxed,
@@ -87,6 +91,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		ReviewRunsDir:        a.p.ReviewRuns,
 		DepsDir:              a.p.DepsCache,
 		CodexBin:             t.Codex,
+		ClaudeBin:            t.Claude,
 		DirenvBin:            t.Direnv,
 		Post:                 a.cfg.Post,
 		AllowDraft:           a.cfg.BabysitDrafts || args.boolean("draft"),
@@ -106,6 +111,14 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.die("%v", err)
 	}
 	if o.FixTimeout, err = args.duration(a.cfg.FixTimeout, "fix-timeout"); err != nil {
+		return a.die("%v", err)
+	}
+	o.Engine = args.str(o.Engine, "engine")
+	o.ReviewEngine = args.str(o.ReviewEngine, "review-engine")
+	if _, err := engineBinary(o.Engine, t, "--engine/FIX_ENGINE"); err != nil {
+		return a.die("%v", err)
+	}
+	if _, err := engineBinary(o.ReviewEngine, t, "--review-engine/REVIEW_ENGINE"); err != nil {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
@@ -275,6 +288,8 @@ func (a *app) babysitExit(err error) int {
 		return exitDiverged
 	case errors.Is(err, loop.ErrConflicts):
 		return exitConflicts
+	case errors.Is(err, usagelimit.Err):
+		return exitUsageLimit
 	default:
 		return exitError
 	}
@@ -296,16 +311,19 @@ branch conflicts with its base, the base is merged and the conflicts resolved
 before the first review; RESOLVE_CONFLICTS=0 or --no-resolve-conflicts turns
 that off.
 
-The fix sessions run with --dangerously-bypass-approvals-and-sandbox by
-default: they must run tests, use gh and push, all unattended. Pass
---sandboxed to use your codex defaults instead.
+The fix sessions run with the engine's sandbox and approvals bypassed by
+default (codex: --dangerously-bypass-approvals-and-sandbox, claude:
+--dangerously-skip-permissions): they must run tests, use gh and push, all
+unattended. Pass --sandboxed to use the engine's own defaults instead.
 
 Options:
-  --model MODEL          Model for the fix sessions. Default: your codex default
-  --effort LEVEL         minimal, low, medium, high, xhigh
+  --engine ENGINE        Engine for the fix sessions: codex or claude. Default: %s
+  --model MODEL          Model for the fix sessions. Default: the engine's default
+  --effort LEVEL         minimal, low, medium, high, xhigh, max, ultra (codex only)
   --reviewers N          Reviewer passes per review round. Default: %d
+  --review-engine ENGINE Engine for the review rounds. Default: %s
   --review-model MODEL   Model for the review rounds. Default: %s
-  --review-effort LEVEL  Effort for the review rounds. Default: %s
+  --review-effort LEVEL  Effort for the review rounds (codex only). Default: %s
   --max-iter N           Max review->fix rounds. Default: %d
   --max-ci-fixes N       Max PR CI fix attempts per green-CI phase. Default: %d
   --fix-timeout DUR      Kill a fix step that runs longer. Default: %s
@@ -314,7 +332,7 @@ Options:
   --local                Ignore any open PR: review and fix the pushed branch,
                          post nothing to GitHub
   --no-resolve-conflicts Do not merge the base branch when the branch conflicts
-  --sandboxed            Use your codex sandbox/approval defaults
+  --sandboxed            Use the engine's own sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line
   --no-notify            Disable completion and action notifications
@@ -330,7 +348,11 @@ Exit codes:
   5  a fix round produced no changes although findings remain
   6  the review/fix history contains incompatible decisions
   7  merge conflicts with the base branch remain unresolved
-`, a.cfg.Reviewers, a.cfg.ReviewModel, a.cfg.ReviewEffort,
+  8  the engine refused: its usage limit is exhausted
+`, orText(a.cfg.FixEngine, "codex"), a.cfg.Reviewers,
+		orText(a.cfg.ReviewEngine, "codex"),
+		orText(a.cfg.ReviewModel, review.DefaultModel),
+		orText(a.cfg.ReviewEffort, review.DefaultEffort),
 		a.cfg.MaxIter, a.cfg.MaxCIFixes, durationText(a.cfg.FixTimeout))
 }
 
@@ -360,9 +382,9 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	// The sandbox line is the one thing here worth reading twice: bypassed
 	// means these sessions push and run tests unattended.
 	if h.Bypass {
-		o.Row("sandbox", o.Yellow("bypassed")+o.Dim("  --dangerously-bypass-approvals-and-sandbox"))
+		o.Row("sandbox", o.Yellow("bypassed")+o.Dim("  unattended tests, gh and push"))
 	} else {
-		o.Row("sandbox", "codex defaults"+o.Dim("  --sandboxed"))
+		o.Row("sandbox", "engine defaults"+o.Dim("  --sandboxed"))
 	}
 	mode := "autonomous"
 	if h.Interactive {
@@ -584,8 +606,8 @@ func modelDesc(model, effort string) string {
 	case model != "":
 		return model
 	case effort != "":
-		return "codex default (effort " + effort + ")"
+		return "engine default (effort " + effort + ")"
 	default:
-		return "codex default"
+		return "engine default"
 	}
 }

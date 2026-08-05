@@ -53,7 +53,9 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 `PATH`, every new terminal uses this build. Check with `which quorum` and
 `quorum --version`.
 
-Requires `gh` (authenticated), `git` and `codex`. `terminal-notifier` sends
+Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) is
+optional and only needed when `REVIEW_ENGINE`/`FIX_ENGINE` or
+`--engine`/`--review-engine` select it. `terminal-notifier` sends
 notifications from detached macOS agent runs. Foreground commands normally
 notify through the terminal. When an own pull request needs another person's
 approval, quorum leaves a dedicated macOS Notification Center item that later
@@ -80,6 +82,7 @@ quorum review                         # current branch; its PR when one exists
 quorum review 1811
 quorum review https://github.com/owner/repo/pull/1811
 quorum review 1811 -n 8 --effort low
+quorum review 1811 --engine claude # review with Claude Code instead of Codex
 quorum review 1811 --dry-run       # write the report, do not post it
 ```
 

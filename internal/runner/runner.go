@@ -22,6 +22,7 @@ import (
 	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
 // Runner performs one automated review from start to finish.
@@ -45,6 +46,7 @@ type Runner struct {
 	GHBin  string
 
 	CodexBin  string
+	ClaudeBin string
 	DirenvBin string
 }
 
@@ -89,6 +91,9 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		return err
 	}
 
+	// The resume candidate must be read before Mark(Running) resets RunDir.
+	resumeDir := r.resumableRunDir(key, sha)
+
 	r.Log.Printf("%s: reviewing %s (%s)", key, short(sha), title)
 	r.mutate(key, func(rec *state.Record) {
 		rec.Title = title
@@ -97,6 +102,8 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		rec.SHA = sha
 		rec.RunLog = runLog
 		rec.RunDir = ""
+		// An orphaned run recovered later must never look resumable.
+		rec.ResumableRun = false
 		rec.StartedAt = state.Now()
 	})
 
@@ -117,7 +124,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		findings, runDir, divergenceVerdict, divergenceURL, runErr =
 			r.babysit(ctx, key, clone, repo, number, runLog)
 	default:
-		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, runLog)
+		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, resumeDir, runLog)
 	}
 
 	if runErr == nil {
@@ -155,6 +162,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			rec.Suggestions = state.Num(findings.Suggestions)
 			rec.Questions = state.Num(findings.Questions)
 			rec.Fails = 0
+			rec.ResumableRun = false
 			// Recording the request timestamp is what marks it as handled.
 			rec.ReqAt = reqAt
 		})
@@ -173,6 +181,24 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		return nil
 	}
 
+	var limit *usagelimit.Error
+	if errors.As(runErr, &limit) {
+		until := limit.ResetAt
+		if until.IsZero() || !until.After(time.Now()) {
+			until = time.Now().Add(defaultUsageLimitPause)
+		}
+		wrote, pauseErr := WritePause(r.P.StateDir, until)
+		if pauseErr != nil {
+			r.Log.Printf("%s: could not record the usage-limit pause: %v", key, pauseErr)
+		}
+		r.Log.Printf("%s: usage limit hit, pausing new reviews until %s", key, until.Format(time.RFC3339))
+		r.recordUsageLimit(key, sha, runDir, runLog, until, runErr)
+		if wrote {
+			r.notify("Usage limit hit", "Pausing new reviews until "+until.Format(time.RFC1123), "")
+		}
+		return fmt.Errorf("%s: usage limit, paused until %s", key, until.Format(time.RFC3339))
+	}
+
 	reason := runErr.Error()
 	if divergenceVerdict != "" {
 		r.Log.Printf("%s: STOPPED, divergence analysis = %s (log: %s)", key, divergenceVerdict, runLog)
@@ -187,8 +213,11 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	}
 	r.Log.Printf("%s: FAILED, %s (log: %s)", key, reason, runLog)
 	// The request timestamp stays unrecorded on purpose, so the next poll
-	// retries until MaxRetries is reached.
-	r.recordFailureWith(key, sha, runDir, reason, runLog)
+	// retries until MaxRetries is reached. An aggregator or verifier failure
+	// leaves the completed reviewer outputs reusable; that retry resumes them
+	// instead of paying for a fresh fan-out.
+	resumable := errors.Is(runErr, review.ErrAggregatorInvalid) || errors.Is(runErr, review.ErrVerifierInvalid)
+	r.recordFailureWith(key, sha, runDir, reason, runLog, resumable)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
 }
@@ -210,6 +239,7 @@ func (r *Runner) recordDivergenceResult(key, sha, reqAt, runDir, runLog, reportU
 		rec.Suggestions = state.Num(findings.Suggestions)
 		rec.Questions = state.Num(findings.Questions)
 		rec.Fails = 0
+		rec.ResumableRun = false
 		// Phase 1 is report-only. Mark this request handled so the agent
 		// cannot turn it into an unbounded sequence of fresh runs.
 		rec.ReqAt = reqAt
@@ -255,11 +285,14 @@ func (r *Runner) recordAutoMergeFailure(key, reqAt, runDir string, findings revi
 		rec.Questions = state.Num(findings.Questions)
 		rec.ReqAt = reqAt
 		rec.Fails = 0
+		rec.ResumableRun = false
 	})
 }
 
-// reviewOnce posts one review and stops.
-func (r *Runner) reviewOnce(ctx context.Context, key, clone, repo string, number int, runLog string) (review.Findings, string, error) {
+// reviewOnce posts one review and stops. A resumeDir from a prior failed
+// attempt is tried first; when the resume itself turns out unusable, one
+// fresh run replaces it, and only then.
+func (r *Runner) reviewOnce(ctx context.Context, key, clone, repo string, number int, resumeDir, runLog string) (review.Findings, string, error) {
 	logFile, err := os.Create(runLog)
 	if err != nil {
 		return review.Findings{}, "", err
@@ -275,11 +308,82 @@ func (r *Runner) reviewOnce(ctx context.Context, key, clone, repo string, number
 			r.mutate(key, func(rec *state.Record) { rec.RunDir = dir })
 		}},
 	}
-	res, err := rev.Run(ctx, r.reviewOptions(repo, number, clone))
+	opts := r.reviewOptions(repo, number, clone)
+	opts.ResumeRun = resumeDir
+	if resumeDir != "" {
+		r.Log.Printf("%s: resuming completed reviewer output from %s", key, resumeDir)
+	}
+	res, err := rev.Run(ctx, opts)
+	if err != nil && resumeDir != "" && resumeFallbackEligible(err) {
+		r.Log.Printf("%s: resume of %s failed (%v), starting a fresh run", key, resumeDir, err)
+		opts.ResumeRun = ""
+		res, err = rev.Run(ctx, opts)
+	}
 	if err != nil {
-		return review.Findings{}, "", err
+		return review.Findings{}, runDirOf(err), err
 	}
 	return res.Findings, res.RunDir, nil
+}
+
+// resumeFallbackEligible reports whether a resume attempt failed for a
+// resume-specific reason - the directory turned out unusable - rather than
+// the pull request itself being the problem. Aggregation or verification
+// failing again on genuinely reused reviewer output is not eligible: a fresh
+// run would spend a whole reviewer fan-out to hit the same wall.
+func resumeFallbackEligible(err error) bool {
+	return errors.Is(err, review.ErrResumeUnusable) || errors.Is(err, review.ErrTooFewReviewers)
+}
+
+// runDirOf recovers the run directory a failure happened in, when known.
+func runDirOf(err error) string {
+	var rd *review.RunDirError
+	if errors.As(err, &rd) {
+		return rd.RunDir
+	}
+	return ""
+}
+
+// resumableRunDir returns the prior run to resume for this pull request's
+// head, or "" when nothing qualifies: no record, not marked resumable, a
+// different head (the reviewer output would describe code that no longer
+// exists), or an output directory with no reviewer output left in it. The
+// cache collector may also have taken the directory in the meantime; that
+// race is accepted because a vanished directory fails as ErrResumeUnusable
+// and falls back to a fresh run.
+func (r *Runner) resumableRunDir(key, sha string) string {
+	st, err := state.Read(r.P.StateFile)
+	if err != nil {
+		return ""
+	}
+	rec, ok := st.PRs[key]
+	if !ok || !rec.ResumableRun || rec.RunDir == "" || rec.SHA != sha {
+		return ""
+	}
+	outputs, err := filepath.Glob(filepath.Join(rec.RunDir, "output", "reviewer-*.md"))
+	if err != nil || len(outputs) == 0 {
+		return ""
+	}
+	return rec.RunDir
+}
+
+// recordUsageLimit marks a review paused by the engine's usage limit. Fails
+// and ReqAt stay untouched: the refusal says nothing about this pull request,
+// so it must not count toward MaxRetries or mark the request handled. The
+// first poll after the pause reviews it again, resuming the run directory
+// when its reviewer outputs survived.
+func (r *Runner) recordUsageLimit(key, sha, runDir, runLog string, until time.Time, runErr error) {
+	resumable := runDir != "" && errors.As(runErr, new(*review.RunDirError))
+	r.mutate(key, func(rec *state.Record) {
+		rec.Mark(state.Deferred, "usage limit, paused until "+until.Format(time.RFC3339))
+		rec.SHA = sha
+		if runDir != "" {
+			rec.RunDir = runDir
+		}
+		if runLog != "" {
+			rec.RunLog = runLog
+		}
+		rec.ResumableRun = resumable
+	})
 }
 
 // babysit runs the full fix loop instead of a single review.
@@ -308,9 +412,11 @@ func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number in
 		Repo:                 repo,
 		RepoRoot:             clone,
 		Number:               number,
+		Engine:               r.Cfg.FixEngine,
 		Model:                r.Cfg.FixModel,
 		Effort:               r.Cfg.FixEffort,
 		Reviewers:            r.Cfg.Reviewers,
+		ReviewEngine:         r.Cfg.ReviewEngine,
 		ReviewModel:          r.Cfg.ReviewModel,
 		ReviewEffort:         r.Cfg.ReviewEffort,
 		MaxIter:              r.Cfg.MaxIter,
@@ -331,6 +437,7 @@ func (r *Runner) babysit(ctx context.Context, key, clone, repo string, number in
 		ReviewRunsDir:    r.P.ReviewRuns,
 		DepsDir:          r.P.DepsCache,
 		CodexBin:         r.CodexBin,
+		ClaudeBin:        r.ClaudeBin,
 		DirenvBin:        r.DirenvBin,
 	})
 	if res == nil {
@@ -352,6 +459,7 @@ func (r *Runner) reviewOptions(repo string, number int, clone string) review.Opt
 		// No concurrency limit: every pass runs at once, which is the point. A
 		// review that trickles through its passes is a review you wait for.
 		Runs:          r.Cfg.Reviewers,
+		Engine:        r.Cfg.ReviewEngine,
 		Model:         r.Cfg.ReviewModel,
 		Effort:        r.Cfg.ReviewEffort,
 		ReviewTimeout: r.Cfg.ReviewTimeout,
@@ -364,6 +472,7 @@ func (r *Runner) reviewOptions(repo string, number int, clone string) review.Opt
 		SharedRunsDirs:   []string{r.P.BabysitRuns},
 		DepsDir:          r.P.DepsCache,
 		CodexBin:         r.CodexBin,
+		ClaudeBin:        r.ClaudeBin,
 		DirenvBin:        r.DirenvBin,
 	}
 }
@@ -407,10 +516,10 @@ func (r *Runner) applyPriority() {
 }
 
 func (r *Runner) recordFailure(key, sha, runDir, reason string) {
-	r.recordFailureWith(key, sha, runDir, reason, "")
+	r.recordFailureWith(key, sha, runDir, reason, "", false)
 }
 
-func (r *Runner) recordFailureWith(key, sha, runDir, reason, runLog string) {
+func (r *Runner) recordFailureWith(key, sha, runDir, reason, runLog string, resumable bool) {
 	r.mutate(key, func(rec *state.Record) {
 		rec.Mark(state.Failed, reason)
 		rec.SHA = sha
@@ -421,6 +530,7 @@ func (r *Runner) recordFailureWith(key, sha, runDir, reason, runLog string) {
 		if runLog != "" {
 			rec.RunLog = runLog
 		}
+		rec.ResumableRun = resumable && rec.RunDir != ""
 	})
 }
 

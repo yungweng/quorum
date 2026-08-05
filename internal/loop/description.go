@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/codex"
+	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/review"
 )
 
 const (
@@ -49,9 +50,13 @@ func (r *run) finishPRDescription(res *Result) error {
 	if err != nil {
 		return err
 	}
-	safe := codex.Options{
-		Bin: r.o.CodexBin, Model: r.o.ReviewModel, Effort: r.o.ReviewEffort,
-		DisableSerena: true,
+	eng, model, effort := review.ReviewEngineDefaults(r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
+	safe, err := engine.NewReviewer(eng, engine.ReviewerOptions{
+		Bin: r.o.engineBin(eng), Model: model, Effort: effort,
+	})
+	if err != nil {
+		logFile.Close()
+		return err
 	}
 	err = safe.DescribePR(r.ctx, r.env, finalDescriptionTimeout,
 		finalDescriptionPrompt(r.pr.Number, r.pr.Title, r.pr.BaseRefName),

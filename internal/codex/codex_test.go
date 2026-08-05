@@ -11,7 +11,7 @@ import (
 // Codex silently ignores an unknown effort instead of failing, so a typo would
 // run every reviewer at the wrong setting and only show up in the bill.
 func TestEffortValidation(t *testing.T) {
-	for _, ok := range []string{"", "minimal", "low", "medium", "high", "xhigh"} {
+	for _, ok := range []string{"", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} {
 		if !ValidEffort(ok) {
 			t.Errorf("%q was rejected", ok)
 		}

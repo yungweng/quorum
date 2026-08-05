@@ -19,10 +19,11 @@ match `origin`. Run the command from inside that repository's checkout.
 
 | Option | Meaning | Default |
 |---|---|---|
-| `-n`, `--runs N` | Codex reviewer passes | 6 |
+| `-n`, `--runs N` | Reviewer passes | 6 |
 | `--concurrency N` | Reviewer passes at once | same as `--runs` |
-| `--model MODEL` | Model for reviewers, aggregator and verifier | `gpt-5.6-terra` |
-| `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh` | `medium` |
+| `--engine ENGINE` | `codex` or `claude` | `codex` |
+| `--model MODEL` | Model for reviewers, aggregator and verifier | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude) |
+| `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; codex only | `max` |
 | `--base BRANCH` | Base branch to review against | PR base or repository default |
 | `--dry-run` | Write the report to disk without posting it | off |
 | `--keep-worktree` | Keep the worktree after a successful run | off |
@@ -68,11 +69,13 @@ generation.
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--model MODEL` | Model for the fix sessions | your codex default |
-| `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh` | your codex default |
+| `--engine ENGINE` | Engine for the fix sessions: `codex` or `claude` | `codex` |
+| `--model MODEL` | Model for the fix sessions | the engine's own default |
+| `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; codex only | the engine's own default |
 | `--reviewers N` | Reviewer passes per review round | 6 |
-| `--review-model MODEL` | Model for the review rounds | `gpt-5.6-terra` |
-| `--review-effort LEVEL` | Effort for the review rounds | `medium` |
+| `--review-engine ENGINE` | Engine for the review rounds | `codex` |
+| `--review-model MODEL` | Model for the review rounds | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude) |
+| `--review-effort LEVEL` | Effort for the review rounds; codex only | `max` |
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
 | `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
@@ -80,7 +83,7 @@ generation.
 | `--draft` | Work on a draft PR | off, or `BABYSIT_DRAFTS=1` |
 | `--local` | Ignore any open PR and work on the pushed branch only | off |
 | `--no-resolve-conflicts` | Do not merge the base branch on conflicts | resolution on |
-| `--sandboxed` | Use your codex sandbox and approval defaults | off |
+| `--sandboxed` | Use the engine's own sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
 | `--no-notify` | Disable completion and action notifications | off |
@@ -105,18 +108,42 @@ retention period.
 | `quorum doctor` | `--fix` to apply what it can |
 | `quorum config` | `--path` or `-p` to print the config file location |
 
+## Engines
+
+Reviews and fix sessions each run on one of two engines, selected with
+`REVIEW_ENGINE`/`FIX_ENGINE` in the config or `--engine`/`--review-engine` on
+the command line: `codex` (OpenAI's Codex CLI, the default) or `claude`
+(Anthropic's Claude Code CLI). An empty model or effort means the selected
+engine's own default: `gpt-5.6-luna` at effort `max` for codex reviews,
+`sonnet` for claude. Effort is a codex setting; the claude engine ignores it.
+The claude engine's review passes run with a fixed read-only tool set, no MCP
+servers, and no persisted sessions.
+
 ## It runs unattended
 
-The fix sessions use `--dangerously-bypass-approvals-and-sandbox` by default.
-They have to: they run tests, use `gh` and `git push`, all with nobody watching,
-and a sandboxed `codex exec` would silently skip exactly those commands. Know
-what that means. An agent with full file and network access on your machine, for
-up to `--fix-timeout` per step.
+The fix sessions bypass the engine's sandbox and approvals by default: codex
+runs with `--dangerously-bypass-approvals-and-sandbox`, claude with
+`--dangerously-skip-permissions`. They have to: they run tests, use `gh` and
+`git push`, all with nobody watching, and a sandboxed session would silently
+skip exactly those commands. Know what that means. An agent with full file and
+network access on your machine, for up to `--fix-timeout` per step.
 
-`--sandboxed` opts out, but then your `~/.codex/config.toml` must allow
+`--sandboxed` opts out, but then the engine's own configuration must allow
 commands, network and push or every fix round fails. Reviewers, the aggregator
 and the verifier remain read-only. A separate Git integrity gate rejects any
 changed HEAD or staged, unstaged or untracked file after verification.
+
+## Usage limits
+
+When the engine refuses to run because the account's usage limit is exhausted,
+`quorum review` and `quorum babysit` stop with exit code 8 and the reset time
+from the refusal. The agent writes a pause marker to its state directory and
+starts no new reviews until that time (or one hour, when no reset time could
+be read); pending requests stay queued and are picked up by the first poll
+after the pause, without counting against `MAX_RETRIES`. A run whose reviewers
+finished before the limit struck keeps its run directory marked resumable, so
+the retry reuses the completed reviewer output instead of paying for a fresh
+fan-out.
 
 ## Safety stops
 
@@ -165,8 +192,10 @@ posting or committing something misleading.
   update, so the final re-read directly before the write is what protects a
   human edit and the target head; the remaining race window is one API call.
 - The pipeline refuses to start on a dirty checkout of the target branch, or when
-  your local branch differs from origin: it reviews the pushed head and would
-  otherwise silently ignore your work.
+  your local branch carries commits origin does not have: it reviews the pushed
+  head and would otherwise silently ignore your work. A local branch that is
+  merely behind origin (routine after any run's own pushes) proceeds with a
+  note; the run works on origin's head either way.
 - Fork PRs are refused: the pipeline pushes `refs/heads/<branch>` on origin,
   which for a fork PR is the wrong branch.
 - After every push it waits until GitHub reports the new head before reading any
@@ -187,6 +216,7 @@ from the tools they replace.
 2  refused: the target changes an .envrc
 3  refused: the target head moved during the review
 4  the aggregator or verifier could not produce a valid report
+8  the engine refused: its usage limit is exhausted
 ```
 
 `quorum babysit`:
@@ -200,6 +230,7 @@ from the tools they replace.
 5  a fix round produced no changes although findings remain
 6  the review/fix history contains incompatible decisions
 7  merge conflicts with the base branch remain unresolved
+8  the engine refused: its usage limit is exhausted
 ```
 
 ## Configuration
@@ -233,14 +264,17 @@ SKIP_FORKS=1
 SKIP_BOTS=1
 SKIP_OWN=1               # review one of your own with `quorum run`
 
-# Reviews
-REVIEW_MODEL="gpt-5.6-terra"
-REVIEW_EFFORT="medium"
+# Reviews. Empty model/effort means the engine's default: gpt-5.6-luna at
+# effort max for codex, sonnet for claude. Effort is codex-only.
+REVIEW_ENGINE="codex"    # or "claude"
+REVIEW_MODEL=""
+REVIEW_EFFORT=""
 REVIEW_TIMEOUT="45m"     # per reviewer pass, not per run. 0 disables
 POST=1                   # 0 disables PR comments and final description generation
 
 # Babysit
-FIX_MODEL=""             # empty keeps your codex default
+FIX_ENGINE="codex"       # or "claude"
+FIX_MODEL=""             # empty keeps the engine's default
 FIX_EFFORT=""
 MAX_ITER=12
 MAX_CI_FIXES=3
@@ -495,7 +529,9 @@ problem.
 
 **A PR is stuck after failed reviews.** A failed run leaves the request
 unrecorded so the next poll retries, up to `MAX_RETRIES`. After that it is
-marked as given up. Retry with `quorum run owner/repo#123`.
+marked as given up. Retry with `quorum run owner/repo#123`. Giving up binds to
+that request: a newer review request on the same pull request starts over with
+a fresh retry budget.
 
 **The review was posted against outdated code.** The review starts as soon as
 the request appears. If the author keeps pushing, the run refuses to post

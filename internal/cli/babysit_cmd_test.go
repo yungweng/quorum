@@ -147,7 +147,7 @@ func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"review model", "gpt-5.6-terra (effort medium)",
-		"fix model", "codex default",
+		"fix model", "engine default",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("header is missing %q:\n%s", want, got)

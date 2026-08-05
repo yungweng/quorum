@@ -116,10 +116,19 @@ func resolveBranch(
 			return Target{}, err
 		}
 		if localSHA != headSHA {
-			return Target{}, fmt.Errorf(
-				"local branch %s (%s) differs from origin (%s); push your local commits first",
-				branch, localSHA, headSHA,
-			)
+			// A checkout that is merely behind origin loses nothing: the run
+			// works on origin's head. Only local commits of its own, which a
+			// push from elsewhere would overtake, are refused.
+			behind, aerr := gitc.IsAncestor(ctx, repoRoot, localSHA, headSHA)
+			if aerr != nil {
+				return Target{}, aerr
+			}
+			if !behind {
+				return Target{}, fmt.Errorf(
+					"local branch %s (%s) differs from origin (%s); push your local commits first",
+					branch, localSHA, headSHA,
+				)
+			}
 		}
 	}
 

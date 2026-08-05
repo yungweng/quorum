@@ -21,6 +21,7 @@ type RunHeader struct {
 	Runs        int
 	Concurrency int
 	Timeout     time.Duration
+	Engine      string
 	Model       string
 	Effort      string
 	RunDir      string
