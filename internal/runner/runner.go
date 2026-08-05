@@ -192,13 +192,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			r.Log.Printf("%s: could not record the usage-limit pause: %v", key, pauseErr)
 		}
 		r.Log.Printf("%s: usage limit hit, pausing new reviews until %s", key, until.Format(time.RFC3339))
-		// A babysit failure reports the pipeline's own root as runDir, but the
-		// reviewer output worth resuming lives in the review round's directory,
-		// which travels in the error chain.
-		if reviewDir := runDirOf(runErr); reviewDir != "" {
-			runDir = reviewDir
-		}
-		r.recordUsageLimit(key, sha, runDir, runLog, until, runErr)
+		r.recordUsageLimit(key, sha, recordableRunDir(runDir, runErr), runLog, until, runErr)
 		if wrote {
 			r.notify("Usage limit hit", "Pausing new reviews until "+until.Format(time.RFC1123), "")
 		}
@@ -223,7 +217,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	// leaves the completed reviewer outputs reusable; that retry resumes them
 	// instead of paying for a fresh fan-out.
 	resumable := errors.Is(runErr, review.ErrAggregatorInvalid) || errors.Is(runErr, review.ErrVerifierInvalid)
-	r.recordFailureWith(key, sha, runDir, reason, runLog, resumable)
+	r.recordFailureWith(key, sha, recordableRunDir(runDir, runErr), reason, runLog, resumable)
 	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
 	return fmt.Errorf("%s: %s", key, reason)
 }
@@ -347,6 +341,17 @@ func runDirOf(err error) string {
 		return rd.RunDir
 	}
 	return ""
+}
+
+// recordableRunDir is the directory a failure record should carry so a later
+// poll can resume it. A babysit failure reports the pipeline's own root,
+// which holds no reviewer output; the review round's directory travels in
+// the error chain and takes precedence when it is there.
+func recordableRunDir(runDir string, runErr error) string {
+	if reviewDir := runDirOf(runErr); reviewDir != "" {
+		return reviewDir
+	}
+	return runDir
 }
 
 // resumableRunDir returns the prior run to resume for this pull request's

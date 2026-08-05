@@ -2,6 +2,7 @@ package runner
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,6 +150,21 @@ func TestResumableRunDirRequiresMatchingHeadAndOutput(t *testing.T) {
 	seed(func(rec *state.Record) { rec.ResumableRun = false })
 	if got := r.resumableRunDir(key, "abc123"); got != "" {
 		t.Fatalf("an unmarked record resumed: %q", got)
+	}
+}
+
+// A babysit failure reports the pipeline's own root, which holds no reviewer
+// output; the record must carry the review round's directory from the error
+// chain instead, or the next poll's resume glob comes up empty and a full
+// fresh fan-out is paid for again.
+func TestRecordableRunDirPrefersTheReviewRunFromTheErrorChain(t *testing.T) {
+	aggErr := fmt.Errorf("review round 1 failed: %w",
+		&review.RunDirError{RunDir: "/review/run-1", Err: review.ErrAggregatorInvalid})
+	if got := recordableRunDir("/babysit/root", aggErr); got != "/review/run-1" {
+		t.Fatalf("recordableRunDir = %q, want the review run directory", got)
+	}
+	if got := recordableRunDir("/babysit/root", errors.New("fix session died")); got != "/babysit/root" {
+		t.Fatalf("recordableRunDir = %q, want the reported directory", got)
 	}
 }
 
