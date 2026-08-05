@@ -62,6 +62,28 @@ func TestErrorMessageMentionsTheResetTime(t *testing.T) {
 	}
 }
 
+// The refusal ends the output; the same phrase quoted mid-transcript, from
+// reviewing code or docs that mention usage limits, is followed by more
+// output and must never classify.
+func TestRefusalLineMatchesOnlyTheClosingLines(t *testing.T) {
+	closing := "transcript line\n\nERROR: You've hit your usage limit. Try again at Aug 10th, 2026 7:32 PM.\n\n"
+	line, ok := RefusalLine(closing, "hit your usage limit")
+	if !ok || !strings.HasPrefix(line, "ERROR:") {
+		t.Fatalf("RefusalLine = (%q, %v), want the trimmed closing refusal", line, ok)
+	}
+
+	quoted := `the reviewed code contains "hit your usage limit" as a marker
+transcript 1
+transcript 2
+transcript 3
+transcript 4
+transcript 5
+ERROR: stream disconnected`
+	if line, ok := RefusalLine(quoted, "hit your usage limit"); ok {
+		t.Fatalf("a quoted mention mid-transcript classified as a refusal: %q", line)
+	}
+}
+
 func TestTailWriterBoundsMemory(t *testing.T) {
 	var tail Tail
 	chunk := strings.Repeat("x", 1024)

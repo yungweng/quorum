@@ -124,7 +124,10 @@ var usageLimitLine = "hit your usage limit"
 // itself exits nonzero, classifies a usage-limit refusal into the typed error
 // the agent and the fix loop branch on. A timeout, a cancelled context or a
 // missing binary are not classified: only an actual exit is a message from
-// Codex.
+// Codex. The match is anchored to the last lines of the output: a real
+// refusal ends the transcript, while a session that merely quotes the phrase
+// - reviewing code or docs that mention usage limits - keeps printing past
+// it.
 func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration, args []string, stdin io.Reader, log io.Writer) error {
 	var tail usagelimit.Tail
 	// One writer value for both streams, so os/exec merges them into a single
@@ -140,16 +143,9 @@ func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration
 	if !errors.As(err, &ee) {
 		return err
 	}
-	out := tail.String()
-	if !strings.Contains(strings.ToLower(out), usageLimitLine) {
+	line, ok := usagelimit.RefusalLine(tail.String(), usageLimitLine)
+	if !ok {
 		return err
-	}
-	line := out
-	for l := range strings.SplitSeq(out, "\n") {
-		if strings.Contains(strings.ToLower(l), usageLimitLine) {
-			line = strings.TrimSpace(l)
-			break
-		}
 	}
 	return &usagelimit.Error{ResetAt: usagelimit.ParseResetAt(line), Line: line}
 }

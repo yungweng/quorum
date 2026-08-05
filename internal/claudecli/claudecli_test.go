@@ -132,6 +132,22 @@ exit 1`)
 	}
 }
 
+// The envelope's result text quotes whatever the model just read, including
+// code or docs that mention usage limits. A nonzero exit after printing it
+// must stay an ordinary failure: only stderr feeds the refusal tail.
+func TestRunIgnoresUsageLimitQuotedOnStdout(t *testing.T) {
+	bin := fakeClaude(t, `echo '{"result":"the diff handles your usage limit marker","session_id":"s","is_error":false}'
+echo "unrelated crash" >&2
+exit 1`)
+	err := (Options{Bin: bin}).Resume(context.Background(), testEnv(t), 0, "sid", "p", filepath.Join(t.TempDir(), "o.md"), io.Discard)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if errors.Is(err, usagelimit.Err) {
+		t.Fatalf("quoted stdout text classified as a refusal: %v", err)
+	}
+}
+
 func TestRunClassifiesUsageLimitInErrorEnvelope(t *testing.T) {
 	bin := fakeClaude(t, `echo '{"result":"You have hit your usage limit for today","session_id":"s","is_error":true}'`)
 	err := (Options{Bin: bin}).Resume(context.Background(), testEnv(t), 0, "sid", "p", filepath.Join(t.TempDir(), "o.md"), io.Discard)

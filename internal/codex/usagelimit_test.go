@@ -57,6 +57,24 @@ exit 1`)
 	}
 }
 
+// A transcript that merely quotes the refusal phrase - reviewing code or
+// docs that mention usage limits, like this repository's own - and then dies
+// of something else must stay an ordinary failure: one misclassification
+// pauses the whole agent for an hour.
+func TestExecQuotedUsageLimitMidTranscriptIsNotClassified(t *testing.T) {
+	bin := fakeCodex(t, `echo 'the diff defines usageLimitLine = "hit your usage limit"'
+for i in 1 2 3 4 5 6; do echo "transcript line $i"; done
+echo "ERROR: stream disconnected" >&2
+exit 1`)
+	_, err := Options{Bin: bin}.Exec(context.Background(), testEnv(t), 0, "prompt", filepath.Join(t.TempDir(), "out.md"), io.Discard)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if errors.Is(err, usagelimit.Err) {
+		t.Fatalf("a quoted usage-limit phrase classified as a refusal: %v", err)
+	}
+}
+
 // A kill after the timeout also ends in a nonzero exit, but it is quorum's
 // doing, not a message from codex, and must never read as a usage limit.
 func TestExecTimeoutIsNotClassifiedAsUsageLimit(t *testing.T) {

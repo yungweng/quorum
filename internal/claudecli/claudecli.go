@@ -86,9 +86,13 @@ type resultEnvelope struct {
 func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration, args []string, prompt io.Reader, outFile string, log io.Writer) (resultEnvelope, error) {
 	var stdout bytes.Buffer
 	var tail usagelimit.Tail
+	// Only stderr feeds the refusal tail. Stdout carries the JSON envelope,
+	// whose result text quotes whatever the model just read - including code
+	// or docs that mention usage limits - while the CLI keeps stdout parseable
+	// in JSON mode and reports its errors on stderr.
 	err := env.Run(ctx, timeout, envexec.Cmd{
 		Name: o.bin(), Args: args, Stdin: prompt,
-		Stdout: io.MultiWriter(&stdout, &tail),
+		Stdout: &stdout,
 		Stderr: io.MultiWriter(log, &tail),
 	})
 	if stdout.Len() > 0 {
@@ -126,18 +130,13 @@ func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration
 // count as account exhaustion: a transient per-minute throttle says "rate
 // limit" too, and with every reviewer starting at once that is routine and
 // must fail like any other error instead of pausing the agent for an hour.
-// No reset time is parsed because the messages do not carry a full date.
+// The match is anchored to the last lines, so quoted mentions of the phrase
+// earlier in an error text stay unclassified. No reset time is parsed
+// because the messages do not carry a full date.
 func classify(output string) *usagelimit.Error {
-	const marker = "usage limit"
-	if !strings.Contains(strings.ToLower(output), marker) {
+	line, ok := usagelimit.RefusalLine(output, "usage limit")
+	if !ok {
 		return nil
-	}
-	line := output
-	for l := range strings.SplitSeq(output, "\n") {
-		if strings.Contains(strings.ToLower(l), marker) {
-			line = strings.TrimSpace(l)
-			break
-		}
 	}
 	return &usagelimit.Error{Line: line}
 }

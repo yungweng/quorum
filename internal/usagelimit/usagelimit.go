@@ -62,6 +62,33 @@ func ParseResetAt(line string) time.Time {
 	return time.Time{}
 }
 
+// refusalWindow is how many trailing non-empty lines RefusalLine searches.
+// A real refusal is the last thing a CLI prints before its nonzero exit,
+// with at most a few lines of epilogue after it.
+const refusalWindow = 5
+
+// RefusalLine searches the last few non-empty lines of output for the
+// lowercase marker and returns the matched line. The anchoring is the point:
+// an engine reviewing code or docs that mention usage limits quotes the
+// marker phrase into the middle of its transcript, and an unrelated failure
+// after that must stay an ordinary failure instead of pausing the agent as
+// account exhaustion.
+func RefusalLine(output, marker string) (string, bool) {
+	lines := strings.Split(output, "\n")
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < refusalWindow; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		seen++
+		if strings.Contains(strings.ToLower(line), marker) {
+			return line, true
+		}
+	}
+	return "", false
+}
+
 // tailCap bounds what Tail keeps. The refusal is one line printed just
 // before the process exits; if an engine ever pushes it out of the final
 // 16KiB with trailing output, detection misses it and the failure degrades
