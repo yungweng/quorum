@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,13 +24,27 @@ import (
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
+// Efforts is the set of reasoning-effort values the Claude Code CLI accepts.
+// It is not the Codex set: Claude has neither "minimal" nor "ultra", and it
+// answers an unknown level with a warning on stderr and the default effort
+// instead of an error, so an unvalidated typo would quietly run the whole
+// panel at the wrong setting.
+var Efforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+// ValidEffort reports whether e is one of Efforts. The empty string is allowed
+// and means "leave Claude Code's own default alone".
+func ValidEffort(e string) bool {
+	return e == "" || slices.Contains(Efforts, e)
+}
+
 // Options are the model settings for one Claude invocation.
 type Options struct {
 	Bin   string // resolved claude binary; empty falls back to a PATH lookup
 	Model string // empty leaves Claude Code's own default
 
-	// Effort exists for interface parity with the Codex engine. The Claude
-	// Code CLI has no reasoning-effort flag, so it is ignored.
+	// Effort is the reasoning effort, one of Efforts; empty leaves Claude
+	// Code's own default. Whether a given model honours it is the CLI's
+	// business, not quorum's.
 	Effort string
 
 	// Bypass adds --dangerously-skip-permissions. The fix sessions need it:
@@ -50,6 +65,9 @@ func (o Options) flags() []string {
 	f := []string{"-p", "--output-format", "json"}
 	if o.Model != "" {
 		f = append(f, "--model", o.Model)
+	}
+	if o.Effort != "" {
+		f = append(f, "--effort", o.Effort)
 	}
 	if o.Bypass {
 		f = append(f, "--dangerously-skip-permissions")

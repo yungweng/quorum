@@ -48,10 +48,21 @@ func TestWithDefaultsAppliesCodexModelOnlyForCodexEngine(t *testing.T) {
 	}
 }
 
-func TestValidateSkipsEffortCheckForClaudeEngine(t *testing.T) {
-	o := Options{Engine: engine.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "whatever"}.withDefaults()
-	if err := o.validate(); err != nil {
-		t.Fatalf("claude engine rejected: %v", err)
+// Each engine's effort is checked against its own levels. "ultra" exists for
+// codex and not for claude, and claude would take its default instead of
+// failing, so accepting it here would run the panel at an effort nobody chose.
+func TestValidateChecksEffortAgainstTheSelectedEngine(t *testing.T) {
+	ok := Options{Engine: engine.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "xhigh"}.withDefaults()
+	if err := ok.validate(); err != nil {
+		t.Fatalf("valid claude effort rejected: %v", err)
+	}
+	claude := Options{Engine: engine.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
+	if err := claude.validate(); err == nil {
+		t.Fatal("the codex-only effort ultra was accepted for the claude engine")
+	}
+	codexOK := Options{Engine: engine.Codex, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
+	if err := codexOK.validate(); err != nil {
+		t.Fatalf("valid codex effort rejected: %v", err)
 	}
 	bad := Options{Engine: "gemini", Repo: "acme/api", RepoRoot: "/tmp/x"}
 	bad.Runs, bad.Concurrency = 1, 1

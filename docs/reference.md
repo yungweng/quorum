@@ -23,7 +23,7 @@ match `origin`. Run the command from inside that repository's checkout.
 | `--concurrency N` | Reviewer passes at once | same as `--runs` |
 | `--engine ENGINE` | `codex` or `claude` | `codex` |
 | `--model MODEL` | Model for reviewers, aggregator and verifier | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude) |
-| `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; codex only | `max` |
+| `--effort LEVEL` | codex: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; claude: `low`, `medium`, `high`, `xhigh`, `max` | `max` (codex), the engine's own (claude) |
 | `--base BRANCH` | Base branch to review against | PR base or repository default |
 | `--dry-run` | Write the report to disk without posting it | off |
 | `--keep-worktree` | Keep the worktree after a successful run | off |
@@ -71,11 +71,11 @@ generation.
 |---|---|---|
 | `--engine ENGINE` | Engine for the fix sessions: `codex` or `claude` | `codex` |
 | `--model MODEL` | Model for the fix sessions | the engine's own default |
-| `--effort LEVEL` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; codex only | the engine's own default |
+| `--effort LEVEL` | codex: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; claude: `low`, `medium`, `high`, `xhigh`, `max` | the engine's own default |
 | `--reviewers N` | Reviewer passes per review round | 6 |
 | `--review-engine ENGINE` | Engine for the review rounds | `codex` |
 | `--review-model MODEL` | Model for the review rounds | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude) |
-| `--review-effort LEVEL` | Effort for the review rounds; codex only | `max` |
+| `--review-effort LEVEL` | Effort for the review rounds | `max` (codex), the engine's own (claude) |
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
 | `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
@@ -115,9 +115,13 @@ Reviews and fix sessions each run on one of two engines, selected with
 the command line: `codex` (OpenAI's Codex CLI, the default) or `claude`
 (Anthropic's Claude Code CLI). An empty model or effort means the selected
 engine's own default: `gpt-5.6-luna` at effort `max` for codex reviews,
-`sonnet` for claude. Effort is a codex setting; the claude engine ignores it.
-The claude engine's review passes run with a fixed read-only tool set, no MCP
-servers, and no persisted sessions.
+`sonnet` for claude, whose own effort is left alone unless you set one. Both
+engines take a reasoning effort, but not the same levels: codex accepts
+`minimal` through `ultra`, claude accepts `low` through `max`. Neither CLI
+fails on a level it does not know, it quietly falls back to its default, so
+quorum refuses an effort the selected engine cannot use instead of starting the
+run. The claude engine's review passes run with a fixed read-only tool set, no
+MCP servers, and no persisted sessions.
 
 ## It runs unattended
 
@@ -265,17 +269,17 @@ SKIP_BOTS=1
 SKIP_OWN=1               # review one of your own with `quorum run`
 
 # Reviews. Empty model/effort means the engine's default: gpt-5.6-luna at
-# effort max for codex, sonnet for claude. Effort is codex-only.
+# effort max for codex, sonnet for claude.
 REVIEW_ENGINE="codex"    # or "claude"
 REVIEW_MODEL=""
-REVIEW_EFFORT=""
+REVIEW_EFFORT=""         # codex: minimal..ultra, claude: low..max
 REVIEW_TIMEOUT="45m"     # per reviewer pass, not per run. 0 disables
 POST=1                   # 0 disables PR comments and final description generation
 
 # Babysit
 FIX_ENGINE="codex"       # or "claude"
-FIX_MODEL=""             # empty keeps the engine's default
-FIX_EFFORT=""
+FIX_MODEL=""             # empty leaves the choice to the engine's own CLI
+FIX_EFFORT=""            # codex: minimal..ultra, claude: low..max
 MAX_ITER=12
 MAX_CI_FIXES=3
 FIX_TIMEOUT="2h"         # per fix step; keep it above your CI runtime

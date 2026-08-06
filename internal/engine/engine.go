@@ -31,6 +31,26 @@ func Valid(name string) bool {
 	return name == "" || name == Codex || name == Claude
 }
 
+// Efforts returns the reasoning-effort values name accepts. The two sets are
+// not the same, and neither CLI fails on a level it does not know: both take
+// the default instead, so the only place an engine-specific typo can still be
+// caught is here, before anything is spawned.
+func Efforts(name string) []string {
+	if name == Claude {
+		return claudecli.Efforts
+	}
+	return codex.Efforts
+}
+
+// ValidEffort reports whether effort is one of Efforts(name). The empty string
+// is allowed for either engine and means "leave its own default alone".
+func ValidEffort(name, effort string) bool {
+	if name == Claude {
+		return claudecli.ValidEffort(effort)
+	}
+	return codex.ValidEffort(effort)
+}
+
 // SessionRef is the opaque handle Exec returns and Resume takes back. It is
 // an alias, not a defined type, so the adapters can keep returning plain
 // strings and still satisfy Fixer without importing this package.
@@ -49,7 +69,7 @@ type Reviewer interface {
 type ReviewerOptions struct {
 	Bin    string
 	Model  string
-	Effort string // Codex only; the Claude engine ignores it
+	Effort string // one of Efforts(name); empty leaves the engine's default
 }
 
 // NewReviewer builds the review-side engine for name.
@@ -74,7 +94,7 @@ type Fixer interface {
 type FixerOptions struct {
 	Bin    string
 	Model  string
-	Effort string // Codex only; the Claude engine ignores it
+	Effort string // one of Efforts(name); empty leaves the engine's default
 	Bypass bool
 }
 

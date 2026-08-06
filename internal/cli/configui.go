@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
 	"golang.org/x/term"
 )
@@ -233,17 +234,16 @@ func (a *app) settings() []setting {
 				), nil)
 		}},
 
-		{"review model", func(c config.Config) string {
-			return fmt.Sprintf("%s, effort %s",
-				orText(c.ReviewModel, "engine default"), orText(c.ReviewEffort, "engine default"))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "model for the reviewers, aggregator and verifier (enter keeps, - resets to the engine's default)", c.ReviewModel)
+		{"review model", reviewModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, fmt.Sprintf(
+				"model for the reviewers, aggregator and verifier: %s (enter keeps, - resets to the engine's default)",
+				modelHint(c.ReviewEngine)), c.ReviewModel)
 			if err != nil {
 				return err
 			}
 			c.ReviewModel = clearable(v)
-			return a.pick(in, "How hard should the reviewers think? (codex only)", c, defaultEffortOptions(
-				func(c *config.Config) *string { return &c.ReviewEffort }), nil)
+			return a.pick(in, "How hard should the reviewers think?", c, defaultEffortOptions(
+				c.ReviewEngine, func(c *config.Config) *string { return &c.ReviewEffort }), nil)
 		}},
 
 		{"agent does", func(c config.Config) string {
@@ -302,19 +302,21 @@ func (a *app) settings() []setting {
 				), nil)
 		}},
 
-		{"fix sessions", func(c config.Config) string {
-			return fmt.Sprintf("%s, up to %d rounds, %s per step",
-				modelDesc(c.FixModel, c.FixEffort), c.MaxIter, config.FormatDuration(c.FixTimeout))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "model for the fix sessions (enter keeps, - resets to the engine's default)", c.FixModel)
+		{"fix model", fixModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, fmt.Sprintf(
+				"model for the fix sessions: %s (enter keeps, - resets to the engine's default)",
+				modelHint(c.FixEngine)), c.FixModel)
 			if err != nil {
 				return err
 			}
 			c.FixModel = clearable(v)
-			if err := a.pick(in, "How hard should the fix sessions think?", c, defaultEffortOptions(
-				func(c *config.Config) *string { return &c.FixEffort }), nil); err != nil {
-				return err
-			}
+			return a.pick(in, "How hard should the fix sessions think?", c, defaultEffortOptions(
+				c.FixEngine, func(c *config.Config) *string { return &c.FixEffort }), nil)
+		}},
+
+		{"fix sessions", func(c config.Config) string {
+			return fmt.Sprintf("up to %d rounds, %s per step", c.MaxIter, config.FormatDuration(c.FixTimeout))
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
 			n, err := a.askText(in, "maximum review to fix rounds", fmt.Sprint(c.MaxIter))
 			if err != nil {
 				return err
@@ -689,6 +691,52 @@ func engineDesc(name string) string {
 	return "codex"
 }
 
+// engineName is the bare engine name, with the empty default resolved, for
+// prompts that talk about one engine's own settings.
+func engineName(name string) string {
+	if name == config.EngineClaude {
+		return config.EngineClaude
+	}
+	return config.EngineCodex
+}
+
+// reviewModelDesc and fixModelDesc render what a run will really use. A plain
+// "engine default" hid two different things behind one label: an empty review
+// model is filled in by quorum before the engine ever sees it, while an empty
+// fix model is left to the CLI's own choice, which quorum does not know.
+func reviewModelDesc(c config.Config) string {
+	_, model, effort := review.ReviewEngineDefaults(c.ReviewEngine, c.ReviewModel, c.ReviewEffort)
+	if c.ReviewModel == "" {
+		model += " (quorum's default)"
+	}
+	switch {
+	case c.ReviewEffort == "" && effort == "":
+		effort = engineName(c.ReviewEngine) + "'s own"
+	case c.ReviewEffort == "":
+		effort += " (quorum's default)"
+	}
+	return fmt.Sprintf("%s, effort %s", model, effort)
+}
+
+func fixModelDesc(c config.Config) string {
+	eng := engineName(c.FixEngine)
+	if c.FixModel == "" && c.FixEffort == "" {
+		return eng + "'s own choice"
+	}
+	return fmt.Sprintf("%s, effort %s",
+		orText(c.FixModel, eng+"'s own choice"), orText(c.FixEffort, eng+"'s own"))
+}
+
+// modelHint gives the model prompt the examples that engine accepts. The two
+// name spaces have nothing in common, and a model typed for the wrong engine
+// is only found out when the run fails.
+func modelHint(eng string) string {
+	if eng == config.EngineClaude {
+		return "an alias such as opus, sonnet or fable, or a full name such as claude-opus-5"
+	}
+	return "a Codex model name such as " + review.DefaultModel
+}
+
 // engineOptions builds the engine picker for one engine field and the model
 // and effort fields that belong to it. Switching the engine resets both:
 // an explicit model was chosen for the engine it was typed under, and
@@ -717,10 +765,12 @@ func engineOptions(engineField, modelField, effortField func(*config.Config) *st
 }
 
 // effortOptions builds the reasoning-effort picker for whichever field the
-// caller points at.
-func effortOptions(field func(*config.Config) *string) []option {
+// caller points at, offering only the levels eng actually accepts. Codex knows
+// minimal and ultra, Claude does not, and offering a level the engine will
+// silently drop is how a panel ends up running at the wrong setting.
+func effortOptions(eng string, field func(*config.Config) *string) []option {
 	var out []option
-	for _, level := range codex.Efforts {
+	for _, level := range engine.Efforts(eng) {
 		out = append(out, option{level, "", func(c *config.Config) {
 			*field(c) = level
 		}, func(c config.Config) bool {
@@ -731,9 +781,9 @@ func effortOptions(field func(*config.Config) *string) []option {
 	return out
 }
 
-func defaultEffortOptions(field func(*config.Config) *string) []option {
+func defaultEffortOptions(eng string, field func(*config.Config) *string) []option {
 	out := []option{{
-		label:  "your codex default",
+		label:  "your " + engineName(eng) + " default",
 		detail: "do not override the reasoning effort",
 		apply:  func(c *config.Config) { *field(c) = "" },
 		match: func(c config.Config) bool {
@@ -741,7 +791,7 @@ func defaultEffortOptions(field func(*config.Config) *string) []option {
 			return *field(&cc) == ""
 		},
 	}}
-	return append(out, effortOptions(field)...)
+	return append(out, effortOptions(eng, field)...)
 }
 
 // secs turns a configured interval in seconds into a duration.

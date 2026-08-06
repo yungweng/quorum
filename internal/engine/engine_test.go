@@ -21,6 +21,23 @@ func TestValidAcceptsEmptyCodexAndClaude(t *testing.T) {
 	}
 }
 
+// The two engines share a config field but not a set of levels. An empty
+// engine name means Codex here for the same reason it does everywhere else.
+func TestEffortsAreLookedUpPerEngine(t *testing.T) {
+	if !ValidEffort(Codex, "ultra") || !ValidEffort("", "minimal") {
+		t.Error("codex lost one of its own effort levels")
+	}
+	if ValidEffort(Claude, "ultra") || ValidEffort(Claude, "minimal") {
+		t.Error("a codex-only effort was accepted for claude")
+	}
+	if !ValidEffort(Claude, "max") || !ValidEffort(Claude, "") {
+		t.Error("claude rejected an effort it accepts")
+	}
+	if strings.Join(Efforts(Claude), ",") == strings.Join(Efforts(Codex), ",") {
+		t.Error("both engines reported the same effort levels")
+	}
+}
+
 func TestNewReviewerDefaultsToCodex(t *testing.T) {
 	r, err := NewReviewer("", ReviewerOptions{Model: "m"})
 	if err != nil {
