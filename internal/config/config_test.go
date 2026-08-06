@@ -279,3 +279,29 @@ func TestRetiredMaxCodexIsDropped(t *testing.T) {
 		t.Errorf("the retired key was written back:\n%s", b)
 	}
 }
+
+// A config written before the effort levels became engine-specific can pair a
+// codex level with the claude engine. That combination must not fail every
+// run: the launchd agent has no terminal to report it in, so the symptom
+// would be an agent that silently stops reviewing.
+func TestLoadDropsAnEffortTheEngineCannotUse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	body := `REVIEW_ENGINE="claude"
+REVIEW_EFFORT="ultra"
+FIX_ENGINE="codex"
+FIX_EFFORT="ultra"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewEffort != "" {
+		t.Errorf("ReviewEffort = %q, want it dropped for the claude engine", cfg.ReviewEffort)
+	}
+	if cfg.FixEffort != "ultra" {
+		t.Errorf("FixEffort = %q, want the codex level kept", cfg.FixEffort)
+	}
+}

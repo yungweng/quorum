@@ -98,3 +98,20 @@ func TestNewFixerRejectsUnknownEngine(t *testing.T) {
 		t.Fatal("unknown engine was accepted")
 	}
 }
+
+// An effort out of the config is dropped rather than refused, and only when
+// the resolved engine cannot use it.
+func TestKnownEffortDropsOnlyWhatTheEngineCannotUse(t *testing.T) {
+	if got := KnownEffort(Claude, "ultra"); got != "" {
+		t.Errorf("KnownEffort(claude, ultra) = %q, want it dropped", got)
+	}
+	if got := KnownEffort(Claude, "xhigh"); got != "xhigh" {
+		t.Errorf("KnownEffort(claude, xhigh) = %q, want it kept", got)
+	}
+	if got := KnownEffort("", "ultra"); got != "ultra" {
+		t.Errorf("KnownEffort(codex, ultra) = %q, want it kept", got)
+	}
+	if got := KnownEffort(Codex, ""); got != "" {
+		t.Errorf("KnownEffort(codex, empty) = %q", got)
+	}
+}

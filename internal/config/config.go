@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yungweng/quorum/internal/engine"
 )
 
 // Config is the fully resolved configuration: file values on top of defaults.
@@ -229,6 +231,14 @@ func Load(path string) (Config, error) {
 	if err := sc.Err(); err != nil {
 		return cfg, err
 	}
+	// An effort the configured engine does not know is dropped here instead of
+	// failing the run later. The two level sets are engine-specific, but the
+	// file may predate that and pair a codex level with the claude engine, so
+	// the alternative is a tool that refuses to start on its own config - with
+	// no terminal to say so behind the launchd agent. What the run then uses is
+	// still visible: the run headers name the resolved model and effort.
+	cfg.ReviewEffort = engine.KnownEffort(cfg.ReviewEngine, cfg.ReviewEffort)
+	cfg.FixEffort = engine.KnownEffort(cfg.FixEngine, cfg.FixEffort)
 	if len(problems) > 0 {
 		return cfg, fmt.Errorf("%s: %s", path, strings.Join(problems, "; "))
 	}

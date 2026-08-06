@@ -51,6 +51,22 @@ func ValidEffort(name, effort string) bool {
 	return codex.ValidEffort(effort)
 }
 
+// KnownEffort returns effort when name accepts it and the empty string, the
+// engine's own default, when it does not. It is for stored values, not typed
+// ones: the levels became engine-specific only after quorum's own config
+// picker could already write a codex level next to REVIEW_ENGINE="claude", and
+// an engine flag can move a run to the other engine's set at any time.
+// Refusing such a pair would stop every run on a file the tool wrote itself,
+// including the unattended agent's, where nobody reads the error. An effort
+// typed on the command line does not go through here; it is validated and
+// fails the run.
+func KnownEffort(name, effort string) string {
+	if ValidEffort(name, effort) {
+		return effort
+	}
+	return ""
+}
+
 // SessionRef is the opaque handle Exec returns and Resume takes back. It is
 // an alias, not a defined type, so the adapters can keep returning plain
 // strings and still satisfy Fixer without importing this package.

@@ -138,16 +138,19 @@ func TestBabysitDivergenceFlagIsBoolean(t *testing.T) {
 func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 	var out bytes.Buffer
 	rep := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+	// The fix engine is named so its row asserts on a string that appears
+	// nowhere else in the header: "engine default" also occurs in the sandbox
+	// row, where it says nothing about a model.
 	rep.Header(loop.Header{
 		Repo: "acme/api", Branch: "feature", Base: "main",
-		ReviewModel: "gpt-5.6-terra", ReviewEffort: "medium",
-		Model: "", Effort: "", MaxIter: 12, FixTimeout: 2 * time.Hour,
+		ReviewEngine: "codex", ReviewModel: "gpt-5.6-terra", ReviewEffort: "medium",
+		Engine: "claude", Model: "", Effort: "", MaxIter: 12, FixTimeout: 2 * time.Hour,
 	})
 
 	got := out.String()
 	for _, want := range []string{
 		"review model", "gpt-5.6-terra (effort medium)",
-		"fix model", "engine default",
+		"fix model", "claude's own choice",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("header is missing %q:\n%s", want, got)

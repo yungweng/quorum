@@ -24,7 +24,9 @@ import (
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
-// Efforts is the set of reasoning-effort values the Claude Code CLI accepts.
+// Efforts is the set of reasoning-effort values the Claude Code CLI accepts,
+// read off `claude --help` (checked against 2.1.223, which documents --effort
+// as "low, medium, high, xhigh, max").
 // It is not the Codex set: Claude has neither "minimal" nor "ultra", and it
 // answers an unknown level with a warning on stderr and the default effort
 // instead of an error, so an unvalidated typo would quietly run the whole

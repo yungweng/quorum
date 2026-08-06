@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
@@ -103,7 +104,10 @@ func (a *app) cmdReview(argv []string) int {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
-	o.Effort = args.str(o.Effort, "effort")
+	// The configured effort is kept only if the engine this run resolved to
+	// accepts it, because --engine can point at the other engine's set of
+	// levels. One passed on the command line is not dropped: it fails.
+	o.Effort = args.str(engine.KnownEffort(o.Engine, o.Effort), "effort")
 	o.BaseBranch = args.str("", "base")
 	o.ResumeRun = args.str("", "resume-run")
 	o.KeepWorktree = args.boolean("keep-worktree")

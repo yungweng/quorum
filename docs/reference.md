@@ -119,9 +119,13 @@ engine's own default: `gpt-5.6-luna` at effort `max` for codex reviews,
 engines take a reasoning effort, but not the same levels: codex accepts
 `minimal` through `ultra`, claude accepts `low` through `max`. Neither CLI
 fails on a level it does not know, it quietly falls back to its default, so
-quorum refuses an effort the selected engine cannot use instead of starting the
-run. The claude engine's review passes run with a fixed read-only tool set, no
-MCP servers, and no persisted sessions.
+quorum refuses a level passed on the command line that the selected engine
+cannot use instead of starting the run. A level already in the config is
+dropped rather than refused: `REVIEW_EFFORT="ultra"` next to
+`REVIEW_ENGINE="claude"` runs at claude's own effort, which the run header
+names, instead of stopping every review including the agent's. The claude
+engine's review passes run with a fixed read-only tool set, no MCP servers,
+and no persisted sessions.
 
 ## It runs unattended
 

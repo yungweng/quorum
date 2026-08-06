@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
@@ -122,9 +123,13 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
-	o.Effort = args.str(o.Effort, "effort")
+	// A configured effort survives only if the engine this run resolved to
+	// accepts it: --engine and --review-engine can each point at the other
+	// engine's set of levels. One passed on the command line is not dropped:
+	// it fails.
+	o.Effort = args.str(engine.KnownEffort(o.Engine, o.Effort), "effort")
 	o.ReviewModel = args.str(o.ReviewModel, "review-model")
-	o.ReviewEffort = args.str(o.ReviewEffort, "review-effort")
+	o.ReviewEffort = args.str(engine.KnownEffort(o.ReviewEngine, o.ReviewEffort), "review-effort")
 	o.Interactive = args.boolean("interactive")
 	o.Verbose = args.boolean("verbose")
 	o.Out = os.Stdout
