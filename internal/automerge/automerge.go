@@ -52,7 +52,10 @@ func Allowed(enabled, post bool, findings review.Findings) bool {
 
 // Run binds both side effects to reviewedSHA. It is safe to repeat: an
 // existing approval for that commit is reused, and a merged PR is success.
-func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string) (Result, error) {
+// A non-empty allowedAuthors list limits merging to those PR authors; a pull
+// request from anyone else keeps its clean review and waits for a person,
+// exactly like an own PR.
+func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string, allowedAuthors []string) (Result, error) {
 	var result Result
 	mergeMethod := gh.MergeMethodMerge
 	if repo == "" || number <= 0 || reviewedSHA == "" {
@@ -68,6 +71,10 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 			result.Status = Merged
 		}
 		return result, err
+	}
+	if !authorAllowed(pr.Author.Login, allowedAuthors) {
+		result.Status = ApprovalRequired
+		return result, nil
 	}
 	login, err := client.Login(ctx)
 	if err != nil {
@@ -244,6 +251,20 @@ func mergeReadinessPending(current gh.Details, mergeErr error) bool {
 		current.Mergeable == "UNKNOWN" && current.MergeStateStatus == "UNKNOWN"
 }
 
+// authorAllowed treats an empty whitelist as no restriction. Logins compare
+// case-insensitively because GitHub logins are case-insensitive.
+func authorAllowed(login string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if strings.EqualFold(candidate, login) {
+			return true
+		}
+	}
+	return false
+}
+
 func latestReviewsRequestChanges(reviews []gh.LatestReview, login string) bool {
 	for _, review := range reviews {
 		if review.State == "CHANGES_REQUESTED" && !strings.EqualFold(review.Author.Login, login) {
@@ -257,7 +278,7 @@ func latestReviewsRequestChanges(reviews []gh.LatestReview, login string) bool {
 // check result can precede GitHub's mergeability update, so ErrMergeNotReady
 // remains retryable until waitTimeout expires. A zero timeout waits until the
 // caller cancels the context.
-func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo string, number int, reviewedSHA string, initial Result, waitTimeout time.Duration) (Result, error) {
+func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo string, number int, reviewedSHA string, allowedAuthors []string, initial Result, waitTimeout time.Duration) (Result, error) {
 	var deadline time.Time
 	if waitTimeout > 0 {
 		deadline = time.Now().Add(waitTimeout)
@@ -312,7 +333,7 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 		var delay time.Duration
 		switch checkState {
 		case gh.ChecksPass:
-			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
+			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
 			combined = combineResults(combined, result)
 			if mergeErr == nil {
 				return combined, nil
@@ -328,7 +349,7 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			return stopRetry(ctx, client, repo, number, combined,
 				fmt.Errorf("required checks failed: %s", firstLine(output)))
 		case gh.ChecksNone:
-			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA)
+			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
 			combined = combineResults(combined, result)
 			if mergeErr == nil {
 				return combined, nil

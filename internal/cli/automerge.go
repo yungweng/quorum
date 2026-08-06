@@ -10,10 +10,10 @@ import (
 )
 
 func (a *app) autoMerge(ctx context.Context, client *gh.Client, checksDir, repo string, number int, sha string) (automerge.Result, error) {
-	result, err := automerge.Run(ctx, client, repo, number, sha)
+	result, err := automerge.Run(ctx, client, repo, number, sha, a.cfg.AutoMergeAuthors)
 	if errors.Is(err, automerge.ErrMergeNotReady) {
 		retryResult, retryErr := automerge.RetryWhenReady(
-			ctx, client, checksDir, repo, number, sha, result, a.cfg.AutoMergeTimeout,
+			ctx, client, checksDir, repo, number, sha, a.cfg.AutoMergeAuthors, result, a.cfg.AutoMergeTimeout,
 		)
 		result, err = retryResult, retryErr
 	}

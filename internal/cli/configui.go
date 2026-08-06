@@ -291,6 +291,21 @@ func (a *app) settings() []setting {
 			return nil
 		}},
 
+		{"auto-merge authors", func(c config.Config) string {
+			if len(c.AutoMergeAuthors) == 0 {
+				return "every author with a clean review"
+			}
+			return "only " + strings.Join(c.AutoMergeAuthors, " ")
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, "GitHub logins whose PRs may be auto-merged; empty allows every author",
+				strings.Join(c.AutoMergeAuthors, " "))
+			if err != nil {
+				return err
+			}
+			c.AutoMergeAuthors = fieldsOrNil(v)
+			return nil
+		}},
+
 		{"fix engine", func(c config.Config) string {
 			return engineDesc(c.FixEngine)
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {

@@ -180,6 +180,7 @@ func TestRoundTrip(t *testing.T) {
 	want.AutoMergeReview = true
 	want.AutoMergeBabysit = true
 	want.AutoMergeTimeout = 90 * time.Minute
+	want.AutoMergeAuthors = []string{"example-user", "trusted-bot[bot]"}
 	want.Unknown = map[string]string{"FUTURE_KEY": "keep me"}
 
 	path := filepath.Join(t.TempDir(), "config")

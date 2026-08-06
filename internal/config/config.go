@@ -93,6 +93,10 @@ type Config struct {
 	AutoMergeReview  bool
 	AutoMergeBabysit bool
 	AutoMergeTimeout time.Duration
+	// AutoMergeAuthors limits auto-merge to pull requests whose author is one
+	// of these GitHub logins, compared case-insensitively. Empty keeps the old
+	// behaviour: every author with a clean review qualifies.
+	AutoMergeAuthors []string
 
 	Notify bool
 
@@ -378,6 +382,8 @@ func (c *Config) set(key, value string) {
 		c.AutoMergeBabysit = truthy(value)
 	case "AUTO_MERGE_TIMEOUT":
 		c.AutoMergeTimeout = durationOr(value, c.AutoMergeTimeout)
+	case "AUTO_MERGE_AUTHORS":
+		c.AutoMergeAuthors = fields(value)
 	case "REVIEW_ARGS":
 		// Retired: it was passed verbatim to a separate binary that no longer
 		// exists. The only flag anyone used through it was --dry-run, so that
@@ -525,7 +531,9 @@ func (c Config) Render() string {
 	w("AUTO_MERGE_AGENT=%s\n", bit(c.AutoMergeAgent))
 	w("AUTO_MERGE_REVIEW=%s\n", bit(c.AutoMergeReview))
 	w("AUTO_MERGE_BABYSIT=%s\n", bit(c.AutoMergeBabysit))
-	w("AUTO_MERGE_TIMEOUT=%q\t# wait for checks and mergeability; 0 disables timeout\n\n", FormatDuration(c.AutoMergeTimeout))
+	w("AUTO_MERGE_TIMEOUT=%q\t# wait for checks and mergeability; 0 disables timeout\n", FormatDuration(c.AutoMergeTimeout))
+	w("AUTO_MERGE_AUTHORS=%q\t# only merge PRs from these logins; empty allows every author\n\n",
+		strings.Join(c.AutoMergeAuthors, " "))
 
 	w("NOTIFY=%s\n", bit(c.Notify))
 

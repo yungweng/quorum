@@ -130,7 +130,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	if runErr == nil {
 		mergeStatus := ""
 		if automerge.Allowed(r.autoMergeEnabled(source), r.Cfg.Post, findings) {
-			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA)
+			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA, r.Cfg.AutoMergeAuthors)
 			if errors.Is(mergeErr, automerge.ErrMergeNotReady) {
 				r.Log.Printf("%s: waiting for required checks before merge", key)
 				r.recordAutoMergePending(key, runDir, findings)
@@ -267,7 +267,7 @@ func (r *Runner) retryAutoMergeAfterChecks(ctx context.Context, clone, repo stri
 }
 
 func (r *Runner) retryAutoMergeAfterChecksWithin(ctx context.Context, clone, repo string, number int, sha string, initial automerge.Result, waitTimeout time.Duration) (automerge.Result, error) {
-	return automerge.RetryWhenReady(ctx, r.GH, clone, repo, number, sha, initial, waitTimeout)
+	return automerge.RetryWhenReady(ctx, r.GH, clone, repo, number, sha, r.Cfg.AutoMergeAuthors, initial, waitTimeout)
 }
 
 // recordAutoMergeFailure preserves the successful review and records the
