@@ -408,9 +408,20 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		aliases[t.alias] = true
 	}
 	for _, graphErr := range resp.Errors {
-		missingRepo := graphErr.Type == "NOT_FOUND" && len(graphErr.Path) == 1 &&
-			aliases[graphErr.Path[0]] && resp.Data[graphErr.Path[0]] == nil
-		if !missingRepo {
+		if graphErr.Type != "NOT_FOUND" || len(graphErr.Path) == 0 || !aliases[graphErr.Path[0]] {
+			if runErr != nil {
+				return nil, runErr
+			}
+			return nil, fmt.Errorf("gh api graphql: %s", graphErr.Message)
+		}
+		// Tolerated: the repository is gone (path names only the alias and its
+		// data is null) or the pull request number does not exist in it (path
+		// descends into pullRequest). Both leave a null node that the loop
+		// below records as unavailable. One stale key must not freeze the
+		// merge states of every other tracked pull request.
+		missingRepo := len(graphErr.Path) == 1 && resp.Data[graphErr.Path[0]] == nil
+		missingPR := len(graphErr.Path) == 2 && graphErr.Path[1] == "pullRequest"
+		if !missingRepo && !missingPR {
 			if runErr != nil {
 				return nil, runErr
 			}

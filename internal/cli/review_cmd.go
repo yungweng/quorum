@@ -16,6 +16,7 @@ import (
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
+	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
 var reviewBoolFlags = map[string]bool{
@@ -27,8 +28,9 @@ var reviewBoolFlags = map[string]bool{
 }
 
 var reviewFlags = map[string]bool{
-	"n": true, "runs": true, "concurrency": true, "model": true, "effort": true,
-	"base": true, "review-timeout": true, "min-successful": true, "resume-run": true,
+	"n": true, "runs": true, "concurrency": true, "engine": true, "model": true,
+	"effort": true, "base": true, "review-timeout": true, "min-successful": true,
+	"resume-run": true,
 }
 
 func (a *app) cmdReview(argv []string) int {
@@ -71,6 +73,7 @@ func (a *app) cmdReview(argv []string) int {
 
 	o := review.Options{
 		Repo: repo, Number: number, RepoRoot: repoRoot,
+		Engine:         a.cfg.ReviewEngine,
 		Model:          a.cfg.ReviewModel,
 		Effort:         a.cfg.ReviewEffort,
 		Runs:           a.cfg.Reviewers,
@@ -80,6 +83,7 @@ func (a *app) cmdReview(argv []string) int {
 		SharedRunsDirs: []string{a.p.BabysitRuns},
 		DepsDir:        a.p.DepsCache,
 		CodexBin:       t.Codex,
+		ClaudeBin:      t.Claude,
 		DirenvBin:      t.Direnv,
 	}
 	if o.Runs, err = args.intVal(o.Runs, "n", "runs"); err != nil {
@@ -92,6 +96,10 @@ func (a *app) cmdReview(argv []string) int {
 		return a.die("%v", err)
 	}
 	if o.ReviewTimeout, err = args.duration(a.cfg.ReviewTimeout, "review-timeout"); err != nil {
+		return a.die("%v", err)
+	}
+	o.Engine = args.str(o.Engine, "engine")
+	if _, err := engineBinary(o.Engine, t, "--engine/REVIEW_ENGINE"); err != nil {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
@@ -237,6 +245,8 @@ func (a *app) reviewExit(err error) int {
 		return 3
 	case errors.Is(err, review.ErrAggregatorInvalid), errors.Is(err, review.ErrReviewerInvalid), errors.Is(err, review.ErrVerifierInvalid):
 		return 4
+	case errors.Is(err, usagelimit.Err):
+		return exitUsageLimit
 	default:
 		return exitError
 	}
@@ -252,10 +262,13 @@ branch against the repository default branch and writes the report without
 posting.
 
 Options:
-  -n, --runs N             Number of Codex reviewer passes. Default: %d
+  -n, --runs N             Number of reviewer passes. Default: %d
   --concurrency N          Max reviewer passes at once. Default: same as --runs
-  --model MODEL            Model for reviewers, aggregator and verifier. Default: %s
-  --effort LEVEL           minimal, low, medium, high, xhigh. Default: %s
+  --engine ENGINE          codex or claude. Default: %s
+  --model MODEL            Model for reviewers, aggregator and verifier.
+                           Default: the engine's own (%s for codex, %s for claude)
+  --effort LEVEL           minimal, low, medium, high, xhigh, max, ultra.
+                           Codex only. Default: %s
   --base BRANCH            Base branch. Default: PR base or repository default
   --dry-run                Write the report to disk without posting it
   --keep-worktree          Keep the temporary worktree after a successful run
@@ -271,8 +284,19 @@ Exit codes:
   2  refused: the target changes an .envrc
   3  refused: the target head moved during the review
   4  the aggregator or verifier could not produce a valid report
-`, a.cfg.Reviewers, a.cfg.ReviewModel, a.cfg.ReviewEffort,
+  8  the engine refused: its usage limit is exhausted
+`, a.cfg.Reviewers, orText(a.cfg.ReviewEngine, "codex"),
+		review.DefaultModel, review.ClaudeDefaultModel,
+		orText(a.cfg.ReviewEffort, review.DefaultEffort),
 		durationText(a.cfg.ReviewTimeout))
+}
+
+// orText substitutes fallback for an empty configured value in help text.
+func orText(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 // reviewerState is what the live panel knows about one reviewer pass.

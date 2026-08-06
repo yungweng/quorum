@@ -222,17 +222,27 @@ func (a *app) settings() []setting {
 			}, nil)
 		}},
 
-		{"review model", func(c config.Config) string {
-			return fmt.Sprintf("%s, effort %s", c.ReviewModel, c.ReviewEffort)
+		{"review engine", func(c config.Config) string {
+			return engineDesc(c.ReviewEngine)
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "model for the reviewers, aggregator and verifier", c.ReviewModel)
+			return a.pick(in, "Which engine runs the reviewers, aggregator and verifier? (switching resets model and effort to the engine's default)", c,
+				engineOptions(
+					func(c *config.Config) *string { return &c.ReviewEngine },
+					func(c *config.Config) *string { return &c.ReviewModel },
+					func(c *config.Config) *string { return &c.ReviewEffort },
+				), nil)
+		}},
+
+		{"review model", func(c config.Config) string {
+			return fmt.Sprintf("%s, effort %s",
+				orText(c.ReviewModel, "engine default"), orText(c.ReviewEffort, "engine default"))
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			v, err := a.askText(in, "model for the reviewers, aggregator and verifier (enter keeps, - resets to the engine's default)", c.ReviewModel)
 			if err != nil {
 				return err
 			}
-			if v = strings.TrimSpace(v); v != "" {
-				c.ReviewModel = v
-			}
-			return a.pick(in, "How hard should the reviewers think?", c, effortOptions(
+			c.ReviewModel = clearable(v)
+			return a.pick(in, "How hard should the reviewers think? (codex only)", c, defaultEffortOptions(
 				func(c *config.Config) *string { return &c.ReviewEffort }), nil)
 		}},
 
@@ -281,15 +291,26 @@ func (a *app) settings() []setting {
 			return nil
 		}},
 
+		{"fix engine", func(c config.Config) string {
+			return engineDesc(c.FixEngine)
+		}, func(a *app, in *bufio.Reader, c *config.Config) error {
+			return a.pick(in, "Which engine runs the fix sessions? (switching resets model and effort to the engine's default)", c,
+				engineOptions(
+					func(c *config.Config) *string { return &c.FixEngine },
+					func(c *config.Config) *string { return &c.FixModel },
+					func(c *config.Config) *string { return &c.FixEffort },
+				), nil)
+		}},
+
 		{"fix sessions", func(c config.Config) string {
 			return fmt.Sprintf("%s, up to %d rounds, %s per step",
 				modelDesc(c.FixModel, c.FixEffort), c.MaxIter, config.FormatDuration(c.FixTimeout))
 		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "model for the fix sessions (empty keeps your codex default)", c.FixModel)
+			v, err := a.askText(in, "model for the fix sessions (enter keeps, - resets to the engine's default)", c.FixModel)
 			if err != nil {
 				return err
 			}
-			c.FixModel = strings.TrimSpace(v)
+			c.FixModel = clearable(v)
 			if err := a.pick(in, "How hard should the fix sessions think?", c, defaultEffortOptions(
 				func(c *config.Config) *string { return &c.FixEffort }), nil); err != nil {
 				return err
@@ -649,6 +670,51 @@ func fieldsOrNil(s string) []string {
 }
 
 func trimNum(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+
+// clearable maps the literal "-" to an empty value. askText keeps the current
+// value on empty input, so without this a once-set model could never go back
+// to meaning "the engine's default".
+func clearable(v string) string {
+	if v = strings.TrimSpace(v); v == "-" {
+		return ""
+	}
+	return v
+}
+
+// engineDesc names an engine for a settings row.
+func engineDesc(name string) string {
+	if name == config.EngineClaude {
+		return "claude (Claude Code)"
+	}
+	return "codex"
+}
+
+// engineOptions builds the engine picker for one engine field and the model
+// and effort fields that belong to it. Switching the engine resets both:
+// an explicit model was chosen for the engine it was typed under, and
+// carrying it across would hand one engine the other's model name.
+func engineOptions(engineField, modelField, effortField func(*config.Config) *string) []option {
+	set := func(v string) func(*config.Config) {
+		return func(c *config.Config) {
+			if *engineField(c) == v {
+				return
+			}
+			*engineField(c) = v
+			*modelField(c) = ""
+			*effortField(c) = ""
+		}
+	}
+	is := func(v string) func(config.Config) bool {
+		return func(c config.Config) bool {
+			cc := c
+			return *engineField(&cc) == v
+		}
+	}
+	return []option{
+		{"codex", "OpenAI's Codex CLI", set(config.EngineCodex), is(config.EngineCodex)},
+		{"claude", "Anthropic's Claude Code CLI", set(config.EngineClaude), is(config.EngineClaude)},
+	}
+}
 
 // effortOptions builds the reasoning-effort picker for whichever field the
 // caller points at.

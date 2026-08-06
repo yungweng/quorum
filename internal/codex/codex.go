@@ -4,20 +4,23 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/yungweng/quorum/internal/envexec"
+	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
 // Efforts is the set of reasoning-effort values Codex accepts. Validating this
 // before spawning anything is deliberate: Codex silently ignores an unknown
 // effort instead of failing, so a typo would quietly run every reviewer at the
 // wrong setting and only show up in the bill.
-var Efforts = []string{"minimal", "low", "medium", "high", "xhigh"}
+var Efforts = []string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 // ValidEffort reports whether e is one of Efforts. The empty string is allowed
 // and means "leave the user's Codex default alone".
@@ -112,15 +115,48 @@ func TOMLString(s string) string {
 	return b.String()
 }
 
+// usageLimitLine is Codex's refusal when the account has no quota left. The
+// full message names the reset time, which run passes along.
+var usageLimitLine = "hit your usage limit"
+
+// run is the single place every Codex invocation goes through. It tees the
+// combined output into a bounded tail beside the caller's log and, when Codex
+// itself exits nonzero, classifies a usage-limit refusal into the typed error
+// the agent and the fix loop branch on. A timeout, a cancelled context or a
+// missing binary are not classified: only an actual exit is a message from
+// Codex. The match is anchored to the last lines of the output: a real
+// refusal ends the transcript, while a session that merely quotes the phrase
+// - reviewing code or docs that mention usage limits - keeps printing past
+// it.
+func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration, args []string, stdin io.Reader, log io.Writer) error {
+	var tail usagelimit.Tail
+	// One writer value for both streams, so os/exec merges them into a single
+	// pipe exactly as the previous Stdout=Stderr=log wiring did.
+	w := io.MultiWriter(log, &tail)
+	err := env.Run(ctx, timeout, envexec.Cmd{
+		Name: o.bin(), Args: args, Stdin: stdin, Stdout: w, Stderr: w,
+	})
+	if err == nil {
+		return nil
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return err
+	}
+	line, ok := usagelimit.RefusalLine(tail.String(), usageLimitLine)
+	if !ok {
+		return err
+	}
+	return &usagelimit.Error{ResetAt: usagelimit.ParseResetAt(line), Line: line}
+}
+
 // Review runs `codex exec review` against baseRef and writes the reviewer's
 // findings to outFile. --ephemeral keeps the run out of the session history:
 // reviewers are throwaway and nothing ever resumes them.
 func (o Options) Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, outFile string, log io.Writer) error {
 	args := append([]string{"exec", "review"}, o.reviewFlags()...)
 	args = append(args, "--base", baseRef, "--ephemeral", "-o", outFile)
-	return env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdout: log, Stderr: log,
-	})
+	return o.run(ctx, env, timeout, args, nil, log)
 }
 
 // Aggregate runs the aggregator pass: read-only, ephemeral, prompt as the
@@ -128,9 +164,7 @@ func (o Options) Review(ctx context.Context, env envexec.Env, timeout time.Durat
 func (o Options) Aggregate(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
 	args := append([]string{"exec"}, o.flags()...)
 	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
-	return env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdin: stdin, Stdout: log, Stderr: log,
-	})
+	return o.run(ctx, env, timeout, args, stdin, log)
 }
 
 // Verify runs the independent evidence pass in the same read-only sandbox as
@@ -139,9 +173,7 @@ func (o Options) Aggregate(ctx context.Context, env envexec.Env, timeout time.Du
 func (o Options) Verify(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
 	args := append([]string{"exec"}, o.flags()...)
 	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
-	return env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdin: stdin, Stdout: log, Stderr: log,
-	})
+	return o.run(ctx, env, timeout, args, stdin, log)
 }
 
 // DescribePR writes a final-state pull request description. It is separate
@@ -150,18 +182,23 @@ func (o Options) Verify(ctx context.Context, env envexec.Env, timeout time.Durat
 func (o Options) DescribePR(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
 	args := append([]string{"exec"}, o.flags()...)
 	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
-	return env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdin: stdin, Stdout: log, Stderr: log,
-	})
+	return o.run(ctx, env, timeout, args, stdin, log)
 }
 
-// Exec starts a new resumable session and writes the final message to outFile.
-func (o Options) Exec(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, log io.Writer) error {
+// Exec starts a new resumable session, writes the final message to outFile
+// and returns the session id recovered from ~/.codex/sessions. The lookup is
+// keyed on the worktree path, which is unique per run; see FindSession.
+func (o Options) Exec(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, log io.Writer) (string, error) {
 	args := append([]string{"exec"}, o.flags()...)
 	args = append(args, "-o", outFile, prompt)
-	return env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdout: log, Stderr: log,
-	})
+	if err := o.run(ctx, env, timeout, args, nil, log); err != nil {
+		return "", err
+	}
+	id, err := FindSession(env.Worktree)
+	if err != nil {
+		return "", fmt.Errorf("could not find the Codex session for %s: %w", env.Worktree, err)
+	}
+	return id, nil
 }
 
 // Resume continues an existing session, so context carries from the CI fixes
@@ -169,7 +206,5 @@ func (o Options) Exec(ctx context.Context, env envexec.Env, timeout time.Duratio
 func (o Options) Resume(ctx context.Context, env envexec.Env, timeout time.Duration, sessionID, prompt, outFile string, log io.Writer) error {
 	args := append([]string{"exec", "resume", sessionID}, o.flags()...)
 	args = append(args, "-o", outFile, prompt)
-	return env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdout: log, Stderr: log,
-	})
+	return o.run(ctx, env, timeout, args, nil, log)
 }

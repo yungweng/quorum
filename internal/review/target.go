@@ -41,10 +41,10 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 		if errors.Is(err, os.ErrNotExist) {
 			legacy = true
 		} else if err != nil {
-			return target.Target{}, runPaths{}, err
+			return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
 		} else {
 			if err := applyRunTarget(o, meta); err != nil {
-				return target.Target{}, runPaths{}, err
+				return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
 			}
 			saved = &meta
 		}
@@ -73,12 +73,13 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 	}
 	if saved != nil {
 		if err := saved.matches(tgt); err != nil {
-			return target.Target{}, runPaths{}, err
+			return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
 		}
 	}
 	if legacy && !legacyPRRunMatches(run.root, tgt) {
 		return target.Target{}, runPaths{}, fmt.Errorf(
-			"resume run has no target metadata, so its original branch target and base cannot be verified; start a new review",
+			"%w: the run has no target metadata, so its original branch target and base cannot be verified; start a new review",
+			ErrResumeUnusable,
 		)
 	}
 	return tgt, run, nil

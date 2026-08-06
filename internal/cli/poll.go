@@ -137,6 +137,15 @@ func (a *app) cmdPoll(args []string) int {
 		return 0
 	}
 
+	// An exhausted usage limit dooms every new run until the provider resets
+	// it. The records stay untouched apart from the visible queue status, so
+	// the first poll after the pause picks the same requests up again.
+	if until, paused := runner.ReadPause(a.p.StateDir); paused {
+		a.log.Printf("usage limit: paused until %s, not starting new reviews", until.Format(time.RFC3339))
+		a.markQueued(ready, state.Deferred, "usage limit, retrying after "+until.Format(time.RFC3339))
+		return 0
+	}
+
 	slots := a.cfg.MaxConcurrent - len(runner.Live(a.p.RunningDir))
 	if slots <= 0 {
 		a.log.Printf("at capacity: %d of %d review slot(s) in use, %d waiting",
@@ -269,6 +278,17 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 		return c, false
 	}
 	if int(c.rec.Fails) >= a.cfg.MaxRetries {
+		// A give-up binds to the request it gave up on: giving up recorded
+		// that ReqAt below, and the equality check above keeps it quiet. This
+		// request is a newer one, so it gets a fresh retry budget instead of
+		// inheriting a failure count that may describe a long-gone problem,
+		// such as an exhausted usage limit.
+		if c.rec.Status == state.GaveUp {
+			a.log.Printf("%s: new review request after giving up, retrying with a fresh budget", key)
+			a.record(key, func(rec *state.Record) { rec.Fails = 0 })
+			c.rec.Fails = 0
+			return c, true
+		}
 		a.log.Printf("%s: giving up after %d failed attempts, retry with: quorum run %s", key, c.rec.Fails, key)
 		a.record(key, func(rec *state.Record) {
 			rec.Mark(state.GaveUp, "too many failed attempts")
@@ -379,7 +399,7 @@ func (a *app) cmdReviewOne(args []string) int {
 	}
 	r := &runner.Runner{
 		Cfg: a.cfg, P: a.p, Log: a.log,
-		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, DirenvBin: t.Direnv,
+		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, ClaudeBin: t.Claude, DirenvBin: t.Direnv,
 		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
 	}
 	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt, runner.InvocationAgent); err != nil {

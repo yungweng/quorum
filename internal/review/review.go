@@ -22,12 +22,14 @@ import (
 	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/deps"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runname"
 	"github.com/yungweng/quorum/internal/target"
+	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
 // Failures a caller has to tell apart. The shell version signalled these as
@@ -49,13 +51,31 @@ var (
 	ErrVerifierInvalid = errors.New("verifier output invalid")
 	// ErrTooFewReviewers means not enough reviewer passes succeeded.
 	ErrTooFewReviewers = errors.New("too few reviewer outputs")
+	// ErrResumeUnusable means --resume-run pointed at a directory that cannot
+	// be resumed: gone, not one quorum wrote, or for a different target. Kept
+	// apart from the aggregator and verifier failures so a caller can fall
+	// back to a fresh run instead of treating a bad resume like a real one.
+	ErrResumeUnusable = errors.New("resume run directory cannot be resumed")
 )
 
-// Defaults for a run.
+// RunDirError augments a reviewer, aggregation or verification failure with
+// the run directory it happened in, so a caller that wants to retry with
+// --resume-run does not have to parse it out of a message.
+type RunDirError struct {
+	RunDir string
+	Err    error
+}
+
+func (e *RunDirError) Error() string { return e.Err.Error() }
+func (e *RunDirError) Unwrap() error { return e.Err }
+
+// Defaults for a run. The model and effort defaults belong to the Codex
+// engine; the Claude engine has its own model default and no effort.
 const (
 	DefaultRuns          = 6
-	DefaultModel         = "gpt-5.6-terra"
-	DefaultEffort        = "medium"
+	DefaultModel         = "gpt-5.6-luna"
+	DefaultEffort        = "max"
+	ClaudeDefaultModel   = "sonnet"
 	DefaultReviewTimeout = 45 * time.Minute
 	// prewarmTimeout bounds the single environment entry that installs
 	// dependencies before the reviewers start.
@@ -77,7 +97,8 @@ type Options struct {
 	RepoRoot string // the checkout the worktree is created from
 
 	Runs          int
-	Concurrency   int // 0 means all at once
+	Concurrency   int    // 0 means all at once
+	Engine        string // codex or claude; empty means codex
 	Model         string
 	Effort        string
 	BaseBranch    string // empty uses the PR's own base
@@ -95,7 +116,41 @@ type Options struct {
 	SharedRunsDirs []string // other run roots sharing the dependency cache
 	DepsDir        string   // shared dependency cache root
 	CodexBin       string
+	ClaudeBin      string
 	DirenvBin      string
+}
+
+// engineBin picks the resolved binary for the selected engine.
+func (o Options) engineBin() string {
+	if o.Engine == engine.Claude {
+		return o.ClaudeBin
+	}
+	return o.CodexBin
+}
+
+// ReviewEngineDefaults resolves engine, model and effort for any review-style
+// pass (reviewer, aggregator, verifier, description, divergence analysis):
+// an empty engine means Codex, and an engine's opinionated defaults apply
+// only when that engine is the resolved one, so a Claude run is never handed
+// a GPT model name.
+func ReviewEngineDefaults(eng, model, effort string) (string, string, string) {
+	if eng == "" {
+		eng = engine.Codex
+	}
+	switch eng {
+	case engine.Codex:
+		if model == "" {
+			model = DefaultModel
+		}
+		if effort == "" {
+			effort = DefaultEffort
+		}
+	case engine.Claude:
+		if model == "" {
+			model = ClaudeDefaultModel
+		}
+	}
+	return eng, model, effort
 }
 
 // Result is what a finished run produced.
@@ -188,7 +243,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 		BaseRef: baseRef, BaseSHA: pr.BaseRefOid, HeadSHA: pr.HeadRefOid,
 		Draft: pr.IsDraft, Runs: o.Runs, Concurrency: o.Concurrency,
-		Timeout: o.ReviewTimeout, Model: o.Model, Effort: o.Effort, RunDir: run.root,
+		Timeout: o.ReviewTimeout, Engine: o.Engine, Model: o.Model, Effort: o.Effort, RunDir: run.root,
 	})
 
 	// checkout prepares the worktree and tells us what was actually reviewed.
@@ -204,8 +259,11 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		}
 	}
 
-	opts := codex.Options{
-		Bin: o.CodexBin, Model: o.Model, Effort: o.Effort, DisableSerena: true,
+	eng, err := engine.NewReviewer(o.Engine, engine.ReviewerOptions{
+		Bin: o.engineBin(), Model: o.Model, Effort: o.Effort,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	var linked []string
@@ -215,8 +273,8 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 
 	if o.ResumeRun == "" {
 		linked = r.prepareDeps(ctx, o, run, env, rep)
-		if err := r.runReviewers(ctx, o, run, env, opts, baseRef, rep); err != nil {
-			return nil, err
+		if err := r.runReviewers(ctx, o, run, env, eng, baseRef, rep); err != nil {
+			return nil, &RunDirError{RunDir: run.root, Err: err}
 		}
 	}
 	if err := r.cleanReviewerArtifacts(ctx, run, reviewedHead, rep); err != nil {
@@ -227,10 +285,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	requested := o.Runs
-	if o.ResumeRun != "" && len(indices) > 0 {
-		requested = len(indices)
-	}
+	requested := requestedReviewers(o.Runs, len(indices), o.ResumeRun != "")
 	minOK := o.MinSuccessful
 	if minOK == 0 {
 		minOK = (requested + 1) / 2
@@ -260,15 +315,15 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		BaseSHA: reviewedBase, HeadSHA: reviewedHead, BaseDriftNote: driftNote,
 		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 	})
-	if err := r.aggregate(ctx, o, run, env, opts, prompt, len(indices), rep); err != nil {
-		return nil, err
+	if err := r.aggregate(ctx, o, run, env, eng, prompt, len(indices), rep); err != nil {
+		return nil, &RunDirError{RunDir: run.root, Err: err}
 	}
-	if err := r.verify(ctx, o, run, env, opts, verifierPrompt(promptMeta{
+	if err := r.verify(ctx, o, run, env, eng, verifierPrompt(promptMeta{
 		URL: pr.URL, Title: pr.Title, Author: pr.Author.Login, BaseRef: baseRef,
 		BaseSHA: reviewedBase, HeadSHA: reviewedHead,
 		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 	}), reviewedHead, rep); err != nil {
-		return nil, err
+		return nil, &RunDirError{RunDir: run.root, Err: err}
 	}
 
 	res := &Result{
@@ -378,10 +433,10 @@ func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, tgt targ
 	pr := tgt.PR
 	if o.ResumeRun != "" {
 		if _, err := os.Stat(run.output); err != nil {
-			return "", "", fmt.Errorf("resume output directory does not exist: %s", run.output)
+			return "", "", fmt.Errorf("%w: output directory does not exist: %s", ErrResumeUnusable, run.output)
 		}
 		if _, err := os.Stat(filepath.Join(run.worktree, ".git")); err != nil {
-			return "", "", fmt.Errorf("resume worktree does not look like a git checkout: %s", run.worktree)
+			return "", "", fmt.Errorf("%w: worktree does not look like a git checkout: %s", ErrResumeUnusable, run.worktree)
 		}
 		base, err := r.Git.RevParse(ctx, run.worktree, baseRef)
 		if err != nil {
@@ -496,8 +551,12 @@ func (r *Runner) prepareDeps(ctx context.Context, o Options, run runPaths, env e
 	return append(links, captured...)
 }
 
-// runReviewers runs the reviewer passes, at most Concurrency at a time.
-func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env envexec.Env, opts codex.Options, baseRef string, rep Reporter) error {
+// runReviewers runs the reviewer passes, at most Concurrency at a time. The
+// first usage-limit refusal cancels the rest: the limit is account-global, so
+// every reviewer still in flight is doomed to the same wall.
+func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, baseRef string, rep Reporter) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	started := time.Now()
 	// Opens the event log before the first reviewer finishes, so a watcher can
 	// tell "the reviewers are running and none has finished" apart from "the
@@ -510,6 +569,7 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 
 	var mu sync.Mutex
 	done, failed := 0, 0
+	var limitErr error
 
 	// A ticker drives the progress line so it keeps moving while reviewers are
 	// quiet; reviewers themselves only report when they finish.
@@ -552,7 +612,7 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 
 			rep.ReviewerStarted(idx)
 			begin := time.Now()
-			err = opts.Review(ctx, env, o.ReviewTimeout, baseRef, out, logFile)
+			err = eng.Review(ctx, env, o.ReviewTimeout, baseRef, out, logFile)
 			elapsed := time.Since(begin)
 
 			mu.Lock()
@@ -562,6 +622,10 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 				// complete review, so it goes.
 				os.Remove(out)
 				failed++
+				if errors.Is(err, usagelimit.Err) && limitErr == nil {
+					limitErr = err
+					cancel()
+				}
 				appendEvent(run.output, fmt.Sprintf("fail %d %d %d",
 					idx, proc.ExitCode(err), int(elapsed.Seconds())))
 				rep.ReviewerFailed(idx, proc.ExitCode(err), elapsed, logPath)
@@ -575,6 +639,9 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 
 	wg.Wait()
 	close(progressDone)
+	if limitErr != nil {
+		return limitErr
+	}
 	return ctx.Err()
 }
 
@@ -654,13 +721,20 @@ func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, b
 // aggregate merges the reviewer outputs into the candidate comment, retrying
 // once when the structure is wrong. A run that still cannot produce it fails
 // rather than passing malformed input to the verifier.
-func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env envexec.Env, opts codex.Options, prompt string, reviewers int, rep Reporter) error {
+func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, prompt string, reviewers int, rep Reporter) error {
 	logPath := filepath.Join(run.output, "aggregator.log")
 	var lastErr error
 	appendEvent(run.output, "aggregate")
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		rep.Aggregating(reviewers, attempt)
+		// The verifier's retry has always named the rejection; the aggregator
+		// retried blind, which for a deterministic formatting slip just buys
+		// the same invalid output twice.
+		attemptPrompt := prompt
+		if attempt > 1 && lastErr != nil {
+			attemptPrompt += fmt.Sprintf("\n\nYour previous output was rejected: %v. Correct that error and return the complete comment again.", lastErr)
+		}
 
 		logFile, err := os.Create(logPath)
 		if err != nil {
@@ -673,12 +747,17 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 		}
 		// The shell version ran the aggregator without any timeout at all, so a
 		// hung pass stalled the run indefinitely. It gets the reviewer timeout.
-		err = opts.Aggregate(ctx, env, o.ReviewTimeout, prompt, run.candidate, all, logFile)
+		err = eng.Aggregate(ctx, env, o.ReviewTimeout, attemptPrompt, run.candidate, all, logFile)
 		all.Close()
 		logFile.Close()
 
 		if err != nil {
-			lastErr = fmt.Errorf("codex exited nonzero, see %s", logPath)
+			// A usage limit is account-global: the retry would hit the same
+			// wall, and the reviewer outputs stay reusable for a resume.
+			if errors.Is(err, usagelimit.Err) {
+				return err
+			}
+			lastErr = fmt.Errorf("engine exited nonzero, see %s", logPath)
 		} else if lastErr = ValidateComment(run.candidate); lastErr == nil {
 			return nil
 		}
@@ -694,7 +773,7 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 // The model may refine the report, but HEAD and the complete porcelain status
 // must remain unchanged. Any repository mutation fails immediately; malformed
 // report output gets one retry. Nothing is posted before both gates pass.
-func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexec.Env, opts codex.Options, prompt, expectedHead string, rep Reporter) error {
+func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, prompt, expectedHead string, rep Reporter) error {
 	logPath := filepath.Join(run.output, "verifier.log")
 	var lastErr error
 	appendEvent(run.output, "verify")
@@ -718,17 +797,21 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 			logFile.Close()
 			return err
 		}
-		err = opts.Verify(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
+		err = eng.Verify(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
 		candidate.Close()
 		logFile.Close()
 		if stateErr := r.worktreeUnchanged(ctx, run.worktree, expectedHead); stateErr != nil {
 			return fmt.Errorf("%w: verifier changed repository state: %v; refusing to retry or post", ErrVerifierInvalid, stateErr)
 		}
+		// Same reasoning as in aggregate: a usage limit outlives any retry.
+		if err != nil && errors.Is(err, usagelimit.Err) {
+			return err
+		}
 
 		validationErr := ValidateComment(run.comment)
 		switch {
 		case err != nil:
-			lastErr = fmt.Errorf("codex exited nonzero, see %s", logPath)
+			lastErr = fmt.Errorf("engine exited nonzero, see %s", logPath)
 		case validationErr != nil:
 			lastErr = validationErr
 		default:
@@ -837,12 +920,7 @@ func (o Options) withDefaults() Options {
 	if o.Concurrency == 0 {
 		o.Concurrency = o.Runs
 	}
-	if o.Model == "" {
-		o.Model = DefaultModel
-	}
-	if o.Effort == "" {
-		o.Effort = DefaultEffort
-	}
+	o.Engine, o.Model, o.Effort = ReviewEngineDefaults(o.Engine, o.Model, o.Effort)
 	if o.ReviewTimeout == 0 {
 		o.ReviewTimeout = DefaultReviewTimeout
 	}
@@ -862,7 +940,10 @@ func (o Options) validate() error {
 	if o.MinSuccessful < 0 {
 		return fmt.Errorf("min-successful must be >= 1")
 	}
-	if !codex.ValidEffort(o.Effort) {
+	if !engine.Valid(o.Engine) {
+		return fmt.Errorf("engine must be %s or %s", engine.Codex, engine.Claude)
+	}
+	if o.Engine != engine.Claude && !codex.ValidEffort(o.Effort) {
 		return fmt.Errorf("effort must be one of: %s", strings.Join(codex.Efforts, ", "))
 	}
 	if o.Repo == "" || o.RepoRoot == "" {
@@ -876,6 +957,20 @@ func (r *Runner) reporter() Reporter {
 		return NopReporter{}
 	}
 	return r.Rep
+}
+
+// requestedReviewers is the panel size a run is measured against: the
+// majority bar and the ReviewersRequested count both derive from it. A
+// resumed directory may hold more outputs than the current -n when the
+// configuration shrank between runs; those are all reused. It must never
+// lower the bar, though: a fan-out a usage limit cut short after two of six
+// reviewers would otherwise pass as a complete two-reviewer panel and be
+// reported as one.
+func requestedReviewers(runs, available int, resumed bool) int {
+	if resumed && available > runs {
+		return available
+	}
+	return runs
 }
 
 // reviewerOutputs lists the indices of reviewer passes that produced output.

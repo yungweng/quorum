@@ -34,6 +34,9 @@ const (
 	exitNoProgress   = 5
 	exitDiverged     = 6
 	exitConflicts    = 7
+	// exitUsageLimit is shared by review and babysit: the engine refused to
+	// run because the account's usage limit is exhausted.
+	exitUsageLimit = 8
 )
 
 // app carries what every command needs.
@@ -169,8 +172,23 @@ type tools struct {
 	GH    string
 	Git   string
 	Codex string
+	// Claude is optional: it is only needed when an engine setting selects it,
+	// which engineBinary checks at that point.
+	Claude string
 	// Direnv is optional: repositories without an .envrc never need it.
 	Direnv string
+}
+
+// engineBinary resolves the binary for a selected engine, or a clear error
+// naming the flag or config key to fix.
+func engineBinary(name string, t tools, hint string) (string, error) {
+	if name == config.EngineClaude {
+		if t.Claude == "" {
+			return "", fmt.Errorf("engine claude is selected (%s) but no claude binary was found on PATH; install Claude Code or switch back to codex", hint)
+		}
+		return t.Claude, nil
+	}
+	return t.Codex, nil
 }
 
 func (a *app) findTools() (tools, error) {
@@ -192,6 +210,7 @@ func (a *app) findTools() (tools, error) {
 		}
 		*spec.dst = path
 	}
+	t.Claude, _ = exec.LookPath("claude")
 	t.Direnv, _ = exec.LookPath("direnv")
 
 	if len(missing) > 0 {
@@ -215,8 +234,12 @@ func widenPath() {
 	// npm puts globally installed tools into its own prefix, which is often
 	// somewhere non-standard. Asking npm costs a subprocess, so skip it only
 	// when the shell's existing PATH already resolves every supported tool.
+	// The optional tools stay in this list on purpose: npm's global prefix is
+	// the standard install location for claude and a common one for direnv,
+	// so a setup missing one pays the one subprocess rather than losing the
+	// tool.
 	allResolved := true
-	for _, name := range []string{"gh", "git", "codex", "direnv"} {
+	for _, name := range []string{"gh", "git", "codex", "claude", "direnv"} {
 		if _, err := exec.LookPath(name); err != nil {
 			allResolved = false
 			break

@@ -21,6 +21,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/codex"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
@@ -28,6 +29,7 @@ import (
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/runname"
 	"github.com/yungweng/quorum/internal/target"
+	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
 // Failures the CLI maps onto the exit codes the shell version defined, so
@@ -75,10 +77,12 @@ type Options struct {
 	Number   int
 	Context  string // extra text handed to the fix session
 
+	Engine string // fix-session engine: codex or claude; empty means codex
 	Model  string
 	Effort string
 
 	Reviewers    int
+	ReviewEngine string // review-round engine: codex or claude; empty means codex
 	ReviewModel  string
 	ReviewEffort string
 
@@ -103,6 +107,11 @@ type Options struct {
 	// ResolveConflicts merges origin/<base> through the fix session whenever
 	// the branch conflicts with its base, before any review round.
 	ResolveConflicts bool
+	// ResumeRun reuses a prior review run's completed reviewer output for the
+	// first review round, the way a failed round's in-run retry does. Later
+	// rounds always fan out fresh: they review a head the saved output has
+	// never seen.
+	ResumeRun string
 
 	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
 	// sandbox. They must run tests, use gh and push, unattended, and a
@@ -124,7 +133,16 @@ type Options struct {
 	ReviewRunsDir string
 	DepsDir       string
 	CodexBin      string
+	ClaudeBin     string
 	DirenvBin     string
+}
+
+// engineBin picks the resolved binary for name.
+func (o Options) engineBin(name string) string {
+	if name == engine.Claude {
+		return o.ClaudeBin
+	}
+	return o.CodexBin
 }
 
 // RoundEntry is one round's commit list, for the closing summary.
@@ -167,7 +185,7 @@ type Result struct {
 type Pipeline struct {
 	GH     *gh.Client
 	Git    git.G
-	Review *review.Runner
+	Review Reviewer
 	Rep    Reporter
 	// In supplies answers at interactive gates. Nil means no terminal, which
 	// makes every interactive gate abort rather than hang.
@@ -216,7 +234,7 @@ type run struct {
 	releaseClaim func()
 
 	env   envexec.Env
-	codex codex.Options
+	fixer engine.Fixer
 	rules string
 	prCtx string
 
@@ -319,8 +337,20 @@ func (r *run) prepare() error {
 			return err
 		}
 		if localSHA != headSHA {
-			return fmt.Errorf("local branch %s (%s) differs from origin (%s); push your local commits first",
-				r.branch, localSHA, headSHA)
+			// The pipeline's own pushes never move the local ref, so after any
+			// earlier run the local branch is simply behind origin. That loses
+			// nothing: the run works on origin's head in its own worktree.
+			// Only a local branch with commits of its own is refused.
+			behind, aerr := r.p.Git.IsAncestor(r.ctx, r.o.RepoRoot, localSHA, headSHA)
+			if aerr != nil {
+				return aerr
+			}
+			if !behind {
+				return fmt.Errorf("local branch %s (%s) differs from origin (%s); push your local commits first",
+					r.branch, localSHA, headSHA)
+			}
+			r.rep.Warn(fmt.Sprintf("local branch %s is behind origin; the run works on origin's head %s",
+				r.branch, shortSHA(headSHA)))
 		}
 	}
 
@@ -376,9 +406,13 @@ func (r *run) prepare() error {
 	}
 
 	r.env = envexec.Env{Worktree: r.worktree, Direnv: r.o.UseDirenv, DirenvBin: r.o.DirenvBin}
-	r.codex = codex.Options{
-		Bin: r.o.CodexBin, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
+	fixer, err := engine.NewFixer(r.o.Engine, engine.FixerOptions{
+		Bin: r.o.engineBin(r.o.Engine), Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
+	})
+	if err != nil {
+		return err
 	}
+	r.fixer = fixer
 	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly)
 	if tgt.BranchOnly {
 		r.prCtx = branchContext(r.branch, pr.BaseRefName, r.o.Context)
@@ -435,7 +469,14 @@ func (r *run) execute() (*Result, error) {
 		return res, err
 	}
 
-	r.startReview(1)
+	// A conflict fix above moved the head, so a handed-in resume would replay
+	// reviewer output for a head that no longer exists; only an untouched head
+	// may reuse it.
+	resume := r.o.ResumeRun
+	if r.conflictFixes > 0 {
+		resume = ""
+	}
+	r.startReviewWith(1, resume)
 	if !r.target.BranchOnly {
 		r.rep.Step("CI")
 		r.enter(PhaseCI)
@@ -621,41 +662,42 @@ func (r *run) codexCall(tag, prompt string) error {
 	started := time.Now()
 
 	if r.sessionID == "" {
-		err = r.codex.Exec(r.ctx, r.env, r.o.FixTimeout,
+		var id engine.SessionRef
+		id, err = r.fixer.Exec(r.ctx, r.env, r.o.FixTimeout,
 			firstPrompt(r.rules, r.prCtx, prompt), msgPath, out)
+		if err == nil {
+			r.sessionID = id
+		}
 	} else {
-		err = r.codex.Resume(r.ctx, r.env, r.o.FixTimeout, r.sessionID, prompt, msgPath, out)
+		err = r.fixer.Resume(r.ctx, r.env, r.o.FixTimeout, r.sessionID, prompt, msgPath, out)
 	}
 	r.rep.StepEnd(stepLabel(tag), time.Since(started), err == nil)
 
 	if err != nil {
+		// The agent and the CLI both branch on this; wrapping it into the
+		// generic exit message would erase the reset time.
+		if errors.Is(err, usagelimit.Err) {
+			return err
+		}
 		if errors.Is(err, proc.ErrTimeout) {
-			return fmt.Errorf("codex fix step timed out after %s (--fix-timeout; 0 disables), see %s",
+			return fmt.Errorf("the fix step timed out after %s (--fix-timeout; 0 disables), see %s",
 				r.o.FixTimeout, logPath)
 		}
-		return fmt.Errorf("codex exec failed with exit %d, see %s", proc.ExitCode(err), logPath)
+		return fmt.Errorf("the fix session failed with exit %d, see %s", proc.ExitCode(err), logPath)
 	}
 
 	data, err := os.ReadFile(msgPath)
 	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		return fmt.Errorf("codex produced no final message, see %s", logPath)
+		return fmt.Errorf("the fix session produced no final message, see %s", logPath)
 	}
 	r.lastMsg = string(data)
-
-	if r.sessionID == "" {
-		id, err := codex.FindSession(r.worktree)
-		if err != nil {
-			return fmt.Errorf("could not find the Codex session for %s: %w", r.worktree, err)
-		}
-		r.sessionID = id
-	}
 	return nil
 }
 
 // resume is codexCall for steps that must not start a new session.
 func (r *run) resume(tag, prompt string) error {
 	if r.sessionID == "" {
-		return fmt.Errorf("no Codex session to resume")
+		return fmt.Errorf("no fix session to resume")
 	}
 	return r.codexCall(tag, prompt)
 }
@@ -991,10 +1033,16 @@ func (o Options) validate() error {
 			}
 		}
 	}
-	if !codex.ValidEffort(o.Effort) {
+	if !engine.Valid(o.Engine) {
+		return fmt.Errorf("engine must be %s or %s", engine.Codex, engine.Claude)
+	}
+	if !engine.Valid(o.ReviewEngine) {
+		return fmt.Errorf("review-engine must be %s or %s", engine.Codex, engine.Claude)
+	}
+	if o.Engine != engine.Claude && !codex.ValidEffort(o.Effort) {
 		return fmt.Errorf("effort must be one of: %s", strings.Join(codex.Efforts, ", "))
 	}
-	if !codex.ValidEffort(o.ReviewEffort) {
+	if o.ReviewEngine != engine.Claude && !codex.ValidEffort(o.ReviewEffort) {
 		return fmt.Errorf("review-effort must be one of: %s", strings.Join(codex.Efforts, ", "))
 	}
 	if o.DivergenceTimeout < 0 {

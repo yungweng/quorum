@@ -59,7 +59,9 @@ Important execution rules:
 - Do not invent findings that are not present in the reviewer outputs.
 - Keep only findings grounded in reviewer evidence.
 - Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- The very first line of your answer must be exactly "## Summary", including both leading # characters. Every section heading keeps its leading "## ". These headings are parsed by a machine; a heading without them counts as missing.
 - List every finding in Blockers, Critical, Suggestions, and Questions as a top-level bullet line starting with "- ".
+- Suggestions are for changes the author should actually make. Drop polish, taste, naming, and hypothetical improvements even when a reviewer mentioned them; "None." is the right content for a clean change, not a weak bullet list.
 - If a section has no items, write "None." as its only content.
 - Do not mention internal reviewer count, Codex sessions, or automation details.
 - Keep the report concise.`)
@@ -71,7 +73,9 @@ Important execution rules:
 - Do not invent findings that are not present in the reviewer outputs.
 - Keep only findings grounded in reviewer evidence.
 - Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- The very first line of your answer must be exactly "## Summary", including both leading # characters. Every section heading keeps its leading "## ". These headings are parsed by a machine; a heading without them counts as missing.
 - List every finding in Blockers, Critical, Suggestions, and Questions as a top-level bullet line starting with "- ".
+- Suggestions are for changes the author should actually make. Drop polish, taste, naming, and hypothetical improvements even when a reviewer mentioned them; "None." is the right content for a clean change, not a weak bullet list.
 - If a section has no items, write "None." as its only content.
 - Do not mention internal reviewer count, Codex sessions, or automation details.
 - Keep the comment concise enough for a GitHub PR discussion.`, m.Author)

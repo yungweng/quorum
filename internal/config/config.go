@@ -46,13 +46,16 @@ type Config struct {
 	SkipOwn    bool
 
 	// Review settings. These used to be flags on a separate binary that the
-	// daemon passed through as an opaque REVIEW_ARGS string.
+	// daemon passed through as an opaque REVIEW_ARGS string. An empty model
+	// or effort means the selected engine's own default.
+	ReviewEngine  string // codex or claude
 	ReviewModel   string
 	ReviewEffort  string
 	ReviewTimeout time.Duration
 	Post          bool // false is the old REVIEW_ARGS="--dry-run"
 
 	// Babysit settings for the fix sessions.
+	FixEngine  string // codex or claude
 	FixModel   string
 	FixEffort  string
 	MaxIter    int
@@ -106,6 +109,13 @@ const (
 	ActionBabysit = "babysit"
 )
 
+// The engines reviews and fix sessions can run on. Defined here rather than
+// imported so config keeps its zero internal dependencies.
+const (
+	EngineCodex  = "codex"
+	EngineClaude = "claude"
+)
+
 // Default mirrors the defaults the shell version shipped, with the resource
 // limits added. LoadLimit is off by default: the point of the agent is that a
 // review starts when it is requested, and MaxConcurrent is the honest place to
@@ -126,11 +136,14 @@ func Default() Config {
 		SkipBots:      true,
 		SkipOwn:       true,
 
-		ReviewModel:   "gpt-5.6-terra",
-		ReviewEffort:  "medium",
+		// Model and effort stay empty on purpose: empty means the selected
+		// engine's own default, so switching REVIEW_ENGINE never feeds one
+		// engine another engine's model name.
+		ReviewEngine:  EngineCodex,
 		ReviewTimeout: 45 * time.Minute,
 		Post:          true,
 
+		FixEngine:        EngineCodex,
 		MaxIter:          12,
 		MaxCIFixes:       3,
 		FixTimeout:       2 * time.Hour,
@@ -307,6 +320,10 @@ func (c *Config) set(key, value string) {
 		c.LoadLimit = floatOr(value, c.LoadLimit)
 	case "CACHE_BUDGET_GB":
 		c.CacheBudgetGB = floatOr(value, c.CacheBudgetGB)
+	case "REVIEW_ENGINE":
+		if v := strings.TrimSpace(strings.ToLower(value)); v == EngineCodex || v == EngineClaude {
+			c.ReviewEngine = v
+		}
 	case "REVIEW_MODEL":
 		c.ReviewModel = strings.TrimSpace(value)
 	case "REVIEW_EFFORT":
@@ -315,6 +332,10 @@ func (c *Config) set(key, value string) {
 		c.ReviewTimeout = durationOr(value, c.ReviewTimeout)
 	case "POST":
 		c.Post = truthy(value)
+	case "FIX_ENGINE":
+		if v := strings.TrimSpace(strings.ToLower(value)); v == EngineCodex || v == EngineClaude {
+			c.FixEngine = v
+		}
 	case "FIX_MODEL":
 		c.FixModel = strings.TrimSpace(value)
 	case "FIX_EFFORT":
@@ -460,13 +481,17 @@ func (c Config) Render() string {
 
 	w("# Reviews. POST=0 keeps review output on disk, disables every PR write,\n")
 	w("# and skips babysit's final description generation.\n")
+	w("# An empty model or effort means the engine's own default. Effort is\n")
+	w("# codex-only; the claude engine ignores it.\n")
+	w("REVIEW_ENGINE=%q\t# codex or claude\n", c.ReviewEngine)
 	w("REVIEW_MODEL=%q\n", c.ReviewModel)
-	w("REVIEW_EFFORT=%q\t# minimal, low, medium, high, xhigh\n", c.ReviewEffort)
+	w("REVIEW_EFFORT=%q\t# minimal, low, medium, high, xhigh, max, ultra\n", c.ReviewEffort)
 	w("REVIEW_TIMEOUT=%q\t# per reviewer pass, 0 disables\n", FormatDuration(c.ReviewTimeout))
 	w("POST=%s\n\n", bit(c.Post))
 
 	w("# Babysit: the fix sessions that work through review findings.\n")
-	w("# Empty model or effort leaves your codex defaults alone.\n")
+	w("# Empty model or effort leaves the selected engine's defaults alone.\n")
+	w("FIX_ENGINE=%q\t# codex or claude\n", c.FixEngine)
 	w("FIX_MODEL=%q\n", c.FixModel)
 	w("FIX_EFFORT=%q\n", c.FixEffort)
 	w("MAX_ITER=%d\t\t# review -> fix rounds before giving up\n", c.MaxIter)

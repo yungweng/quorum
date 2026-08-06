@@ -499,14 +499,14 @@ exit 1`)
 	}
 }
 
-func TestPRStatesRejectsNotFoundBelowRepository(t *testing.T) {
+func TestPRStatesRejectsNotFoundBelowThePullRequestField(t *testing.T) {
 	bin, _ := fakeGH(t, `cat <<'JSON'
-{"data":{"p0":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["p0","pullRequest"],"message":"field not found"}]}
+{"data":{"p0":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["p0","somethingElse"],"message":"field not found"}]}
 JSON
 echo 'gh: field not found' >&2
 exit 1`)
 	if _, err := testClient(bin).PRStates(context.Background(), []string{"acme/api#42"}); err == nil {
-		t.Fatal("an unexpected nested NOT_FOUND was reported as a missing repository")
+		t.Fatal("an unexpected nested NOT_FOUND was reported as tolerable")
 	}
 }
 
@@ -531,5 +531,28 @@ func TestPRStatesDropsUnusableKeys(t *testing.T) {
 	// With nothing left to ask about, gh must not be run at all.
 	if n := calls(t, countFile); n != 0 {
 		t.Errorf("ran gh %d time(s) for keys it could not parse", n)
+	}
+}
+
+// A pull request number that does not exist in a real repository answers a
+// null pullRequest with a NOT_FOUND error whose path descends into the field.
+// One such stale key must not freeze the merge states of every other tracked
+// pull request; this exact shape once froze the dashboard for good.
+func TestPRStatesSurvivesAMissingPullRequest(t *testing.T) {
+	bin, _ := fakeGH(t, `cat <<'JSON'
+{"data":{"p0":{"pullRequest":null},"p1":{"pullRequest":{"state":"MERGED"}}},"errors":[{"type":"NOT_FOUND","path":["p0","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 2166."}]}
+JSON
+echo 'gh: Could not resolve to a PullRequest with the number of 2166.' >&2
+exit 1`)
+	got, err := testClient(bin).PRStates(context.Background(),
+		[]string{"acme/api#2166", "acme/api#2170"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["acme/api#2166"] != StateUnavailable {
+		t.Errorf("acme/api#2166 = %q, want UNAVAILABLE", got["acme/api#2166"])
+	}
+	if got["acme/api#2170"] != StateMerged {
+		t.Errorf("acme/api#2170 = %q, want MERGED", got["acme/api#2170"])
 	}
 }

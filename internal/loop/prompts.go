@@ -79,7 +79,7 @@ Inspect the failures with gh (for example: gh run view <run-id> --log-failed; th
 
 End your final message with a line that is exactly:
 %s
-followed by a short log comment for the PR: what failed, what you changed and how, and which checks you ran. Write it in the language of the PR description, plain and factual, and never mention AI, agents, Codex, or automation in it. Use this marker for nothing else.`,
+followed by a short log comment for the PR: what failed, what you changed and how, and which checks you ran. Write it in the language of the PR description, plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
 		number, failsJSON, MarkerComment)
 }
 
@@ -139,7 +139,7 @@ Resolve every conflict so that the intent of both sides survives; do not blindly
 
 End your final message with a line that is exactly:
 %s
-followed by a short log comment for the PR: which files conflicted and how the conflicts were resolved. Write it in the language of the PR description, plain and factual, and never mention AI, agents, Codex, or automation in it. Use this marker for nothing else.`,
+followed by a short log comment for the PR: which files conflicted and how the conflicts were resolved. Write it in the language of the PR description, plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
 		MarkerComment)
 }
 
@@ -157,7 +157,7 @@ func finalDescriptionPrompt(number int, title, base string) string {
 
 Describe the PR as it exists now. The result must stand alone for a reviewer who has not seen its development. Preserve still-relevant issue links, rollout notes, test instructions, screenshots, and useful structure from the original description. Correct stale claims and cover material behavior present in the final diff. Keep it concise and use the language of the original description; if it is empty, use the language of the PR title.
 
-Do not write a changelog or development narrative. Do not mention that the description was rewritten or updated. Do not mention review rounds, findings, fix steps, comments, agents, Codex, AI, automation, or how the implementation evolved. Do not invent test results or product decisions.
+Do not write a changelog or development narrative. Do not mention that the description was rewritten or updated. Do not mention review rounds, findings, fix steps, comments, agents, AI, automation, any coding tool, or how the implementation evolved. Do not invent test results or product decisions.
 
 Compare the original stated intent with the finished implementation. If the final behavior, scope, or architecture materially departs from that intent, put one short blockquote at the very top with a calm warning label in the description's language, one sentence naming the difference, and one sentence asking for review before merge. Use this only for a material directional change, not ordinary refinements, bug fixes, or implementation details. Do not exaggerate.
 

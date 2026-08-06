@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,6 +34,9 @@ case "$*" in
   "ls-remote origin refs/heads/main") printf 'base-sha\trefs/heads/main\n' ;;
   "status --porcelain") echo "`+status+`" ;;
   "rev-parse HEAD") echo "`+localSHA+`" ;;
+  "fetch -q origin +refs/heads/feature/crumb-tray:refs/remotes/origin/feature/crumb-tray") : ;;
+  "merge-base --is-ancestor local-sha head-sha") exit 1 ;;
+  "merge-base --is-ancestor behind-sha head-sha") exit 0 ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac`)
 	return git.New(bin)
@@ -173,6 +177,69 @@ func TestResolveRefusesDirtyOrUnpushedLocalWork(t *testing.T) {
 				t.Fatalf("error = %q", err)
 			}
 		})
+	}
+}
+
+func TestResolveProceedsWhenTheLocalBranchIsMerelyBehind(t *testing.T) {
+	got, err := Resolve(context.Background(), branchGH(t, ""),
+		branchGit(t, false, "behind-sha"), t.TempDir(), 0, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.BranchOnly || got.PR.HeadRefOid != "head-sha" {
+		t.Fatalf("behind checkout resolved to %+v", got.PR)
+	}
+}
+
+// The remote head comes from ls-remote and may not exist locally at all. Run
+// against real git: origin advanced after the last fetch, so without an
+// explicit fetch the ancestor check has nothing to compare against and dies
+// with exit status 128 instead of recognising a merely-behind checkout.
+func TestResolveLocalFetchesTheRemoteHeadForTheAncestorCheck(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	base := t.TempDir()
+	origin := filepath.Join(base, "origin.git")
+	work := filepath.Join(base, "work")
+	clone := filepath.Join(base, "clone")
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	run(base, "init", "-q", "--bare", "-b", "main", origin)
+	run(base, "init", "-q", "-b", "main", work)
+	run(work, "commit", "-q", "--allow-empty", "-m", "base")
+	run(work, "checkout", "-q", "-b", "feature")
+	run(work, "commit", "-q", "--allow-empty", "-m", "feature work")
+	run(work, "remote", "add", "origin", origin)
+	run(work, "push", "-q", "origin", "main", "feature")
+	run(base, "clone", "-q", origin, clone)
+	run(clone, "checkout", "-q", "feature")
+	run(work, "commit", "-q", "--allow-empty", "-m", "pushed elsewhere")
+	run(work, "push", "-q", "origin", "feature")
+	remoteHead := run(work, "rev-parse", "HEAD")
+
+	// gh must never run: the base branch is given, and a local run never asks
+	// for the PR.
+	got, err := ResolveLocal(context.Background(), gh.New(filepath.Join(base, "gh-must-not-run")),
+		git.New("git"), clone, "main")
+	if err != nil {
+		t.Fatalf("a checkout merely behind origin was refused: %v", err)
+	}
+	if !got.BranchOnly || got.PR.HeadRefOid != remoteHead {
+		t.Fatalf("behind checkout resolved to %+v, want head %s", got.PR, remoteHead)
 	}
 }
 

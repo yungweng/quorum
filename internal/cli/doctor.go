@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -99,6 +100,7 @@ func (a *app) runChecks() []check {
 		{"git", "cloning and fetching"},
 
 		{"codex", "the reviewer panel runs it"},
+		{"claude", "the claude engine runs it"},
 		{"direnv", "entering project environments"},
 	} {
 		path, err := exec.LookPath(spec.name)
@@ -109,6 +111,13 @@ func (a *app) runChecks() []check {
 				// REVIEW_ARGS is retired and only --dry-run is still read out of
 				// it, so pointing at it here would be advice that does nothing.
 				level, fix = 1, "install direnv, or pass --no-direnv"
+			}
+			if spec.name == "claude" {
+				// Only needed when an engine setting selects it.
+				level, fix = 1, "install Claude Code, or leave REVIEW_ENGINE/FIX_ENGINE at codex"
+				if a.cfg.ReviewEngine == config.EngineClaude || a.cfg.FixEngine == config.EngineClaude {
+					level, fix = 2, "install Claude Code; your config selects the claude engine"
+				}
 			}
 			out = append(out, check{spec.name, "not found, needed for " + spec.why, level, fix})
 			continue

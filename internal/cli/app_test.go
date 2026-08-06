@@ -49,6 +49,7 @@ func TestWidenPathDoesNotRunNPMWhenSupportedToolsArePresent(t *testing.T) {
 	called := filepath.Join(dir, "npm-called")
 	for name, script := range map[string]string{
 		"codex":  "#!/bin/sh\nexit 0\n",
+		"claude": "#!/bin/sh\nexit 0\n",
 		"direnv": "#!/bin/sh\nexit 0\n",
 		"gh":     "#!/bin/sh\nexit 0\n",
 		"git":    "#!/bin/sh\nexit 0\n",

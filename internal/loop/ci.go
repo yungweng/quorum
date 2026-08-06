@@ -11,11 +11,20 @@ import (
 
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/usagelimit"
 )
+
+// Reviewer is the subset of review.Runner the pipeline depends on.
+// *review.Runner satisfies it as-is; the seam exists so tests can control one
+// round's outcome without spinning up real git, gh and an engine.
+type Reviewer interface {
+	Run(ctx context.Context, o review.Options) (*review.Result, error)
+}
 
 // bgReview is a review running while the pipeline waits for CI.
 type bgReview struct {
 	round   int
+	resume  string // run directory this round reuses; empty for a fresh fan-out
 	started time.Time
 	cancel  context.CancelFunc
 	done    chan bgResult
@@ -32,13 +41,18 @@ type bgResult struct {
 // CI wait instead of queueing behind it. It must never overlap a Codex fix
 // session: a fix moves the head sha out from under the findings, which is why
 // ensureCIGreen discards a running review before it starts one.
-func (r *run) startReview(round int) {
+func (r *run) startReview(round int) { r.startReviewWith(round, "") }
+
+// startReviewWith starts a review in the background, reusing resumeDir's
+// completed reviewer output when it is non-empty.
+func (r *run) startReviewWith(round int, resumeDir string) {
 	if r.review != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(r.ctx)
 	br := &bgReview{
 		round:   round,
+		resume:  resumeDir,
 		started: time.Now(),
 		cancel:  cancel,
 		done:    make(chan bgResult, 1),
@@ -46,6 +60,7 @@ func (r *run) startReview(round int) {
 	r.review = br
 
 	opts := r.reviewOptions()
+	opts.ResumeRun = resumeDir
 	go func() {
 		res, err := r.p.Review.Run(ctx, opts)
 		br.done <- bgResult{res, err}
@@ -60,6 +75,7 @@ func (r *run) reviewOptions() review.Options {
 		HeadSHA:          branchOnlyValue(r.target.BranchOnly, r.headSHA),
 		RepoRoot:         r.o.RepoRoot,
 		Runs:             r.o.Reviewers,
+		Engine:           r.o.ReviewEngine,
 		Model:            r.o.ReviewModel,
 		Effort:           r.o.ReviewEffort,
 		BaseBranch:       r.pr.BaseRefName,
@@ -70,6 +86,7 @@ func (r *run) reviewOptions() review.Options {
 		SharedRunsDirs:   []string{r.o.RunsDir},
 		DepsDir:          r.o.DepsDir,
 		CodexBin:         r.o.CodexBin,
+		ClaudeBin:        r.o.ClaudeBin,
 		DirenvBin:        r.o.DirenvBin,
 		ReviewTimeout:    review.DefaultReviewTimeout,
 	}
@@ -83,7 +100,13 @@ func branchOnlyValue(branchOnly bool, branch string) string {
 }
 
 // finishReview joins the running review and returns its findings plus the
-// comment text that goes into the next fix round.
+// comment text that goes into the next fix round. When a round fails after
+// its reviewers already produced output - an aggregator or verifier failure,
+// or a usage limit - it is retried exactly once, resuming that output instead
+// of paying for a fresh fan-out. A round that was handed a resume directory
+// and failed because that directory was unusable is retried once with a fresh
+// fan-out instead. Reviewer-phase failures and a drifted head are not
+// retried: a resume fixes neither.
 func (r *run) finishReview(round int) (review.Findings, string, error) {
 	if r.review == nil {
 		r.startReview(round)
@@ -95,7 +118,23 @@ func (r *run) finishReview(round int) (review.Findings, string, error) {
 	out := r.waitReview(br, label)
 	r.review = nil
 	if out.err != nil {
-		return review.Findings{}, "", fmt.Errorf("review round %d failed: %w", round, out.err)
+		if br.resume != "" && resumeFallbackEligible(out.err) {
+			// The handed-in directory was unusable, which says nothing about
+			// the pull request; one fresh fan-out replaces it, mirroring the
+			// agent's fallback for a stale cross-poll resume.
+			r.rep.Info(fmt.Sprintf("resume of %s failed (%v); retrying once with a fresh reviewer fan-out", br.resume, out.err))
+			r.startReviewWith(round, "")
+			out = r.waitReview(r.review, fmt.Sprintf("Review round %d (fresh)", round))
+			r.review = nil
+		} else if resumeDir, ok := resumableRunDir(out.err); ok {
+			r.rep.Info(fmt.Sprintf("review round %d failed (%v); retrying once with its completed reviewer output", round, out.err))
+			r.startReviewWith(round, resumeDir)
+			out = r.waitReview(r.review, fmt.Sprintf("Review round %d (resumed)", round))
+			r.review = nil
+		}
+		if out.err != nil {
+			return review.Findings{}, "", fmt.Errorf("review round %d failed: %w", round, out.err)
+		}
 	}
 
 	comment, err := os.ReadFile(out.res.CommentFile)
@@ -103,6 +142,28 @@ func (r *run) finishReview(round int) (review.Findings, string, error) {
 		return review.Findings{}, "", fmt.Errorf("reading the review comment: %w", err)
 	}
 	return out.res.Findings, string(comment), nil
+}
+
+// resumeFallbackEligible reports whether a resumed round failed for a
+// resume-specific reason - the directory turned out unusable or held too
+// little reviewer output - rather than the round itself being the problem.
+func resumeFallbackEligible(err error) bool {
+	return errors.Is(err, review.ErrResumeUnusable) || errors.Is(err, review.ErrTooFewReviewers)
+}
+
+// resumableRunDir reports whether err is a round failure whose completed
+// reviewer output is worth resuming, and where it lives.
+func resumableRunDir(err error) (string, bool) {
+	if !errors.Is(err, review.ErrAggregatorInvalid) &&
+		!errors.Is(err, review.ErrVerifierInvalid) &&
+		!errors.Is(err, usagelimit.Err) {
+		return "", false
+	}
+	var rd *review.RunDirError
+	if !errors.As(err, &rd) || rd.RunDir == "" {
+		return "", false
+	}
+	return rd.RunDir, true
 }
 
 // waitReview blocks on a background review while the status line ticks.

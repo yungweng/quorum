@@ -128,3 +128,21 @@ func TestCleanUntrackedPreservesTrackedAndIgnoredFiles(t *testing.T) {
 		}
 	}
 }
+
+// The diverged-checkout stop leans on this distinction: a local branch that is
+// merely behind origin may proceed, one with commits of its own may not.
+func TestIsAncestorDistinguishesBehindFromDiverged(t *testing.T) {
+	dir := conflictRepo(t)
+	g := G{Bin: "git"}
+	ctx := context.Background()
+
+	if ok, err := g.IsAncestor(ctx, dir, "main~1", "main"); err != nil || !ok {
+		t.Fatalf("IsAncestor(main~1, main) = (%v, %v), want true", ok, err)
+	}
+	if ok, err := g.IsAncestor(ctx, dir, "feature", "main"); err != nil || ok {
+		t.Fatalf("IsAncestor(feature, main) = (%v, %v), want false for a diverged branch", ok, err)
+	}
+	if _, err := g.IsAncestor(ctx, dir, "not-a-rev", "main"); err == nil {
+		t.Fatal("an unresolvable revision was not reported as an error")
+	}
+}

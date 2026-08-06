@@ -183,6 +183,25 @@ func (g G) MergeConflicts(ctx context.Context, dir, base, head string) (bool, er
 	return false, fmt.Errorf("git merge-tree --write-tree %s %s: %s", base, head, firstLine(msg))
 }
 
+// IsAncestor reports whether ancestor is reachable from descendant. It is how
+// "the local branch is merely behind origin" is told apart from "the local
+// branch carries commits of its own": a fix pipeline pushes to origin without
+// ever moving the local ref, so falling behind is routine and loses nothing,
+// while own commits would be silently overtaken.
+func (g G) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	cmd := exec.CommandContext(ctx, g.Bin, "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = dir
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %v", err)
+}
+
 // HasLocalBranch reports whether a local branch of that name exists.
 func (g G) HasLocalBranch(ctx context.Context, dir, branch string) bool {
 	_, err := g.run(ctx, dir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)

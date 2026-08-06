@@ -161,7 +161,7 @@ printf 'nothing to do\n' > "$out"`)
 		worktree:  t.TempDir(),
 		logDir:    filepath.Join(root, "logs"),
 		msgDir:    filepath.Join(root, "messages"),
-		codex:     codex.Options{Bin: codexBin},
+		fixer:     codex.Options{Bin: codexBin},
 	}
 	for _, d := range []string{r.logDir, r.msgDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -257,7 +257,7 @@ printf 'merged and resolved\n' > "$out"`)
 		worktree:  worktree,
 		logDir:    filepath.Join(root, "logs"),
 		msgDir:    filepath.Join(root, "messages"),
-		codex:     codex.Options{Bin: codexBin},
+		fixer:     codex.Options{Bin: codexBin},
 	}
 	for _, d := range []string{r.logDir, r.msgDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
