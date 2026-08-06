@@ -31,6 +31,42 @@ func Valid(name string) bool {
 	return name == "" || name == Codex || name == Claude
 }
 
+// Efforts returns the reasoning-effort values name accepts. The two sets are
+// not the same, and neither CLI fails on a level it does not know: both take
+// the default instead, so the only place an engine-specific typo can still be
+// caught is here, before anything is spawned.
+func Efforts(name string) []string {
+	if name == Claude {
+		return claudecli.Efforts
+	}
+	return codex.Efforts
+}
+
+// ValidEffort reports whether effort is one of Efforts(name). The empty string
+// is allowed for either engine and means "leave its own default alone".
+func ValidEffort(name, effort string) bool {
+	if name == Claude {
+		return claudecli.ValidEffort(effort)
+	}
+	return codex.ValidEffort(effort)
+}
+
+// KnownEffort returns effort when name accepts it and the empty string, the
+// engine's own default, when it does not. It is for stored values, not typed
+// ones: the levels became engine-specific only after quorum's own config
+// picker could already write a codex level next to REVIEW_ENGINE="claude", and
+// an engine flag can move a run to the other engine's set at any time.
+// Refusing such a pair would stop every run on a file the tool wrote itself,
+// including the unattended agent's, where nobody reads the error. An effort
+// typed on the command line does not go through here; it is validated and
+// fails the run.
+func KnownEffort(name, effort string) string {
+	if ValidEffort(name, effort) {
+		return effort
+	}
+	return ""
+}
+
 // SessionRef is the opaque handle Exec returns and Resume takes back. It is
 // an alias, not a defined type, so the adapters can keep returning plain
 // strings and still satisfy Fixer without importing this package.
@@ -49,7 +85,7 @@ type Reviewer interface {
 type ReviewerOptions struct {
 	Bin    string
 	Model  string
-	Effort string // Codex only; the Claude engine ignores it
+	Effort string // one of Efforts(name); empty leaves the engine's default
 }
 
 // NewReviewer builds the review-side engine for name.
@@ -74,7 +110,7 @@ type Fixer interface {
 type FixerOptions struct {
 	Bin    string
 	Model  string
-	Effort string // Codex only; the Claude engine ignores it
+	Effort string // one of Efforts(name); empty leaves the engine's default
 	Bypass bool
 }
 

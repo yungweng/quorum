@@ -20,7 +20,6 @@ import (
 	"unicode"
 
 	"github.com/yungweng/quorum/internal/cachefs"
-	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
@@ -426,12 +425,17 @@ func (r *run) prepare() error {
 		}
 	}
 
+	// The header reports the review model and effort resolved, not as
+	// configured: an empty review model becomes the engine's default here in
+	// quorum, so printing the raw value would announce "engine default" for a
+	// run that is about to use a model this code already picked.
+	_, reviewModel, reviewEffort := review.ReviewEngineDefaults(r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
 	r.rep.Header(Header{
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Draft: pr.IsDraft, Local: r.o.Local,
-		Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
-		ReviewModel: r.o.ReviewModel, ReviewEffort: r.o.ReviewEffort,
+		Engine: r.o.Engine, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
+		ReviewEngine: r.o.ReviewEngine, ReviewModel: reviewModel, ReviewEffort: reviewEffort,
 		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		DivergenceScan: r.o.DivergenceScan,
 		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
@@ -1039,11 +1043,11 @@ func (o Options) validate() error {
 	if !engine.Valid(o.ReviewEngine) {
 		return fmt.Errorf("review-engine must be %s or %s", engine.Codex, engine.Claude)
 	}
-	if o.Engine != engine.Claude && !codex.ValidEffort(o.Effort) {
-		return fmt.Errorf("effort must be one of: %s", strings.Join(codex.Efforts, ", "))
+	if !engine.ValidEffort(o.Engine, o.Effort) {
+		return fmt.Errorf("effort must be one of: %s", strings.Join(engine.Efforts(o.Engine), ", "))
 	}
-	if o.ReviewEngine != engine.Claude && !codex.ValidEffort(o.ReviewEffort) {
-		return fmt.Errorf("review-effort must be one of: %s", strings.Join(codex.Efforts, ", "))
+	if !engine.ValidEffort(o.ReviewEngine, o.ReviewEffort) {
+		return fmt.Errorf("review-effort must be one of: %s", strings.Join(engine.Efforts(o.ReviewEngine), ", "))
 	}
 	if o.DivergenceTimeout < 0 {
 		return fmt.Errorf("divergence timeout must not be negative")

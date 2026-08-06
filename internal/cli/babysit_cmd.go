@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
@@ -122,9 +123,13 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
-	o.Effort = args.str(o.Effort, "effort")
+	// A configured effort survives only if the engine this run resolved to
+	// accepts it: --engine and --review-engine can each point at the other
+	// engine's set of levels. One passed on the command line is not dropped:
+	// it fails.
+	o.Effort = args.str(engine.KnownEffort(o.Engine, o.Effort), "effort")
 	o.ReviewModel = args.str(o.ReviewModel, "review-model")
-	o.ReviewEffort = args.str(o.ReviewEffort, "review-effort")
+	o.ReviewEffort = args.str(engine.KnownEffort(o.ReviewEngine, o.ReviewEffort), "review-effort")
 	o.Interactive = args.boolean("interactive")
 	o.Verbose = args.boolean("verbose")
 	o.Out = os.Stdout
@@ -319,11 +324,12 @@ unattended. Pass --sandboxed to use the engine's own defaults instead.
 Options:
   --engine ENGINE        Engine for the fix sessions: codex or claude. Default: %s
   --model MODEL          Model for the fix sessions. Default: the engine's default
-  --effort LEVEL         minimal, low, medium, high, xhigh, max, ultra (codex only)
+  --effort LEVEL         codex: minimal, low, medium, high, xhigh, max, ultra;
+                         claude: low, medium, high, xhigh, max
   --reviewers N          Reviewer passes per review round. Default: %d
   --review-engine ENGINE Engine for the review rounds. Default: %s
   --review-model MODEL   Model for the review rounds. Default: %s
-  --review-effort LEVEL  Effort for the review rounds (codex only). Default: %s
+  --review-effort LEVEL  Effort for the review rounds. Default: %s
   --max-iter N           Max review->fix rounds. Default: %d
   --max-ci-fixes N       Max PR CI fix attempts per green-CI phase. Default: %d
   --fix-timeout DUR      Kill a fix step that runs longer. Default: %s
@@ -351,8 +357,8 @@ Exit codes:
   8  the engine refused: its usage limit is exhausted
 `, orText(a.cfg.FixEngine, "codex"), a.cfg.Reviewers,
 		orText(a.cfg.ReviewEngine, "codex"),
-		orText(a.cfg.ReviewModel, review.DefaultModel),
-		orText(a.cfg.ReviewEffort, review.DefaultEffort),
+		modelDefaultText(a.cfg.ReviewEngine, a.cfg.ReviewModel),
+		effortDefaultText(a.cfg.ReviewEngine, a.cfg.ReviewEffort),
 		a.cfg.MaxIter, a.cfg.MaxCIFixes, durationText(a.cfg.FixTimeout))
 }
 
@@ -377,8 +383,8 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	}
 	o.Row("repo", h.Repo)
 	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
-	o.Row("review model", modelDesc(h.ReviewModel, h.ReviewEffort))
-	o.Row("fix model", modelDesc(h.Model, h.Effort))
+	o.Row("review model", modelDesc(h.ReviewEngine, h.ReviewModel, h.ReviewEffort))
+	o.Row("fix model", modelDesc(h.Engine, h.Model, h.Effort))
 	// The sandbox line is the one thing here worth reading twice: bypassed
 	// means these sessions push and run tests unattended.
 	if h.Bypass {
@@ -599,15 +605,20 @@ func babysitTargetLabel(res *loop.Result) string {
 	return fmt.Sprintf("PR #%d", res.PR.Number)
 }
 
-func modelDesc(model, effort string) string {
+// modelDesc names the model and effort a phase will run on. Nothing fills in
+// the fix session's model or effort, so an empty one means the engine's CLI
+// decides and the row says whose choice it is rather than "engine default",
+// which reads as a setting quorum knows.
+func modelDesc(eng, model, effort string) string {
+	own := engineName(eng) + "'s own choice"
 	switch {
 	case model != "" && effort != "":
 		return fmt.Sprintf("%s (effort %s)", model, effort)
 	case model != "":
 		return model
 	case effort != "":
-		return "engine default (effort " + effort + ")"
+		return fmt.Sprintf("%s (effort %s)", own, effort)
 	default:
-		return "engine default"
+		return own
 	}
 }

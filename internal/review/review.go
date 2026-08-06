@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/cachefs"
-	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
@@ -70,7 +69,8 @@ func (e *RunDirError) Error() string { return e.Err.Error() }
 func (e *RunDirError) Unwrap() error { return e.Err }
 
 // Defaults for a run. The model and effort defaults belong to the Codex
-// engine; the Claude engine has its own model default and no effort.
+// engine; the Claude engine has its own model default and is left on Claude
+// Code's own effort unless one is configured.
 const (
 	DefaultRuns          = 6
 	DefaultModel         = "gpt-5.6-luna"
@@ -943,8 +943,8 @@ func (o Options) validate() error {
 	if !engine.Valid(o.Engine) {
 		return fmt.Errorf("engine must be %s or %s", engine.Codex, engine.Claude)
 	}
-	if o.Engine != engine.Claude && !codex.ValidEffort(o.Effort) {
-		return fmt.Errorf("effort must be one of: %s", strings.Join(codex.Efforts, ", "))
+	if !engine.ValidEffort(o.Engine, o.Effort) {
+		return fmt.Errorf("effort must be one of: %s", strings.Join(engine.Efforts(o.Engine), ", "))
 	}
 	if o.Repo == "" || o.RepoRoot == "" {
 		return fmt.Errorf("repo and repo root are required")

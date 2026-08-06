@@ -14,16 +14,35 @@ import (
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
-func TestFlagsCarryModelNotEffort(t *testing.T) {
+func TestFlagsCarryModelAndEffort(t *testing.T) {
 	got := strings.Join(Options{Model: "sonnet", Effort: "high"}.flags(), " ")
 	if !strings.Contains(got, "--model sonnet") {
 		t.Errorf("model flag missing: %s", got)
 	}
-	if strings.Contains(got, "high") || strings.Contains(got, "effort") {
-		t.Errorf("effort leaked into the claude flags: %s", got)
+	if !strings.Contains(got, "--effort high") {
+		t.Errorf("effort flag missing: %s", got)
 	}
 	if !strings.Contains(got, "--output-format json") {
 		t.Errorf("json output flag missing: %s", got)
+	}
+	if strings.Contains(strings.Join(Options{Model: "sonnet"}.flags(), " "), "--effort") {
+		t.Error("an unset effort still produced an --effort flag")
+	}
+}
+
+// Claude answers an effort level it does not know with a warning and its own
+// default, so an unvalidated Codex-only level would run the whole panel at the
+// wrong setting and never say so.
+func TestValidEffortRejectsTheCodexOnlyLevels(t *testing.T) {
+	for _, level := range []string{"minimal", "ultra", "insane", "MAX"} {
+		if ValidEffort(level) {
+			t.Errorf("%q was accepted as a claude effort", level)
+		}
+	}
+	for _, level := range []string{"", "low", "medium", "high", "xhigh", "max"} {
+		if !ValidEffort(level) {
+			t.Errorf("%q was rejected as a claude effort", level)
+		}
 	}
 }
 

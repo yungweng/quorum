@@ -138,16 +138,19 @@ func TestBabysitDivergenceFlagIsBoolean(t *testing.T) {
 func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 	var out bytes.Buffer
 	rep := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+	// The fix engine is named so its row asserts on a string that appears
+	// nowhere else in the header: "engine default" also occurs in the sandbox
+	// row, where it says nothing about a model.
 	rep.Header(loop.Header{
 		Repo: "acme/api", Branch: "feature", Base: "main",
-		ReviewModel: "gpt-5.6-terra", ReviewEffort: "medium",
-		Model: "", Effort: "", MaxIter: 12, FixTimeout: 2 * time.Hour,
+		ReviewEngine: "codex", ReviewModel: "gpt-5.6-terra", ReviewEffort: "medium",
+		Engine: "claude", Model: "", Effort: "", MaxIter: 12, FixTimeout: 2 * time.Hour,
 	})
 
 	got := out.String()
 	for _, want := range []string{
 		"review model", "gpt-5.6-terra (effort medium)",
-		"fix model", "engine default",
+		"fix model", "claude's own choice",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("header is missing %q:\n%s", want, got)
@@ -155,32 +158,83 @@ func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 	}
 }
 
-func TestFixSessionSettingShowsModelAndEffort(t *testing.T) {
+// The fix model has its own row. It used to hang off "fix sessions", where a
+// user looking for a model setting had no reason to open it.
+func TestFixModelIsItsOwnSettingRow(t *testing.T) {
 	a := testApp(t)
-	var fix setting
+	rows := map[string]setting{}
 	for _, s := range a.settings() {
-		if s.name == "fix sessions" {
-			fix = s
-			break
-		}
+		rows[s.name] = s
 	}
-	if fix.value == nil {
-		t.Fatal("fix sessions setting is missing")
+	fix, ok := rows["fix model"]
+	if !ok {
+		t.Fatal("fix model setting is missing")
 	}
-
 	cfg := a.cfg
 	cfg.FixModel = "gpt-5.6-sol"
 	cfg.FixEffort = "high"
-	got := fix.value(cfg)
-	if !strings.Contains(got, "gpt-5.6-sol (effort high)") {
-		t.Fatalf("fix sessions value = %q", got)
+	if got := fix.value(cfg); !strings.Contains(got, "gpt-5.6-sol") || !strings.Contains(got, "high") {
+		t.Fatalf("fix model value = %q", got)
+	}
+	if _, ok := rows["fix sessions"]; !ok {
+		t.Fatal("fix sessions setting is missing")
+	}
+}
+
+// An unset value must name who decides. Reviews get a model quorum picks;
+// fix sessions get whatever the engine's CLI defaults to, and one label for
+// both hid that difference.
+func TestUnsetModelRowsNameWhoDecides(t *testing.T) {
+	a := testApp(t)
+	rows := map[string]setting{}
+	for _, s := range a.settings() {
+		rows[s.name] = s
+	}
+	cfg := a.cfg
+	cfg.ReviewEngine, cfg.FixEngine = config.EngineClaude, config.EngineClaude
+	cfg.ReviewModel, cfg.ReviewEffort = "", ""
+	cfg.FixModel, cfg.FixEffort = "", ""
+
+	got := rows["review model"].value(cfg)
+	if !strings.Contains(got, review.ClaudeDefaultModel) || !strings.Contains(got, "quorum's default") {
+		t.Errorf("review model value = %q", got)
+	}
+	if got := rows["fix model"].value(cfg); !strings.Contains(got, "claude's own choice") {
+		t.Errorf("fix model value = %q", got)
+	}
+	cfg.ReviewEngine = config.EngineCodex
+	if got := rows["review model"].value(cfg); !strings.Contains(got, review.DefaultModel) ||
+		!strings.Contains(got, review.DefaultEffort) {
+		t.Errorf("codex review model value = %q", got)
 	}
 }
 
 func TestDefaultEffortOptionHasAVisibleLabel(t *testing.T) {
-	opts := defaultEffortOptions(func(c *config.Config) *string { return &c.FixEffort })
+	opts := defaultEffortOptions(config.EngineCodex, func(c *config.Config) *string { return &c.FixEffort })
 	if len(opts) == 0 || opts[0].label != "your codex default" {
 		t.Fatalf("effort options = %+v", opts)
+	}
+}
+
+// The picker may only offer what the selected engine accepts: a level it
+// silently ignores looks applied in the config and never reaches the run.
+func TestEffortOptionsFollowTheSelectedEngine(t *testing.T) {
+	labels := func(eng string) []string {
+		var out []string
+		for _, o := range defaultEffortOptions(eng, func(c *config.Config) *string { return &c.FixEffort }) {
+			out = append(out, o.label)
+		}
+		return out
+	}
+	claude := strings.Join(labels(config.EngineClaude), " ")
+	if strings.Contains(claude, "ultra") || strings.Contains(claude, "minimal") {
+		t.Fatalf("claude was offered a codex-only effort: %s", claude)
+	}
+	if !strings.Contains(claude, "your claude default") || !strings.Contains(claude, "xhigh") {
+		t.Fatalf("claude effort options = %s", claude)
+	}
+	if !strings.Contains(strings.Join(labels(config.EngineCodex), " "), "ultra") {
+		t.Fatal("codex lost its ultra effort")
 	}
 }
 

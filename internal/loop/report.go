@@ -17,8 +17,10 @@ type Header struct {
 	BranchOnly     bool
 	Draft          bool
 	Local          bool
+	Engine         string
 	Model          string
 	Effort         string
+	ReviewEngine   string
 	ReviewModel    string
 	ReviewEffort   string
 	Bypass         bool

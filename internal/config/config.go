@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yungweng/quorum/internal/engine"
 )
 
 // Config is the fully resolved configuration: file values on top of defaults.
@@ -229,6 +231,14 @@ func Load(path string) (Config, error) {
 	if err := sc.Err(); err != nil {
 		return cfg, err
 	}
+	// An effort the configured engine does not know is dropped here instead of
+	// failing the run later. The two level sets are engine-specific, but the
+	// file may predate that and pair a codex level with the claude engine, so
+	// the alternative is a tool that refuses to start on its own config - with
+	// no terminal to say so behind the launchd agent. What the run then uses is
+	// still visible: the run headers name the resolved model and effort.
+	cfg.ReviewEffort = engine.KnownEffort(cfg.ReviewEngine, cfg.ReviewEffort)
+	cfg.FixEffort = engine.KnownEffort(cfg.FixEngine, cfg.FixEffort)
 	if len(problems) > 0 {
 		return cfg, fmt.Errorf("%s: %s", path, strings.Join(problems, "; "))
 	}
@@ -481,19 +491,21 @@ func (c Config) Render() string {
 
 	w("# Reviews. POST=0 keeps review output on disk, disables every PR write,\n")
 	w("# and skips babysit's final description generation.\n")
-	w("# An empty model or effort means the engine's own default. Effort is\n")
-	w("# codex-only; the claude engine ignores it.\n")
+	w("# An empty model or effort means the engine's own default. The effort\n")
+	w("# levels differ per engine, and a level the engine does not know is\n")
+	w("# refused rather than silently dropped.\n")
 	w("REVIEW_ENGINE=%q\t# codex or claude\n", c.ReviewEngine)
 	w("REVIEW_MODEL=%q\n", c.ReviewModel)
-	w("REVIEW_EFFORT=%q\t# minimal, low, medium, high, xhigh, max, ultra\n", c.ReviewEffort)
+	w("REVIEW_EFFORT=%q\t# codex: minimal..ultra, claude: low..max\n", c.ReviewEffort)
 	w("REVIEW_TIMEOUT=%q\t# per reviewer pass, 0 disables\n", FormatDuration(c.ReviewTimeout))
 	w("POST=%s\n\n", bit(c.Post))
 
 	w("# Babysit: the fix sessions that work through review findings.\n")
-	w("# Empty model or effort leaves the selected engine's defaults alone.\n")
+	w("# Unlike the reviews, nothing here is filled in: an empty model or effort\n")
+	w("# leaves the choice to the selected engine's own CLI.\n")
 	w("FIX_ENGINE=%q\t# codex or claude\n", c.FixEngine)
 	w("FIX_MODEL=%q\n", c.FixModel)
-	w("FIX_EFFORT=%q\n", c.FixEffort)
+	w("FIX_EFFORT=%q\t# codex: minimal..ultra, claude: low..max\n", c.FixEffort)
 	w("MAX_ITER=%d\t\t# review -> fix rounds before giving up\n", c.MaxIter)
 	w("MAX_CI_FIXES=%d\t\t# CI fix attempts per green-CI phase\n", c.MaxCIFixes)
 	w("FIX_TIMEOUT=%q\t\t# per codex fix step; keep above your CI runtime\n", FormatDuration(c.FixTimeout))

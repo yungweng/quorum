@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
@@ -103,7 +104,10 @@ func (a *app) cmdReview(argv []string) int {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
-	o.Effort = args.str(o.Effort, "effort")
+	// The configured effort is kept only if the engine this run resolved to
+	// accepts it, because --engine can point at the other engine's set of
+	// levels. One passed on the command line is not dropped: it fails.
+	o.Effort = args.str(engine.KnownEffort(o.Engine, o.Effort), "effort")
 	o.BaseBranch = args.str("", "base")
 	o.ResumeRun = args.str("", "resume-run")
 	o.KeepWorktree = args.boolean("keep-worktree")
@@ -267,8 +271,9 @@ Options:
   --engine ENGINE          codex or claude. Default: %s
   --model MODEL            Model for reviewers, aggregator and verifier.
                            Default: the engine's own (%s for codex, %s for claude)
-  --effort LEVEL           minimal, low, medium, high, xhigh, max, ultra.
-                           Codex only. Default: %s
+  --effort LEVEL           codex: minimal, low, medium, high, xhigh, max, ultra
+                           claude: low, medium, high, xhigh, max
+                           Default: %s
   --base BRANCH            Base branch. Default: PR base or repository default
   --dry-run                Write the report to disk without posting it
   --keep-worktree          Keep the temporary worktree after a successful run
@@ -287,7 +292,7 @@ Exit codes:
   8  the engine refused: its usage limit is exhausted
 `, a.cfg.Reviewers, orText(a.cfg.ReviewEngine, "codex"),
 		review.DefaultModel, review.ClaudeDefaultModel,
-		orText(a.cfg.ReviewEffort, review.DefaultEffort),
+		effortDefaultText(a.cfg.ReviewEngine, a.cfg.ReviewEffort),
 		durationText(a.cfg.ReviewTimeout))
 }
 
@@ -297,6 +302,20 @@ func orText(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// modelDefaultText and effortDefaultText name what a review-style pass would
+// use when the flag is omitted. Both depend on the configured engine: only
+// Codex has an opinionated default for either, so quoting Codex's numbers at a
+// Claude run would describe a setting that never applies.
+func modelDefaultText(eng, configured string) string {
+	_, model, _ := review.ReviewEngineDefaults(eng, configured, "")
+	return model
+}
+
+func effortDefaultText(eng, configured string) string {
+	_, _, effort := review.ReviewEngineDefaults(eng, "", configured)
+	return orText(effort, "the engine's own")
 }
 
 // reviewerState is what the live panel knows about one reviewer pass.
@@ -355,9 +374,13 @@ func (t *termReporter) Header(h review.RunHeader) {
 	}
 	o.Row("base", fmt.Sprintf("%s %s", h.BaseRef, o.Dim(shortSHA(h.BaseSHA))))
 	o.Row("head", o.Dim(shortSHA(h.HeadSHA)))
+	// The header carries the resolved model and effort. Claude is left on its
+	// own effort unless one is configured, and an empty one here would print a
+	// blank where a level belongs.
 	o.Row("reviewers", fmt.Sprintf("%d %s", h.Runs,
 		o.Dim(fmt.Sprintf("· %s · effort %s · concurrency %d · timeout %s",
-			h.Model, h.Effort, h.Concurrency, durationText(h.Timeout)))))
+			h.Model, orText(h.Effort, engineName(h.Engine)+"'s own"),
+			h.Concurrency, durationText(h.Timeout)))))
 	// The path is long, always absolute and rarely typed out: the name is
 	// enough to recognise the run, and the link opens the rest.
 	o.Row("run dir", o.Link(o.Dim(filepath.Base(h.RunDir)), "file://"+h.RunDir))
