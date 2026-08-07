@@ -226,6 +226,46 @@ func TestSectionMatchingIgnoresCaseAndSpacing(t *testing.T) {
 	}
 }
 
+// Grok's multi-turn verifier glues tool narration onto the first heading line
+// ("…cascade.## Summary"). Without a cut at the heading, the section parser
+// never sees Summary and a paid-for panel is discarded.
+func TestNormalizeStripsPreambleAndMidLineGlueBeforeSummary(t *testing.T) {
+	body := "I'll independently verify the PR.Reading the core paths for series resolution, roster mirroring, and end cascade.## Summary\n" +
+		"@example-user, looks good.\n\n## Blockers\n\nNone.\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
+	path := write(t, body)
+	if err := ValidateComment(path); err == nil {
+		t.Fatal("glued preamble was accepted before normalize; the heading gate would hide the failure mode")
+	}
+	if err := normalizeAndValidateComment(path); err != nil {
+		t.Fatalf("normalized glued output was rejected: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.HasPrefix(got, "## Summary\n") {
+		t.Fatalf("normalized comment does not start at Summary:\n%s", got)
+	}
+	if strings.Contains(got, "I'll independently") || strings.Contains(got, "cascade.") {
+		t.Fatalf("preamble survived normalize:\n%s", got)
+	}
+}
+
+func TestNormalizeLeavesACleanCommentUnchanged(t *testing.T) {
+	clean := "## Summary\n\nFine.\n\n## Blockers\n\nNone.\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
+	if got := normalizeComment(clean); got != clean {
+		t.Fatalf("clean comment changed:\n got %q\nwant %q", got, clean)
+	}
+}
+
+func TestNormalizeLeavesTextWithoutSummaryAlone(t *testing.T) {
+	raw := "no headings here at all\n"
+	if got := normalizeComment(raw); got != raw {
+		t.Fatalf("text without Summary changed: %q", got)
+	}
+}
+
 // Bullets stop at the next level-2 heading, so a finding is never counted twice
 // or attributed to the wrong severity.
 func TestBulletsDoNotLeakAcrossSections(t *testing.T) {

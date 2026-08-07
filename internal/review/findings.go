@@ -55,7 +55,53 @@ var (
 	// producing the comment. Posting one of those to a PR under the user's own
 	// name is worse than failing the run.
 	metaSigns = regexp.MustCompile(`(?i)I tried to post|gh pr comment|api\.github\.com|exact comment I prepared`)
+	// summaryHeadingStart matches the report's opening heading even when a
+	// multi-turn engine glues tool narration onto the same line
+	// ("…cascade.## Summary"). Case follows the rest of the section matcher.
+	summaryHeadingStart = regexp.MustCompile(`(?i)##[ \t]+Summary\b`)
 )
+
+// NormalizeCommentFile rewrites path so the postable report starts at its
+// first ## Summary heading. Engines that emit tool chatter or a short plan
+// before the five sections still yield a machine-readable comment; a file with
+// no Summary heading is left alone so ValidateComment can reject it.
+func NormalizeCommentFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading the comment to normalize: %w", err)
+	}
+	normalized := normalizeComment(string(data))
+	if normalized == string(data) {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(normalized), 0o644); err != nil {
+		return fmt.Errorf("writing the normalized comment: %w", err)
+	}
+	return nil
+}
+
+// normalizeAndValidateComment strips preamble before the five-section report
+// and then applies the postable-shape gate.
+func normalizeAndValidateComment(path string) error {
+	if err := NormalizeCommentFile(path); err != nil {
+		return err
+	}
+	return ValidateComment(path)
+}
+
+// normalizeComment drops everything before the first ## Summary heading so
+// heading parsers that require a line-start match still see the five sections.
+func normalizeComment(text string) string {
+	loc := summaryHeadingStart.FindStringIndex(text)
+	if loc == nil {
+		return text
+	}
+	out := strings.TrimSpace(text[loc[0]:])
+	if out == "" {
+		return text
+	}
+	return out + "\n"
+}
 
 // ValidateComment checks that the aggregator produced something postable.
 //

@@ -41,6 +41,8 @@ func TestVerifierPromptIsNeutralAndAllowsEvidenceBasedEditing(t *testing.T) {
 		"Remove the entire finding",
 		"Add a new finding only",
 		"Do not favor keeping, changing, adding, or removing findings",
+		`The very first line of your answer must be exactly "## Summary"`,
+		"Do not write any preamble, plan, status update, or tool narration",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("verifier prompt is missing %q", want)
