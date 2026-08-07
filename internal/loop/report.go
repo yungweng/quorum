@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/review"
 )
 
@@ -40,12 +41,16 @@ type Header struct {
 // run for an hour with nothing to show: the terminal gets a spinner with the
 // step name and elapsed time, and the full Codex output goes to the run
 // directory's logs.
+//
+// Every step names the model it runs on. A run has two of them, and which one a
+// step uses is not derivable from its label: the divergence report and the final
+// PR description run on the review model, not the fix model.
 type Reporter interface {
 	Header(Header)
 	Step(title string)
-	StepStart(label string)
-	StepTick(label string, elapsed time.Duration)
-	StepEnd(label string, elapsed time.Duration, ok bool)
+	StepStart(label string, m engine.Model)
+	StepTick(label string, m engine.Model, elapsed time.Duration)
+	StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool)
 	RoundResult(round int, f review.Findings, clean bool)
 	CIGreen()
 	CIRed(attempt, max int)
@@ -64,21 +69,21 @@ type Reporter interface {
 // NopReporter discards everything.
 type NopReporter struct{}
 
-func (NopReporter) Header(Header)                          {}
-func (NopReporter) Step(string)                            {}
-func (NopReporter) StepStart(string)                       {}
-func (NopReporter) StepTick(string, time.Duration)         {}
-func (NopReporter) StepEnd(string, time.Duration, bool)    {}
-func (NopReporter) RoundResult(int, review.Findings, bool) {}
-func (NopReporter) CIGreen()                               {}
-func (NopReporter) CIRed(int, int)                         {}
-func (NopReporter) Info(string)                            {}
-func (NopReporter) Warn(string)                            {}
-func (NopReporter) Questions(string)                       {}
-func (NopReporter) Dispute(string)                         {}
-func (NopReporter) EnvrcChanged(string)                    {}
-func (NopReporter) Prompt(string)                          {}
-func (NopReporter) Notify(string, string)                  {}
+func (NopReporter) Header(Header)                                     {}
+func (NopReporter) Step(string)                                       {}
+func (NopReporter) StepStart(string, engine.Model)                    {}
+func (NopReporter) StepTick(string, engine.Model, time.Duration)      {}
+func (NopReporter) StepEnd(string, engine.Model, time.Duration, bool) {}
+func (NopReporter) RoundResult(int, review.Findings, bool)            {}
+func (NopReporter) CIGreen()                                          {}
+func (NopReporter) CIRed(int, int)                                    {}
+func (NopReporter) Info(string)                                       {}
+func (NopReporter) Warn(string)                                       {}
+func (NopReporter) Questions(string)                                  {}
+func (NopReporter) Dispute(string)                                    {}
+func (NopReporter) EnvrcChanged(string)                               {}
+func (NopReporter) Prompt(string)                                     {}
+func (NopReporter) Notify(string, string)                             {}
 
 func splitLines(s string) []string {
 	s = strings.TrimRight(s, "\n")

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
 )
@@ -96,22 +97,28 @@ func (l *loopLogReporter) printf(format string, args ...any) {
 func (l *loopLogReporter) Header(h loop.Header) {
 	l.printf("babysitting %s#%d %q", h.Repo, h.Number, h.Title)
 	l.printf("branch %s -> %s at %s", h.Branch, h.Base, short(h.HeadSHA))
+	l.printf("review model %s, fix model %s",
+		engine.Model{Engine: h.ReviewEngine, Name: h.ReviewModel, Effort: h.ReviewEffort}.Tag(),
+		engine.Model{Engine: h.Engine, Name: h.Model, Effort: h.Effort}.Tag())
 	l.printf("max %d review rounds, %d CI fixes, %s per fix step", h.MaxIter, h.MaxCIFixes, h.FixTimeout)
 	l.printf("run dir %s", h.RunDir)
 }
 
-func (l *loopLogReporter) Step(title string)      { l.printf("==> %s", title) }
-func (l *loopLogReporter) StepStart(label string) { l.printf("%s: running", label) }
+func (l *loopLogReporter) Step(title string) { l.printf("==> %s", title) }
+
+func (l *loopLogReporter) StepStart(label string, m engine.Model) {
+	l.printf("%s: running on %s", label, m.Tag())
+}
 
 // StepTick is dropped: it exists to animate a terminal spinner.
-func (l *loopLogReporter) StepTick(string, time.Duration) {}
+func (l *loopLogReporter) StepTick(string, engine.Model, time.Duration) {}
 
-func (l *loopLogReporter) StepEnd(label string, elapsed time.Duration, ok bool) {
+func (l *loopLogReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
 	status := "failed"
 	if ok {
 		status = "done"
 	}
-	l.printf("%s: %s in %s", label, status, elapsed.Round(time.Second))
+	l.printf("%s: %s on %s in %s", label, status, m.Tag(), elapsed.Round(time.Second))
 }
 
 func (l *loopLogReporter) RoundResult(round int, f review.Findings, clean bool) {

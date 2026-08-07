@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/target"
@@ -333,8 +335,16 @@ func TestDisputeCommentRejectsHeadDrift(t *testing.T) {
 type warningReporter struct {
 	NopReporter
 	warnings []string
+	// steps records "<label> on <tag>" per finished step, which is what a
+	// terminal line says and the only way to catch a step reporting the wrong
+	// one of the run's two models.
+	steps []string
 }
 
 func (r *warningReporter) Warn(text string) {
 	r.warnings = append(r.warnings, text)
+}
+
+func (r *warningReporter) StepEnd(label string, m engine.Model, _ time.Duration, _ bool) {
+	r.steps = append(r.steps, label+" on "+m.Tag())
 }

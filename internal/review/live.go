@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -21,6 +22,11 @@ type LiveRun struct {
 	Author    string    `json:"author,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	Reviewers int       `json:"reviewers"`
+
+	// Model is what every pass of this run works on, resolved. A watcher would
+	// otherwise have to read the current configuration, which can have changed
+	// since this run started.
+	Model engine.Model `json:"model,omitzero"`
 
 	RunDir string `json:"run_dir"`
 }
@@ -58,6 +64,7 @@ func (r *LiveTracker) Header(h RunHeader) {
 		Author:    h.Author,
 		StartedAt: r.started,
 		Reviewers: h.Runs,
+		Model:     engine.Model{Engine: h.Engine, Name: h.Model, Effort: h.Effort},
 		RunDir:    h.RunDir,
 	})
 	r.Reporter.Header(h)

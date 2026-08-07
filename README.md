@@ -263,9 +263,9 @@ ACTIVE  1 / 2
   ● toaster-api #2016           stop emailing every user at 3am about crumbs
       review · agent · 6m · 4/6 reviewers done
   ◆ payments #103               harden artifact health screening
-      review · manual · 2m · 0/6 reviewers done
+      review · manual · 2m · 0/6 reviewers done · gpt-5.6-luna/max
   ● toaster-api #2018           make the crumb tray endpoint idempotent
-      1h04m   round 3/12   CI ✗ fix 2/3   review ✓   CI fix 2 ● 4m   5 commits   log ↗
+      1h04m   round 3/12   CI ✗ fix 2/3   review ✓   CI fix 2 ● 4m   opus/high   5 commits   log ↗
   ○ toaster-api #2014           allow browning levels above 11
       queued · waiting for a free slot
 

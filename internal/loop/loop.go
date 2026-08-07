@@ -242,6 +242,12 @@ type run struct {
 	rules string
 	prCtx string
 
+	// The two models this run works with, resolved once in prepare. Every step
+	// reports one of them, and the review side is also what the divergence scan
+	// and the final PR description run on.
+	reviewModel engine.Model
+	fixModel    engine.Model
+
 	// The fix session, shared across every CI fix and review round, so context
 	// carries through the whole run.
 	sessionID string
@@ -389,6 +395,16 @@ func (r *run) prepare() error {
 	r.gcOldRuns()
 	unlockCache()
 
+	// The review side is reported resolved, not as configured: an empty review
+	// model becomes the engine's default here in quorum, so passing the raw
+	// value on would announce "engine default" for a run that is about to use a
+	// model this code already picked. The fix side stays as configured, because
+	// an empty one really is the CLI's own choice and quorum never learns it.
+	reviewEngine, reviewModel, reviewEffort := review.ReviewEngineDefaults(
+		r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
+	r.reviewModel = engine.Model{Engine: reviewEngine, Name: reviewModel, Effort: reviewEffort}
+	r.fixModel = engine.Model{Engine: r.o.Engine, Name: r.o.Model, Effort: r.o.Effort}
+
 	// Published before the worktree and its dependencies are prepared, which on
 	// a cold cache is minutes: a run has to appear on the dashboard when it
 	// starts, not when it gets around to reviewing something.
@@ -402,6 +418,8 @@ func (r *run) prepare() error {
 		StartedAt:  time.Now(),
 		MaxIter:    r.o.MaxIter,
 		MaxCIFixes: r.o.MaxCIFixes,
+		Review:     r.reviewModel,
+		Fix:        r.fixModel,
 	}
 	r.enter(PhaseStarting)
 
@@ -430,11 +448,6 @@ func (r *run) prepare() error {
 		}
 	}
 
-	// The header reports the review model and effort resolved, not as
-	// configured: an empty review model becomes the engine's default here in
-	// quorum, so printing the raw value would announce "engine default" for a
-	// run that is about to use a model this code already picked.
-	_, reviewModel, reviewEffort := review.ReviewEngineDefaults(r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
 	r.rep.Header(Header{
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
@@ -667,7 +680,7 @@ func (r *run) codexCall(tag, prompt string) error {
 		out = io.MultiWriter(logFile, r.o.Out)
 	}
 
-	r.rep.StepStart(stepLabel(tag))
+	r.rep.StepStart(stepLabel(tag), r.fixModel)
 	started := time.Now()
 
 	if r.sessionID == "" {
@@ -680,7 +693,7 @@ func (r *run) codexCall(tag, prompt string) error {
 	} else {
 		err = r.fixer.Resume(r.ctx, r.env, r.o.FixTimeout, r.sessionID, prompt, msgPath, out)
 	}
-	r.rep.StepEnd(stepLabel(tag), time.Since(started), err == nil)
+	r.rep.StepEnd(stepLabel(tag), r.fixModel, time.Since(started), err == nil)
 
 	if err != nil {
 		// The agent and the CLI both branch on this; wrapping it into the
