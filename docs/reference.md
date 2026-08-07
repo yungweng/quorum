@@ -21,9 +21,9 @@ match `origin`. Run the command from inside that repository's checkout.
 |---|---|---|
 | `-n`, `--runs N` | Reviewer passes | 6 |
 | `--concurrency N` | Reviewer passes at once | same as `--runs` |
-| `--engine ENGINE` | `codex` or `claude` | `codex` |
-| `--model MODEL` | Model for reviewers, aggregator and verifier | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude) |
-| `--effort LEVEL` | codex: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; claude: `low`, `medium`, `high`, `xhigh`, `max` | `max` (codex), the engine's own (claude) |
+| `--engine ENGINE` | `codex`, `claude` or `grok` | `codex` |
+| `--model MODEL` | Model for reviewers, aggregator and verifier | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude), `grok-4.5` (grok) |
+| `--effort LEVEL` | codex: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; claude: `low`, `medium`, `high`, `xhigh`, `max`; grok: `low`, `medium`, `high` | `max` (codex), the engine's own (claude, grok) |
 | `--base BRANCH` | Base branch to review against | PR base or repository default |
 | `--dry-run` | Write the report to disk without posting it | off |
 | `--keep-worktree` | Keep the worktree after a successful run | off |
@@ -69,13 +69,13 @@ generation.
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--engine ENGINE` | Engine for the fix sessions: `codex` or `claude` | `codex` |
+| `--engine ENGINE` | Engine for the fix sessions: `codex`, `claude` or `grok` | `codex` |
 | `--model MODEL` | Model for the fix sessions | the engine's own default |
-| `--effort LEVEL` | codex: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; claude: `low`, `medium`, `high`, `xhigh`, `max` | the engine's own default |
+| `--effort LEVEL` | codex: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; claude: `low`, `medium`, `high`, `xhigh`, `max`; grok: `low`, `medium`, `high` | the engine's own default |
 | `--reviewers N` | Reviewer passes per review round | 6 |
 | `--review-engine ENGINE` | Engine for the review rounds | `codex` |
-| `--review-model MODEL` | Model for the review rounds | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude) |
-| `--review-effort LEVEL` | Effort for the review rounds | `max` (codex), the engine's own (claude) |
+| `--review-model MODEL` | Model for the review rounds | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude), `grok-4.5` (grok) |
+| `--review-effort LEVEL` | Effort for the review rounds | `max` (codex), the engine's own (claude, grok) |
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
 | `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
 | `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
@@ -110,31 +110,34 @@ retention period.
 
 ## Engines
 
-Reviews and fix sessions each run on one of two engines, selected with
+Reviews and fix sessions each run on one of three engines, selected with
 `REVIEW_ENGINE`/`FIX_ENGINE` in the config or `--engine`/`--review-engine` on
-the command line: `codex` (OpenAI's Codex CLI, the default) or `claude`
-(Anthropic's Claude Code CLI). An empty model or effort means the selected
-engine's own default: `gpt-5.6-luna` at effort `max` for codex reviews,
-`sonnet` for claude, whose own effort is left alone unless you set one. Both
-engines take a reasoning effort, but not the same levels: codex accepts
-`minimal` through `ultra`, claude accepts `low` through `max`. Neither CLI
-fails on a level it does not know, it quietly falls back to its default, so
+the command line: `codex` (OpenAI's Codex CLI, the default), `claude`
+(Anthropic's Claude Code CLI) or `grok` (xAI's Grok CLI). An empty model or
+effort means the selected engine's own default: `gpt-5.6-luna` at effort
+`max` for codex reviews, `sonnet` for claude and `grok-4.5` for grok, whose
+own efforts are left alone unless you set one. The engines take a reasoning
+effort, but not the same levels: codex accepts `minimal` through `ultra`,
+claude accepts `low` through `max`, grok accepts `low` through `high`. Some
+CLIs fall back to a default on an unknown level instead of failing, so
 quorum refuses a level passed on the command line that the selected engine
 cannot use instead of starting the run. A level already in the config is
 dropped rather than refused: `REVIEW_EFFORT="ultra"` next to
 `REVIEW_ENGINE="claude"` runs at claude's own effort, which the run header
 names, instead of stopping every review including the agent's. The claude
-engine's review passes run with a fixed read-only tool set, no MCP servers,
-and no persisted sessions.
+and grok engines' review passes run with a fixed read-only tool set; claude
+also turns off MCP and session persistence, while grok uses a read-only
+sandbox profile and blocks subagents.
 
 ## It runs unattended
 
 The fix sessions bypass the engine's sandbox and approvals by default: codex
 runs with `--dangerously-bypass-approvals-and-sandbox`, claude with
-`--dangerously-skip-permissions`. They have to: they run tests, use `gh` and
-`git push`, all with nobody watching, and a sandboxed session would silently
-skip exactly those commands. Know what that means. An agent with full file and
-network access on your machine, for up to `--fix-timeout` per step.
+`--dangerously-skip-permissions`, grok with `--always-approve`. They have to:
+they run tests, use `gh` and `git push`, all with nobody watching, and a
+sandboxed session would silently skip exactly those commands. Know what that
+means. An agent with full file and network access on your machine, for up to
+`--fix-timeout` per step.
 
 `--sandboxed` opts out, but then the engine's own configuration must allow
 commands, network and push or every fix round fails. Reviewers, the aggregator
@@ -263,7 +266,7 @@ LOAD_LIMIT=0             # hold reviews back above this load, 0 disables
 CACHE_BUDGET_GB=5        # runs and dependency trees together, 0 disables
 
 MAX_RETRIES=3
-POLL_INTERVAL=300        # re-run `quorum install` after changing this
+POLL_INTERVAL=300        # next poll reloads the agent job when this changes
 HISTORY=20               # finished runs listed by status and watch
 
 # Safety. Fork and bot PRs run foreign code locally through direnv.
@@ -273,17 +276,17 @@ SKIP_BOTS=1
 SKIP_OWN=1               # review one of your own with `quorum run`
 
 # Reviews. Empty model/effort means the engine's default: gpt-5.6-luna at
-# effort max for codex, sonnet for claude.
-REVIEW_ENGINE="codex"    # or "claude"
+# effort max for codex, sonnet for claude, grok-4.5 for grok.
+REVIEW_ENGINE="codex"    # or "claude" or "grok"
 REVIEW_MODEL=""
-REVIEW_EFFORT=""         # codex: minimal..ultra, claude: low..max
+REVIEW_EFFORT=""         # codex: minimal..ultra, claude: low..max, grok: low..high
 REVIEW_TIMEOUT="45m"     # per reviewer pass, not per run. 0 disables
 POST=1                   # 0 disables PR comments and final description generation
 
 # Babysit
-FIX_ENGINE="codex"       # or "claude"
+FIX_ENGINE="codex"       # or "claude" or "grok"
 FIX_MODEL=""             # empty leaves the choice to the engine's own CLI
-FIX_EFFORT=""            # codex: minimal..ultra, claude: low..max
+FIX_EFFORT=""            # codex: minimal..ultra, claude: low..max, grok: low..high
 MAX_ITER=12
 MAX_CI_FIXES=3
 FIX_TIMEOUT="2h"         # per fix step; keep it above your CI runtime
@@ -530,12 +533,16 @@ reported as retries. They are never recorded as a decision not to review, so a
 hiccup cannot make a pull request silently disappear from the queue.
 
 **Works in the terminal, not from launchd.** Almost always `PATH`. launchd
-ignores your shell profile, so `quorum install` bakes the resolved `PATH` into
-the plist. Install a tool somewhere new and you need to run it again. The agent
-notices this by itself: when the installed job no longer matches what `quorum
-install` would write, every poll logs a warning and `quorum doctor` flags it.
-An upgraded binary alone needs no reinstall; launchd starts each poll fresh
-through the stable symlink, so the next poll already runs the new version.
+ignores your shell profile, so the job carries a fixed agent `PATH` (the usual
+install locations for `gh`, `git`, `codex`, `claude`, `grok` and `direnv`). A
+tool installed only outside that set is invisible to the agent until its
+directory is added or you put a symlink under one of those locations. When the
+installed job no longer matches what the current binary would write (binary
+path, poll interval, agent PATH or job template), the next poll rewrites and
+reloads it; `quorum doctor --fix` does the same. An upgraded binary at the
+same path needs no reinstall: launchd starts each poll fresh through that
+path. First-time setup and removal stay explicit: `quorum install` and
+`quorum uninstall`.
 
 **gh cannot authenticate from the agent.** `gh` stores its token in the
 keychain, which a user agent can only reach while your session is unlocked. Put

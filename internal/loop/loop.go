@@ -76,12 +76,12 @@ type Options struct {
 	Number   int
 	Context  string // extra text handed to the fix session
 
-	Engine string // fix-session engine: codex or claude; empty means codex
+	Engine string // fix-session engine: codex, claude or grok; empty means codex
 	Model  string
 	Effort string
 
 	Reviewers    int
-	ReviewEngine string // review-round engine: codex or claude; empty means codex
+	ReviewEngine string // review-round engine: codex, claude or grok; empty means codex
 	ReviewModel  string
 	ReviewEffort string
 
@@ -133,15 +133,20 @@ type Options struct {
 	DepsDir       string
 	CodexBin      string
 	ClaudeBin     string
+	GrokBin       string
 	DirenvBin     string
 }
 
 // engineBin picks the resolved binary for name.
 func (o Options) engineBin(name string) string {
-	if name == engine.Claude {
+	switch name {
+	case engine.Claude:
 		return o.ClaudeBin
+	case engine.Grok:
+		return o.GrokBin
+	default:
+		return o.CodexBin
 	}
-	return o.CodexBin
 }
 
 // RoundEntry is one round's commit list, for the closing summary.
@@ -1038,10 +1043,10 @@ func (o Options) validate() error {
 		}
 	}
 	if !engine.Valid(o.Engine) {
-		return fmt.Errorf("engine must be %s or %s", engine.Codex, engine.Claude)
+		return fmt.Errorf("engine must be %s, %s or %s", engine.Codex, engine.Claude, engine.Grok)
 	}
 	if !engine.Valid(o.ReviewEngine) {
-		return fmt.Errorf("review-engine must be %s or %s", engine.Codex, engine.Claude)
+		return fmt.Errorf("review-engine must be %s, %s or %s", engine.Codex, engine.Claude, engine.Grok)
 	}
 	if !engine.ValidEffort(o.Engine, o.Effort) {
 		return fmt.Errorf("effort must be one of: %s", strings.Join(engine.Efforts(o.Engine), ", "))

@@ -93,6 +93,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		DepsDir:              a.p.DepsCache,
 		CodexBin:             t.Codex,
 		ClaudeBin:            t.Claude,
+		GrokBin:              t.Grok,
 		DirenvBin:            t.Direnv,
 		Post:                 a.cfg.Post,
 		AllowDraft:           a.cfg.BabysitDrafts || args.boolean("draft"),
@@ -318,14 +319,15 @@ that off.
 
 The fix sessions run with the engine's sandbox and approvals bypassed by
 default (codex: --dangerously-bypass-approvals-and-sandbox, claude:
---dangerously-skip-permissions): they must run tests, use gh and push, all
-unattended. Pass --sandboxed to use the engine's own defaults instead.
+--dangerously-skip-permissions, grok: --always-approve): they must run tests,
+use gh and push, all unattended. Pass --sandboxed to use the engine's own
+defaults instead.
 
 Options:
-  --engine ENGINE        Engine for the fix sessions: codex or claude. Default: %s
+  --engine ENGINE        Engine for the fix sessions: codex, claude or grok. Default: %s
   --model MODEL          Model for the fix sessions. Default: the engine's default
   --effort LEVEL         codex: minimal, low, medium, high, xhigh, max, ultra;
-                         claude: low, medium, high, xhigh, max
+                         claude: low, medium, high, xhigh, max; grok: low, medium, high
   --reviewers N          Reviewer passes per review round. Default: %d
   --review-engine ENGINE Engine for the review rounds. Default: %s
   --review-model MODEL   Model for the review rounds. Default: %s

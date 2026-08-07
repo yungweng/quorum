@@ -236,6 +236,13 @@ func TestEffortOptionsFollowTheSelectedEngine(t *testing.T) {
 	if !strings.Contains(strings.Join(labels(config.EngineCodex), " "), "ultra") {
 		t.Fatal("codex lost its ultra effort")
 	}
+	grok := strings.Join(labels(config.EngineGrok), " ")
+	if strings.Contains(grok, "ultra") || strings.Contains(grok, "xhigh") || strings.Contains(grok, "max") {
+		t.Fatalf("grok was offered a non-grok effort: %s", grok)
+	}
+	if !strings.Contains(grok, "your grok default") || !strings.Contains(grok, "high") {
+		t.Fatalf("grok effort options = %s", grok)
+	}
 }
 
 func TestDivergenceReportReplacesReviewLinkInHistory(t *testing.T) {

@@ -36,6 +36,21 @@ func TestEngineKeysAcceptOnlyKnownEngines(t *testing.T) {
 	}
 }
 
+func TestEngineKeysAcceptGrok(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	body := "REVIEW_ENGINE=\"grok\"\nFIX_ENGINE=\"grok\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ReviewEngine != EngineGrok || cfg.FixEngine != EngineGrok {
+		t.Fatalf("REVIEW_ENGINE/FIX_ENGINE=grok not applied: %q/%q", cfg.ReviewEngine, cfg.FixEngine)
+	}
+}
+
 func TestEngineKeysSurviveARoundTrip(t *testing.T) {
 	want := Default()
 	want.ReviewEngine = EngineClaude
@@ -50,5 +65,18 @@ func TestEngineKeysSurviveARoundTrip(t *testing.T) {
 	}
 	if got.ReviewEngine != EngineClaude || got.FixEngine != EngineClaude {
 		t.Fatalf("round trip lost the engines: %q/%q", got.ReviewEngine, got.FixEngine)
+	}
+
+	want.ReviewEngine = EngineGrok
+	want.FixEngine = EngineGrok
+	if err := want.Save(path); err != nil {
+		t.Fatalf("Save grok: %v", err)
+	}
+	got, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load grok: %v", err)
+	}
+	if got.ReviewEngine != EngineGrok || got.FixEngine != EngineGrok {
+		t.Fatalf("round trip lost grok: %q/%q", got.ReviewEngine, got.FixEngine)
 	}
 }

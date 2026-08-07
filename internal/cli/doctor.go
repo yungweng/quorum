@@ -82,6 +82,15 @@ func (a *app) cmdDoctor(args []string) int {
 				}
 			}
 		}
+		// Only refresh an existing job. Missing plist is uninstall or never
+		// installed; that needs an explicit quorum install.
+		if _, err := os.Stat(a.p.Plist); err == nil && a.plistStale() {
+			if err := a.refreshAgent(); err != nil {
+				w.Printf("  agent      could not refresh: %v\n", err)
+			} else {
+				w.Printf("  agent      refreshed the launchd job\n")
+			}
+		}
 	}
 	fmt.Fprintln(w.Out)
 	return 0
@@ -101,6 +110,7 @@ func (a *app) runChecks() []check {
 
 		{"codex", "the reviewer panel runs it"},
 		{"claude", "the claude engine runs it"},
+		{"grok", "the grok engine runs it"},
 		{"direnv", "entering project environments"},
 	} {
 		path, err := exec.LookPath(spec.name)
@@ -117,6 +127,12 @@ func (a *app) runChecks() []check {
 				level, fix = 1, "install Claude Code, or leave REVIEW_ENGINE/FIX_ENGINE at codex"
 				if a.cfg.ReviewEngine == config.EngineClaude || a.cfg.FixEngine == config.EngineClaude {
 					level, fix = 2, "install Claude Code; your config selects the claude engine"
+				}
+			}
+			if spec.name == "grok" {
+				level, fix = 1, "install the Grok CLI, or leave REVIEW_ENGINE/FIX_ENGINE at codex"
+				if a.cfg.ReviewEngine == config.EngineGrok || a.cfg.FixEngine == config.EngineGrok {
+					level, fix = 2, "install the Grok CLI; your config selects the grok engine"
 				}
 			}
 			out = append(out, check{spec.name, "not found, needed for " + spec.why, level, fix})
@@ -163,8 +179,8 @@ func (a *app) runChecks() []check {
 			out = append(out, check{"agent", fmt.Sprintf("polled %s, %d open request(s)", ui.Ago(at), open), 0, ""})
 		}
 		if a.plistStale() {
-			out = append(out, check{"agent job", "not what quorum install would write now (binary, interval or PATH changed)", 1,
-				"quorum install"})
+			out = append(out, check{"agent job", "not what the current binary would write (binary path, interval or agent PATH changed)", 1,
+				"healed on the next poll, or quorum doctor --fix / quorum install"})
 		}
 	}
 

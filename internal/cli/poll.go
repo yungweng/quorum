@@ -60,12 +60,16 @@ func (a *app) cmdPoll(args []string) int {
 	}
 	defer unlock()
 
-	// An upgrade swaps the binary behind the symlink, so the next poll already
-	// runs the new version; the plist keeps its old interval, PATH and template
-	// until somebody reinstalls. findTools widened PATH above, so the
-	// comparison sees the same PATH install would bake in.
+	// Heal a stale launchd job in place. Binary upgrades at the same path
+	// already take effect without this; interval, agent PATH and template
+	// drift need a rewrite. Only when a plist exists: uninstall must stick.
+	// findTools widened the process PATH above; the job uses agentPATH().
 	if runtime.GOOS == "darwin" && a.plistStale() {
-		a.log.Printf("the installed launchd job is out of date, refresh it with: quorum install")
+		if err := a.refreshAgent(); err != nil {
+			a.log.Printf("could not refresh the launchd job: %v", err)
+		} else {
+			a.log.Printf("refreshed the launchd job (polling every %ds)", a.cfg.PollInterval)
+		}
 	}
 
 	// The sweeps inside a run only drop what is a week old, which a couple of
@@ -399,7 +403,7 @@ func (a *app) cmdReviewOne(args []string) int {
 	}
 	r := &runner.Runner{
 		Cfg: a.cfg, P: a.p, Log: a.log,
-		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, ClaudeBin: t.Claude, DirenvBin: t.Direnv,
+		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, ClaudeBin: t.Claude, GrokBin: t.Grok, DirenvBin: t.Direnv,
 		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
 	}
 	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt, runner.InvocationAgent); err != nil {

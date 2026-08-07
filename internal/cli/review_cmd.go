@@ -85,6 +85,7 @@ func (a *app) cmdReview(argv []string) int {
 		DepsDir:        a.p.DepsCache,
 		CodexBin:       t.Codex,
 		ClaudeBin:      t.Claude,
+		GrokBin:        t.Grok,
 		DirenvBin:      t.Direnv,
 	}
 	if o.Runs, err = args.intVal(o.Runs, "n", "runs"); err != nil {
@@ -268,11 +269,12 @@ posting.
 Options:
   -n, --runs N             Number of reviewer passes. Default: %d
   --concurrency N          Max reviewer passes at once. Default: same as --runs
-  --engine ENGINE          codex or claude. Default: %s
+  --engine ENGINE          codex, claude or grok. Default: %s
   --model MODEL            Model for reviewers, aggregator and verifier.
-                           Default: the engine's own (%s for codex, %s for claude)
+                           Default: the engine's own (%s / %s / %s)
   --effort LEVEL           codex: minimal, low, medium, high, xhigh, max, ultra
                            claude: low, medium, high, xhigh, max
+                           grok: low, medium, high
                            Default: %s
   --base BRANCH            Base branch. Default: PR base or repository default
   --dry-run                Write the report to disk without posting it
@@ -291,7 +293,7 @@ Exit codes:
   4  the aggregator or verifier could not produce a valid report
   8  the engine refused: its usage limit is exhausted
 `, a.cfg.Reviewers, orText(a.cfg.ReviewEngine, "codex"),
-		review.DefaultModel, review.ClaudeDefaultModel,
+		review.DefaultModel, review.ClaudeDefaultModel, review.GrokDefaultModel,
 		effortDefaultText(a.cfg.ReviewEngine, a.cfg.ReviewEffort),
 		durationText(a.cfg.ReviewTimeout))
 }

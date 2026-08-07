@@ -32,6 +32,16 @@ func TestReviewEngineDefaultsHelper(t *testing.T) {
 	if _, model, _ = ReviewEngineDefaults(engine.Claude, "opus", ""); model != "opus" {
 		t.Fatalf("an explicit model was rewritten to %q", model)
 	}
+	eng, model, effort = ReviewEngineDefaults(engine.Grok, "", "medium")
+	if eng != engine.Grok || model != GrokDefaultModel {
+		t.Fatalf("grok resolved to %s/%s", eng, model)
+	}
+	if effort != "medium" {
+		t.Fatalf("an explicit grok effort was rewritten to %q", effort)
+	}
+	if _, model, _ = ReviewEngineDefaults(engine.Grok, "custom-model", ""); model != "custom-model" {
+		t.Fatalf("an explicit grok model was rewritten to %q", model)
+	}
 }
 
 func TestWithDefaultsAppliesCodexModelOnlyForCodexEngine(t *testing.T) {
@@ -46,11 +56,18 @@ func TestWithDefaultsAppliesCodexModelOnlyForCodexEngine(t *testing.T) {
 	if strings.HasPrefix(c.Model, "gpt-") {
 		t.Fatal("a GPT model reached the claude engine")
 	}
+	g := Options{Engine: engine.Grok}.withDefaults()
+	if g.Model != GrokDefaultModel {
+		t.Fatalf("grok default model = %q", g.Model)
+	}
+	if strings.HasPrefix(g.Model, "gpt-") {
+		t.Fatal("a GPT model reached the grok engine")
+	}
 }
 
 // Each engine's effort is checked against its own levels. "ultra" exists for
-// codex and not for claude, and claude would take its default instead of
-// failing, so accepting it here would run the panel at an effort nobody chose.
+// codex and not for claude or grok; accepting it for those would run the panel
+// at an effort nobody chose.
 func TestValidateChecksEffortAgainstTheSelectedEngine(t *testing.T) {
 	ok := Options{Engine: engine.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "xhigh"}.withDefaults()
 	if err := ok.validate(); err != nil {
@@ -63,6 +80,14 @@ func TestValidateChecksEffortAgainstTheSelectedEngine(t *testing.T) {
 	codexOK := Options{Engine: engine.Codex, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
 	if err := codexOK.validate(); err != nil {
 		t.Fatalf("valid codex effort rejected: %v", err)
+	}
+	grokOK := Options{Engine: engine.Grok, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "high"}.withDefaults()
+	if err := grokOK.validate(); err != nil {
+		t.Fatalf("valid grok effort rejected: %v", err)
+	}
+	grokBad := Options{Engine: engine.Grok, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
+	if err := grokBad.validate(); err == nil {
+		t.Fatal("the codex-only effort ultra was accepted for the grok engine")
 	}
 	bad := Options{Engine: "gemini", Repo: "acme/api", RepoRoot: "/tmp/x"}
 	bad.Runs, bad.Concurrency = 1, 1

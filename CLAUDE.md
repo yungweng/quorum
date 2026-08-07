@@ -37,7 +37,10 @@ internal/cli/        the command line
 internal/review/     the reviewer panel: worktree, fan-out, aggregation, findings
 internal/loop/       the review-fix pipeline: CI, fix sessions, gates
 internal/deps/       shared dependency trees, keyed by lock file hash
+internal/engine/     seam between the pipeline and the CLIs (Reviewer/Fixer)
 internal/codex/      codex exec wrapper, flag construction, session recovery
+internal/claudecli/  Claude Code CLI adapter
+internal/grokcli/    Grok CLI adapter
 internal/proc/       run with a timeout, kill the whole process group
 internal/envexec/    run a command inside the worktree, through direnv
 internal/gh/         the GitHub CLI, with one retry policy
@@ -47,9 +50,9 @@ internal/runner/     what the agent does per pull request
 ```
 
 The dependency direction is one way: `cli` uses everything, `runner` uses `loop`
-and `review`, `loop` uses `review`, and `review` uses `codex`, `deps`,
-`envexec`, `gh`, `git`. Keep it that way; a cycle here usually means a piece of
-policy ended up in the wrong layer.
+and `review`, `loop` uses `review`, and `review` uses `engine` (which builds
+codex/claudecli/grokcli), `deps`, `envexec`, `gh`, `git`. Keep it that way; a
+cycle here usually means a piece of policy ended up in the wrong layer.
 
 `Version` lives in `main.go` rather than in `internal/cli` and is passed to
 `cli.Run`. Both the Homebrew formula (`-ldflags "-X main.Version=..."`) and the

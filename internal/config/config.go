@@ -50,14 +50,14 @@ type Config struct {
 	// Review settings. These used to be flags on a separate binary that the
 	// daemon passed through as an opaque REVIEW_ARGS string. An empty model
 	// or effort means the selected engine's own default.
-	ReviewEngine  string // codex or claude
+	ReviewEngine  string // codex, claude or grok
 	ReviewModel   string
 	ReviewEffort  string
 	ReviewTimeout time.Duration
 	Post          bool // false is the old REVIEW_ARGS="--dry-run"
 
 	// Babysit settings for the fix sessions.
-	FixEngine  string // codex or claude
+	FixEngine  string // codex, claude or grok
 	FixModel   string
 	FixEffort  string
 	MaxIter    int
@@ -120,7 +120,13 @@ const (
 const (
 	EngineCodex  = "codex"
 	EngineClaude = "claude"
+	EngineGrok   = "grok"
 )
+
+// knownEngine reports whether v is a recognised engine name.
+func knownEngine(v string) bool {
+	return v == EngineCodex || v == EngineClaude || v == EngineGrok
+}
 
 // Default mirrors the defaults the shell version shipped, with the resource
 // limits added. LoadLimit is off by default: the point of the agent is that a
@@ -335,7 +341,7 @@ func (c *Config) set(key, value string) {
 	case "CACHE_BUDGET_GB":
 		c.CacheBudgetGB = floatOr(value, c.CacheBudgetGB)
 	case "REVIEW_ENGINE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v == EngineCodex || v == EngineClaude {
+		if v := strings.TrimSpace(strings.ToLower(value)); knownEngine(v) {
 			c.ReviewEngine = v
 		}
 	case "REVIEW_MODEL":
@@ -347,7 +353,7 @@ func (c *Config) set(key, value string) {
 	case "POST":
 		c.Post = truthy(value)
 	case "FIX_ENGINE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v == EngineCodex || v == EngineClaude {
+		if v := strings.TrimSpace(strings.ToLower(value)); knownEngine(v) {
 			c.FixEngine = v
 		}
 	case "FIX_MODEL":
@@ -486,7 +492,7 @@ func (c Config) Render() string {
 	w("CACHE_BUDGET_GB=%s\t# runs and dependency trees together, 0 disables\n\n", num(c.CacheBudgetGB))
 
 	w("MAX_RETRIES=%d\n", c.MaxRetries)
-	w("POLL_INTERVAL=%d\t\t# re-run `quorum install` after changing this\n", c.PollInterval)
+	w("POLL_INTERVAL=%d\t\t# next poll reloads the agent job when this changes\n", c.PollInterval)
 	w("HISTORY=%d\t\t\t# finished runs listed by status and watch\n\n", c.History)
 
 	w("# Safety. Fork and bot PRs run foreign code locally through direnv.\n")
@@ -500,25 +506,25 @@ func (c Config) Render() string {
 	w("# An empty model or effort means the engine's own default. The effort\n")
 	w("# levels differ per engine, and a level the engine does not know is\n")
 	w("# refused rather than silently dropped.\n")
-	w("REVIEW_ENGINE=%q\t# codex or claude\n", c.ReviewEngine)
+	w("REVIEW_ENGINE=%q\t# codex, claude or grok\n", c.ReviewEngine)
 	w("REVIEW_MODEL=%q\n", c.ReviewModel)
-	w("REVIEW_EFFORT=%q\t# codex: minimal..ultra, claude: low..max\n", c.ReviewEffort)
+	w("REVIEW_EFFORT=%q\t# codex: minimal..ultra, claude: low..max, grok: low..high\n", c.ReviewEffort)
 	w("REVIEW_TIMEOUT=%q\t# per reviewer pass, 0 disables\n", FormatDuration(c.ReviewTimeout))
 	w("POST=%s\n\n", bit(c.Post))
 
 	w("# Babysit: the fix sessions that work through review findings.\n")
 	w("# Unlike the reviews, nothing here is filled in: an empty model or effort\n")
 	w("# leaves the choice to the selected engine's own CLI.\n")
-	w("FIX_ENGINE=%q\t# codex or claude\n", c.FixEngine)
+	w("FIX_ENGINE=%q\t# codex, claude or grok\n", c.FixEngine)
 	w("FIX_MODEL=%q\n", c.FixModel)
-	w("FIX_EFFORT=%q\t# codex: minimal..ultra, claude: low..max\n", c.FixEffort)
+	w("FIX_EFFORT=%q\t# codex: minimal..ultra, claude: low..max, grok: low..high\n", c.FixEffort)
 	w("MAX_ITER=%d\t\t# review -> fix rounds before giving up\n", c.MaxIter)
 	w("MAX_CI_FIXES=%d\t\t# CI fix attempts per green-CI phase\n", c.MaxCIFixes)
-	w("FIX_TIMEOUT=%q\t\t# per codex fix step; keep above your CI runtime\n", FormatDuration(c.FixTimeout))
+	w("FIX_TIMEOUT=%q\t\t# per fix step; keep above your CI runtime\n", FormatDuration(c.FixTimeout))
 	w("DIVERGENCE_SCAN=%s\t# analyze the round history after MAX_ITER\n", bit(c.DivergenceScan))
 	w("DIVERGENCE_ESCALATE_TO=%q\t# users or org/team slugs, without @\n",
 		strings.Join(c.DivergenceEscalateTo, " "))
-	w("SANDBOXED=%s\t\t# 1 uses your codex sandbox defaults instead of bypassing them\n", bit(c.Sandboxed))
+	w("SANDBOXED=%s\t\t# 1 uses the engine's own sandbox/approval defaults instead of bypassing them\n", bit(c.Sandboxed))
 	w("BABYSIT_DRAFTS=%s\t# 1 lets `quorum babysit` work on draft PRs without --draft\n", bit(c.BabysitDrafts))
 	w("RESOLVE_CONFLICTS=%s\t# merge the base branch and resolve conflicts before reviewing\n\n", bit(c.ResolveConflicts))
 

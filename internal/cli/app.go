@@ -172,9 +172,10 @@ type tools struct {
 	GH    string
 	Git   string
 	Codex string
-	// Claude is optional: it is only needed when an engine setting selects it,
-	// which engineBinary checks at that point.
+	// Claude and Grok are optional: each is only needed when an engine
+	// setting selects it, which engineBinary checks at that point.
 	Claude string
+	Grok   string
 	// Direnv is optional: repositories without an .envrc never need it.
 	Direnv string
 }
@@ -182,13 +183,20 @@ type tools struct {
 // engineBinary resolves the binary for a selected engine, or a clear error
 // naming the flag or config key to fix.
 func engineBinary(name string, t tools, hint string) (string, error) {
-	if name == config.EngineClaude {
+	switch name {
+	case config.EngineClaude:
 		if t.Claude == "" {
 			return "", fmt.Errorf("engine claude is selected (%s) but no claude binary was found on PATH; install Claude Code or switch back to codex", hint)
 		}
 		return t.Claude, nil
+	case config.EngineGrok:
+		if t.Grok == "" {
+			return "", fmt.Errorf("engine grok is selected (%s) but no grok binary was found on PATH; install the Grok CLI or switch back to codex", hint)
+		}
+		return t.Grok, nil
+	default:
+		return t.Codex, nil
 	}
-	return t.Codex, nil
 }
 
 func (a *app) findTools() (tools, error) {
@@ -211,6 +219,7 @@ func (a *app) findTools() (tools, error) {
 		*spec.dst = path
 	}
 	t.Claude, _ = exec.LookPath("claude")
+	t.Grok, _ = exec.LookPath("grok")
 	t.Direnv, _ = exec.LookPath("direnv")
 
 	if len(missing) > 0 {
@@ -220,26 +229,17 @@ func (a *app) findTools() (tools, error) {
 }
 
 func widenPath() {
-	home, _ := os.UserHomeDir()
-	extra := []string{
-		home + "/.local/bin",
-		home + "/bin",
-		"/opt/homebrew/bin",
-		"/usr/local/bin",
-		home + "/.npm-global/bin",
-		home + "/.bun/bin",
-		home + "/.cargo/bin",
-		"/usr/bin", "/bin", "/usr/sbin", "/sbin",
-	}
+	extra := agentPathDirs()
 	// npm puts globally installed tools into its own prefix, which is often
 	// somewhere non-standard. Asking npm costs a subprocess, so skip it only
 	// when the shell's existing PATH already resolves every supported tool.
 	// The optional tools stay in this list on purpose: npm's global prefix is
 	// the standard install location for claude and a common one for direnv,
 	// so a setup missing one pays the one subprocess rather than losing the
-	// tool.
+	// tool. The launchd job does not bake this prefix (see agentPathDirs);
+	// only the live process path is widened.
 	allResolved := true
-	for _, name := range []string{"gh", "git", "codex", "claude", "direnv"} {
+	for _, name := range []string{"gh", "git", "codex", "claude", "grok", "direnv"} {
 		if _, err := exec.LookPath(name); err != nil {
 			allResolved = false
 			break

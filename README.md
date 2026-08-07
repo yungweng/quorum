@@ -53,14 +53,14 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 `PATH`, every new terminal uses this build. Check with `which quorum` and
 `quorum --version`.
 
-Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) is
-optional and only needed when `REVIEW_ENGINE`/`FIX_ENGINE` or
-`--engine`/`--review-engine` select it. `terminal-notifier` sends
-notifications from detached macOS agent runs. Foreground commands normally
-notify through the terminal. When an own pull request needs another person's
-approval, quorum leaves a dedicated macOS Notification Center item that later
-completion notifications cannot replace. `direnv` is optional and only needed
-for projects that have an `.envrc`.
+Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) and
+`grok` (Grok CLI) are optional and only needed when `REVIEW_ENGINE`/
+`FIX_ENGINE` or `--engine`/`--review-engine` select them.
+`terminal-notifier` sends notifications from detached macOS agent runs.
+Foreground commands normally notify through the terminal. When an own pull
+request needs another person's approval, quorum leaves a dedicated macOS
+Notification Center item that later completion notifications cannot replace.
+`direnv` is optional and only needed for projects that have an `.envrc`.
 
 `make install-hooks` is needed once per clone and after a tracked hook changes.
 It copies the reviewed hooks into the clone's untracked Git directory and sets
@@ -83,6 +83,7 @@ quorum review 1811
 quorum review https://github.com/owner/repo/pull/1811
 quorum review 1811 -n 8 --effort low
 quorum review 1811 --engine claude # review with Claude Code instead of Codex
+quorum review 1811 --engine grok   # review with the Grok CLI
 quorum review 1811 --dry-run       # write the report, do not post it
 ```
 
@@ -209,7 +210,7 @@ terminal. The wait for protected checks and mergeability defaults to two hours;
 set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these
 settings with `quorum config` or in the config file.
 
-**The fix sessions run with the Codex sandbox bypassed**, which gives them full
+**The fix sessions run with the engine sandbox and approvals bypassed**, which gives them full
 file and network access on your machine. `--sandboxed` opts out. Read
 [what that means](docs/reference.md#it-runs-unattended) before the first run.
 
@@ -241,7 +242,10 @@ refuses dirty or diverged checkouts and fork PRs;
 ## The agent
 
 `quorum install` writes a launchd agent that polls for pull requests asking for
-your review and handles them on its own.
+your review and handles them on its own. After that, binary upgrades at the
+same path and config changes such as `POLL_INTERVAL` refresh the job on the
+next poll; you do not need to run `quorum install` again unless you removed
+the agent.
 
 ```text
 quorum 1.1.0                                        agent loaded, every 5m, last poll 2m ago

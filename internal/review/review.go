@@ -69,13 +69,14 @@ func (e *RunDirError) Error() string { return e.Err.Error() }
 func (e *RunDirError) Unwrap() error { return e.Err }
 
 // Defaults for a run. The model and effort defaults belong to the Codex
-// engine; the Claude engine has its own model default and is left on Claude
-// Code's own effort unless one is configured.
+// engine; Claude and Grok each have their own model default and are left on
+// the CLI's own effort unless one is configured.
 const (
 	DefaultRuns          = 6
 	DefaultModel         = "gpt-5.6-luna"
 	DefaultEffort        = "max"
 	ClaudeDefaultModel   = "sonnet"
+	GrokDefaultModel     = "grok-4.5"
 	DefaultReviewTimeout = 45 * time.Minute
 	// prewarmTimeout bounds the single environment entry that installs
 	// dependencies before the reviewers start.
@@ -98,7 +99,7 @@ type Options struct {
 
 	Runs          int
 	Concurrency   int    // 0 means all at once
-	Engine        string // codex or claude; empty means codex
+	Engine        string // codex, claude or grok; empty means codex
 	Model         string
 	Effort        string
 	BaseBranch    string // empty uses the PR's own base
@@ -117,22 +118,27 @@ type Options struct {
 	DepsDir        string   // shared dependency cache root
 	CodexBin       string
 	ClaudeBin      string
+	GrokBin        string
 	DirenvBin      string
 }
 
 // engineBin picks the resolved binary for the selected engine.
 func (o Options) engineBin() string {
-	if o.Engine == engine.Claude {
+	switch o.Engine {
+	case engine.Claude:
 		return o.ClaudeBin
+	case engine.Grok:
+		return o.GrokBin
+	default:
+		return o.CodexBin
 	}
-	return o.CodexBin
 }
 
 // ReviewEngineDefaults resolves engine, model and effort for any review-style
 // pass (reviewer, aggregator, verifier, description, divergence analysis):
 // an empty engine means Codex, and an engine's opinionated defaults apply
-// only when that engine is the resolved one, so a Claude run is never handed
-// a GPT model name.
+// only when that engine is the resolved one, so a Claude or Grok run is never
+// handed a GPT model name.
 func ReviewEngineDefaults(eng, model, effort string) (string, string, string) {
 	if eng == "" {
 		eng = engine.Codex
@@ -148,6 +154,10 @@ func ReviewEngineDefaults(eng, model, effort string) (string, string, string) {
 	case engine.Claude:
 		if model == "" {
 			model = ClaudeDefaultModel
+		}
+	case engine.Grok:
+		if model == "" {
+			model = GrokDefaultModel
 		}
 	}
 	return eng, model, effort
@@ -941,7 +951,7 @@ func (o Options) validate() error {
 		return fmt.Errorf("min-successful must be >= 1")
 	}
 	if !engine.Valid(o.Engine) {
-		return fmt.Errorf("engine must be %s or %s", engine.Codex, engine.Claude)
+		return fmt.Errorf("engine must be %s, %s or %s", engine.Codex, engine.Claude, engine.Grok)
 	}
 	if !engine.ValidEffort(o.Engine, o.Effort) {
 		return fmt.Errorf("effort must be one of: %s", strings.Join(engine.Efforts(o.Engine), ", "))

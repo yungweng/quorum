@@ -526,8 +526,8 @@ func (a *app) settingsMenu() int {
 			a.cfg = cfg
 			fmt.Fprintln(w.Out)
 			w.Printf("%s %s\n", w.Green("saved"), a.p.Config)
-			// The poll interval lives in the launchd job, not in the config, so
-			// it only takes effect once the agent is written again.
+			// The poll interval lives in the launchd job. Refresh now so the
+			// user does not wait for the next poll's self-heal.
 			if restart && a.agentLoaded() {
 				return a.cmdInstall(nil)
 			}
@@ -700,19 +700,27 @@ func clearable(v string) string {
 
 // engineDesc names an engine for a settings row.
 func engineDesc(name string) string {
-	if name == config.EngineClaude {
+	switch name {
+	case config.EngineClaude:
 		return "claude (Claude Code)"
+	case config.EngineGrok:
+		return "grok (Grok CLI)"
+	default:
+		return "codex"
 	}
-	return "codex"
 }
 
 // engineName is the bare engine name, with the empty default resolved, for
 // prompts that talk about one engine's own settings.
 func engineName(name string) string {
-	if name == config.EngineClaude {
+	switch name {
+	case config.EngineClaude:
 		return config.EngineClaude
+	case config.EngineGrok:
+		return config.EngineGrok
+	default:
+		return config.EngineCodex
 	}
-	return config.EngineCodex
 }
 
 // reviewModelDesc and fixModelDesc render what a run will really use. A plain
@@ -742,14 +750,18 @@ func fixModelDesc(c config.Config) string {
 		orText(c.FixModel, eng+"'s own choice"), orText(c.FixEffort, eng+"'s own"))
 }
 
-// modelHint gives the model prompt the examples that engine accepts. The two
+// modelHint gives the model prompt the examples that engine accepts. The
 // name spaces have nothing in common, and a model typed for the wrong engine
 // is only found out when the run fails.
 func modelHint(eng string) string {
-	if eng == config.EngineClaude {
+	switch eng {
+	case config.EngineClaude:
 		return "an alias such as opus, sonnet or fable, or a full name such as claude-opus-5"
+	case config.EngineGrok:
+		return "a Grok model name such as " + review.GrokDefaultModel
+	default:
+		return "a Codex model name such as " + review.DefaultModel
 	}
-	return "a Codex model name such as " + review.DefaultModel
 }
 
 // engineOptions builds the engine picker for one engine field and the model
@@ -776,6 +788,7 @@ func engineOptions(engineField, modelField, effortField func(*config.Config) *st
 	return []option{
 		{"codex", "OpenAI's Codex CLI", set(config.EngineCodex), is(config.EngineCodex)},
 		{"claude", "Anthropic's Claude Code CLI", set(config.EngineClaude), is(config.EngineClaude)},
+		{"grok", "xAI's Grok CLI", set(config.EngineGrok), is(config.EngineGrok)},
 	}
 }
 

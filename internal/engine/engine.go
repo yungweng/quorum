@@ -1,7 +1,7 @@
-// Package engine is the seam between the pipeline and the two CLIs that can
+// Package engine is the seam between the pipeline and the CLIs that can
 // drive it. internal/review and internal/loop talk to these interfaces;
-// internal/codex and internal/claudecli satisfy them structurally, without
-// importing this package.
+// internal/codex, internal/claudecli and internal/grokcli satisfy them
+// structurally, without importing this package.
 //
 // The split into Reviewer and Fixer is deliberate: ReviewerOptions has no
 // Bypass field, so a review-side engine with the sandbox bypass is not a
@@ -17,6 +17,7 @@ import (
 	"github.com/yungweng/quorum/internal/claudecli"
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/envexec"
+	"github.com/yungweng/quorum/internal/grokcli"
 )
 
 // The recognised engine names. Empty means Codex, which keeps every config
@@ -24,31 +25,40 @@ import (
 const (
 	Codex  = "codex"
 	Claude = "claude"
+	Grok   = "grok"
 )
 
 // Valid reports whether name is a recognised engine or empty.
 func Valid(name string) bool {
-	return name == "" || name == Codex || name == Claude
+	return name == "" || name == Codex || name == Claude || name == Grok
 }
 
-// Efforts returns the reasoning-effort values name accepts. The two sets are
-// not the same, and neither CLI fails on a level it does not know: both take
-// the default instead, so the only place an engine-specific typo can still be
-// caught is here, before anything is spawned.
+// Efforts returns the reasoning-effort values name accepts. The sets are not
+// the same, and some CLIs fall back to a default on an unknown level instead
+// of failing, so the only place an engine-specific typo can still be caught
+// is here, before anything is spawned.
 func Efforts(name string) []string {
-	if name == Claude {
+	switch name {
+	case Claude:
 		return claudecli.Efforts
+	case Grok:
+		return grokcli.Efforts
+	default:
+		return codex.Efforts
 	}
-	return codex.Efforts
 }
 
 // ValidEffort reports whether effort is one of Efforts(name). The empty string
-// is allowed for either engine and means "leave its own default alone".
+// is allowed for any engine and means "leave its own default alone".
 func ValidEffort(name, effort string) bool {
-	if name == Claude {
+	switch name {
+	case Claude:
 		return claudecli.ValidEffort(effort)
+	case Grok:
+		return grokcli.ValidEffort(effort)
+	default:
+		return codex.ValidEffort(effort)
 	}
-	return codex.ValidEffort(effort)
 }
 
 // KnownEffort returns effort when name accepts it and the empty string, the
@@ -95,8 +105,10 @@ func NewReviewer(name string, o ReviewerOptions) (Reviewer, error) {
 		return codex.Options{Bin: o.Bin, Model: o.Model, Effort: o.Effort, DisableSerena: true}, nil
 	case Claude:
 		return claudecli.Options{Bin: o.Bin, Model: o.Model, Effort: o.Effort}, nil
+	case Grok:
+		return grokcli.Options{Bin: o.Bin, Model: o.Model, Effort: o.Effort}, nil
 	}
-	return nil, fmt.Errorf("unknown engine %q (valid: %s, %s)", name, Codex, Claude)
+	return nil, fmt.Errorf("unknown engine %q (valid: %s, %s, %s)", name, Codex, Claude, Grok)
 }
 
 // Fixer runs the resumable fix session.
@@ -121,6 +133,8 @@ func NewFixer(name string, o FixerOptions) (Fixer, error) {
 		return codex.Options{Bin: o.Bin, Model: o.Model, Effort: o.Effort, Bypass: o.Bypass}, nil
 	case Claude:
 		return claudecli.Options{Bin: o.Bin, Model: o.Model, Effort: o.Effort, Bypass: o.Bypass}, nil
+	case Grok:
+		return grokcli.Options{Bin: o.Bin, Model: o.Model, Effort: o.Effort, Bypass: o.Bypass}, nil
 	}
-	return nil, fmt.Errorf("unknown engine %q (valid: %s, %s)", name, Codex, Claude)
+	return nil, fmt.Errorf("unknown engine %q (valid: %s, %s, %s)", name, Codex, Claude, Grok)
 }

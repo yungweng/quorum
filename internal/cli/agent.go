@@ -64,15 +64,6 @@ func (a *app) cmdInstall(args []string) int {
 	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
 		return a.die("%v", err)
 	}
-	// findTools widened PATH above. Bake it into the job so the agent can find
-	// gh, git, codex and optional direnv outside a login shell.
-	plist, err := a.renderPlist()
-	if err != nil {
-		return a.die("%v", err)
-	}
-	if err := os.WriteFile(a.p.Plist, plist, 0o644); err != nil {
-		return a.die("%v", err)
-	}
 
 	// An installed prbot agent polls the same repositories with the same
 	// GitHub account. Leaving it loaded would mean two agents racing for the
@@ -84,9 +75,8 @@ func (a *app) cmdInstall(args []string) int {
 		}
 	}
 
-	exec.Command("launchctl", "unload", a.p.Plist).Run()
-	if out, err := exec.Command("launchctl", "load", a.p.Plist).CombinedOutput(); err != nil {
-		return a.die("launchctl load failed: %s", strings.TrimSpace(string(out)))
+	if err := a.refreshAgent(); err != nil {
+		return a.die("%v", err)
 	}
 	a.log.Printf("agent installed, polling every %ds", a.cfg.PollInterval)
 
@@ -109,30 +99,97 @@ func (a *app) cmdUninstall(args []string) int {
 	return 0
 }
 
-// renderPlist is the launchd job as `quorum install` would write it right now.
+// refreshAgent writes the current launchd job and (re)loads it. It is the
+// shared path for install, a poll that heals a stale job, doctor --fix, and
+// a config save that changed the poll interval. It does not create a job that
+// was never installed: callers that care check the plist exists first.
+func (a *app) refreshAgent() error {
+	if err := a.writeAgentPlist(); err != nil {
+		return err
+	}
+	exec.Command("launchctl", "unload", a.p.Plist).Run()
+	if out, err := exec.Command("launchctl", "load", a.p.Plist).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl load failed: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// writeAgentPlist renders and stores the job file without talking to launchd.
+func (a *app) writeAgentPlist() error {
+	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
+		return err
+	}
+	plist, err := a.renderPlist()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.p.Plist, plist, 0o644)
+}
+
+// renderPlist is the launchd job as install or a self-heal would write it.
 //
 // The binary path is deliberately not resolved through symlinks. Homebrew
 // installs the binary into a versioned Cellar directory and links it into bin,
 // so resolving would pin the agent to a path that the next upgrade deletes,
 // leaving a job that launchd still loads and that can no longer run.
+//
+// PATH is a fixed agent path, not the interactive shell PATH: shell order and
+// one-off dirs change every session, and baking them made every doctor run
+// report a stale job after a brew or make that left the real job fine.
 func (a *app) renderPlist() ([]byte, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
+	home := agentHome()
 	return fmt.Appendf(nil, plistTemplate,
 		paths.PlistLabel, self, a.cfg.PollInterval,
 		filepath.Join(a.p.StateDir, "launchd.out.log"),
 		filepath.Join(a.p.StateDir, "launchd.err.log"),
-		xmlEscape(os.Getenv("PATH")), os.Getenv("HOME")), nil
+		xmlEscape(agentPATH()), xmlEscape(home)), nil
+}
+
+// agentHome is HOME for the launchd job. Prefer the resolved home so a shell
+// with a temporary HOME does not rewrite the job to a different user.
+func agentHome() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	return os.Getenv("HOME")
+}
+
+// agentPathDirs is the fixed list of directories the agent needs to find gh,
+// git, codex, claude, grok and direnv outside a login shell. It is also what
+// widenPath merges into the process PATH. Order is stable and free of
+// interactive shell entries so two renders produce the same plist. npm's
+// global prefix is not listed here: resolving it needs a subprocess and can
+// differ between a terminal and launchd; widenPath still adds it to the
+// process PATH when a tool is missing.
+func agentPathDirs() []string {
+	home, _ := os.UserHomeDir()
+	return []string{
+		home + "/.local/bin",
+		home + "/bin",
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		home + "/.npm-global/bin",
+		home + "/.bun/bin",
+		home + "/.cargo/bin",
+		"/usr/bin", "/bin", "/usr/sbin", "/sbin",
+	}
+}
+
+// agentPATH is the PATH baked into the launchd job.
+func agentPATH() string {
+	return strings.Join(agentPathDirs(), ":")
 }
 
 // plistStale reports whether the installed job differs from what install
-// would write now: another binary path, another poll interval, another PATH,
-// or a template this version changed. The binary itself needs no reinstall to
-// take effect, because launchd starts each poll fresh through the symlink; the
-// plist is the only part an upgrade leaves behind. A missing plist is not
-// stale, that is the not-installed case.
+// would write now: another binary path, another poll interval, another agent
+// PATH, or a template this version changed. The binary itself needs no
+// reinstall to take effect when ProgramArguments already points at a stable
+// path, because launchd starts each poll fresh through that path. A missing
+// plist is not stale, that is the not-installed case.
 func (a *app) plistStale() bool {
 	installed, err := os.ReadFile(a.p.Plist)
 	if err != nil {

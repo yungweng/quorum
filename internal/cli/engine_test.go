@@ -8,7 +8,7 @@ import (
 )
 
 func TestEngineBinaryResolvesClaudeOrErrors(t *testing.T) {
-	tls := tools{Codex: "/bin/codex", Claude: "/bin/claude"}
+	tls := tools{Codex: "/bin/codex", Claude: "/bin/claude", Grok: "/bin/grok"}
 	got, err := engineBinary(config.EngineClaude, tls, "--engine")
 	if err != nil || got != "/bin/claude" {
 		t.Fatalf("claude = (%q, %v)", got, err)
@@ -20,6 +20,18 @@ func TestEngineBinaryResolvesClaudeOrErrors(t *testing.T) {
 	_, err = engineBinary(config.EngineClaude, tools{Codex: "/bin/codex"}, "--engine/REVIEW_ENGINE")
 	if err == nil || !strings.Contains(err.Error(), "--engine/REVIEW_ENGINE") {
 		t.Fatalf("missing claude binary: err = %v, want a hint naming the flag", err)
+	}
+}
+
+func TestEngineBinaryResolvesGrokOrErrors(t *testing.T) {
+	tls := tools{Codex: "/bin/codex", Grok: "/bin/grok"}
+	got, err := engineBinary(config.EngineGrok, tls, "--engine")
+	if err != nil || got != "/bin/grok" {
+		t.Fatalf("grok = (%q, %v)", got, err)
+	}
+	_, err = engineBinary(config.EngineGrok, tools{Codex: "/bin/codex"}, "--engine/FIX_ENGINE")
+	if err == nil || !strings.Contains(err.Error(), "--engine/FIX_ENGINE") {
+		t.Fatalf("missing grok binary: err = %v, want a hint naming the flag", err)
 	}
 }
 

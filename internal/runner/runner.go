@@ -47,6 +47,7 @@ type Runner struct {
 
 	CodexBin  string
 	ClaudeBin string
+	GrokBin   string
 	DirenvBin string
 }
 
@@ -450,6 +451,7 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		DepsDir:          r.P.DepsCache,
 		CodexBin:         r.CodexBin,
 		ClaudeBin:        r.ClaudeBin,
+		GrokBin:          r.GrokBin,
 		DirenvBin:        r.DirenvBin,
 	})
 	if res == nil {
@@ -485,6 +487,7 @@ func (r *Runner) reviewOptions(repo string, number int, clone string) review.Opt
 		DepsDir:          r.P.DepsCache,
 		CodexBin:         r.CodexBin,
 		ClaudeBin:        r.ClaudeBin,
+		GrokBin:          r.GrokBin,
 		DirenvBin:        r.DirenvBin,
 	}
 }

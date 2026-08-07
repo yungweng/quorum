@@ -87,6 +87,7 @@ func (r *run) reviewOptions() review.Options {
 		DepsDir:          r.o.DepsDir,
 		CodexBin:         r.o.CodexBin,
 		ClaudeBin:        r.o.ClaudeBin,
+		GrokBin:          r.o.GrokBin,
 		DirenvBin:        r.o.DirenvBin,
 		ReviewTimeout:    review.DefaultReviewTimeout,
 	}
