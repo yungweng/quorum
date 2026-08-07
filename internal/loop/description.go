@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/engine"
-	"github.com/yungweng/quorum/internal/review"
 )
 
 const (
@@ -31,10 +30,10 @@ func (r *run) finishPRDescription(res *Result) error {
 	r.enter(PhaseDescription)
 	r.rep.Step("PR description")
 	label := "Final PR description"
-	r.rep.StepStart(label)
+	r.rep.StepStart(label, r.reviewModel)
 	started := time.Now()
 	ok := false
-	defer func() { r.rep.StepEnd(label, time.Since(started), ok) }()
+	defer func() { r.rep.StepEnd(label, r.reviewModel, time.Since(started), ok) }()
 
 	finalHead, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 	if err != nil {
@@ -50,9 +49,9 @@ func (r *run) finishPRDescription(res *Result) error {
 	if err != nil {
 		return err
 	}
-	eng, model, effort := review.ReviewEngineDefaults(r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
-	safe, err := engine.NewReviewer(eng, engine.ReviewerOptions{
-		Bin: r.o.engineBin(eng), Model: model, Effort: effort,
+	m := r.reviewModel
+	safe, err := engine.NewReviewer(m.Engine, engine.ReviewerOptions{
+		Bin: r.o.engineBin(m.Engine), Model: m.Name, Effort: m.Effort,
 	})
 	if err != nil {
 		logFile.Close()

@@ -226,9 +226,9 @@ func (r *run) analyzeDivergence() (*DivergenceReport, error) {
 	}
 	defer logFile.Close()
 
-	eng, model, effort := review.ReviewEngineDefaults(r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
-	opts, err := engine.NewReviewer(eng, engine.ReviewerOptions{
-		Bin: r.o.engineBin(eng), Model: model, Effort: effort,
+	m := r.reviewModel
+	opts, err := engine.NewReviewer(m.Engine, engine.ReviewerOptions{
+		Bin: r.o.engineBin(m.Engine), Model: m.Name, Effort: m.Effort,
 	})
 	if err != nil {
 		return nil, err
@@ -270,7 +270,7 @@ func (r *run) runDivergenceScan(res *Result) error {
 	}
 	r.rep.Step("Divergence analysis")
 	r.enter(PhaseDivergence)
-	r.rep.StepStart("Divergence analysis")
+	r.rep.StepStart("Divergence analysis", r.reviewModel)
 	started := time.Now()
 
 	type scanResult struct {
@@ -289,10 +289,10 @@ func (r *run) runDivergenceScan(res *Result) error {
 	for {
 		select {
 		case out = <-done:
-			r.rep.StepEnd("Divergence analysis", time.Since(started), out.err == nil)
+			r.rep.StepEnd("Divergence analysis", r.reviewModel, time.Since(started), out.err == nil)
 			goto finished
 		case <-ticker.C:
-			r.rep.StepTick("Divergence analysis", time.Since(started))
+			r.rep.StepTick("Divergence analysis", r.reviewModel, time.Since(started))
 		case <-r.ctx.Done():
 			out = <-done
 			return out.err

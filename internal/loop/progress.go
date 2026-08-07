@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -67,6 +68,12 @@ type Progress struct {
 	MaxIter    int `json:"max_iter,omitempty"`
 	MaxCIFixes int `json:"max_ci_fixes,omitempty"`
 
+	// The two models the run works with, written once at startup. A watcher
+	// cannot ask the run what it is spending, and the configuration it would
+	// otherwise read can have changed since this run started.
+	Review engine.Model `json:"review_model,omitzero"`
+	Fix    engine.Model `json:"fix_model,omitzero"`
+
 	// Phase is what the run is doing now, Since when it started doing it.
 	Phase string    `json:"phase,omitempty"`
 	Since time.Time `json:"since"`
@@ -99,6 +106,22 @@ func (p Progress) Key() string {
 
 // LogDir is where the run's Codex logs are.
 func (p Progress) LogDir() string { return filepath.Join(p.RunDir, "logs") }
+
+// StepModel is the model whatever the run is doing now runs on.
+//
+// The mapping lives here rather than in the dashboard because the phases do:
+// the divergence report and the final PR description are review-side steps, and
+// nothing about their names says so. A phase that is not an engine step at all -
+// starting up, waiting for GitHub - reports none.
+func (p Progress) StepModel() (engine.Model, bool) {
+	switch p.Phase {
+	case PhaseReview, PhaseDivergence, PhaseDescription:
+		return p.Review, true
+	case PhaseFix, PhaseCIFix, PhaseConflictFix:
+		return p.Fix, true
+	}
+	return engine.Model{}, false
+}
 
 // publish rewrites the run's progress file.
 //

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -34,6 +35,7 @@ func TestTrackLivePublishesUntilClosed(t *testing.T) {
 	rep.Header(RunHeader{
 		Repo: "acme/api", Number: 42, Title: "tenant scoping", Author: "example-user",
 		Runs: 3, RunDir: runDir,
+		Engine: engine.Codex, Model: "gpt-5.6-terra", Effort: "max",
 	})
 
 	runs := LiveRuns(liveDir)
@@ -47,6 +49,12 @@ func TestTrackLivePublishesUntilClosed(t *testing.T) {
 	}
 	if got.PID != os.Getpid() || got.RunDir != runDir || got.StartedAt.IsZero() {
 		t.Errorf("published liveness metadata = %+v", got)
+	}
+	// The dashboard has no other way to name what this run is spending: reading
+	// the current configuration would answer for whatever was set last, not for
+	// what this run started with.
+	if got.Model.Tag() != "gpt-5.6-terra/max" {
+		t.Errorf("published model = %q, want gpt-5.6-terra/max", got.Model.Tag())
 	}
 
 	rep.Close()

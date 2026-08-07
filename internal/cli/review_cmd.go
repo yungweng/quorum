@@ -348,6 +348,7 @@ type termReporter struct {
 	author string
 	repo   string
 	branch string
+	model  engine.Model
 
 	mu       sync.Mutex
 	tick     int
@@ -362,6 +363,7 @@ func (t *termReporter) Header(h review.RunHeader) {
 	t.author = h.Author
 	t.repo = h.Repo
 	t.branch = h.Branch
+	t.model = engine.Model{Engine: h.Engine, Name: h.Model, Effort: h.Effort}
 	t.reviewer = map[int]*reviewerState{}
 	t.mu.Unlock()
 
@@ -556,7 +558,7 @@ func (t *termReporter) Aggregating(reviewers, attempt int) {
 	if attempt > 1 {
 		label += fmt.Sprintf(", attempt %d", attempt)
 	}
-	t.status.Draw(label)
+	t.status.Draw(label + " · " + t.model.Tag())
 }
 
 func (t *termReporter) Verifying(attempt int) {
@@ -567,7 +569,7 @@ func (t *termReporter) Verifying(attempt int) {
 	if attempt > 1 {
 		label += fmt.Sprintf(", attempt %d", attempt)
 	}
-	t.status.Draw(label)
+	t.status.Draw(label + " · " + t.model.Tag())
 }
 
 // Comment renders the finished comment, through glow when it is available.
@@ -607,6 +609,9 @@ func (t *termReporter) Done(res review.Result) {
 			o.Red(fmt.Sprintf("(%d failed)", f.ReviewersRequested-f.ReviewersSucceeded))))
 	}
 	o.Row("findings", summary)
+	// The header said this too, an hour and a full comment ago. Repeating it
+	// here is what puts it in reach of a piped log and of scrollback.
+	o.Row("model", o.Dim(t.model.Tag()))
 	o.Row("duration", ui.Duration(res.Duration))
 	o.Row("comment", o.Link(o.Dim(filepath.Base(res.CommentFile)), "file://"+res.CommentFile))
 	o.Row("verification", o.Link(o.Dim(filepath.Base(res.VerificationChangesFile)), "file://"+res.VerificationChangesFile))

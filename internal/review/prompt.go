@@ -117,6 +117,8 @@ Do not favor keeping, changing, adding, or removing findings. Apply the same evi
 Output rules:
 - Return only the complete final Markdown report body. Do not wrap it in a code fence.
 - Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- The very first line of your answer must be exactly "## Summary", including both leading # characters. Every section heading keeps its leading "## ". These headings are parsed by a machine; a heading without them counts as missing.
+- Do not write any preamble, plan, status update, or tool narration before, between, or after the five sections. Tool use and reasoning stay off the answer; the answer is only the report body.
 - List every final finding as a top-level bullet beginning with "- ". If a section has no findings, write "None." as its only content.
 - Rewrite the summary so it describes only the final findings. Do not discuss discarded claims or the verification process.
 - Preserve a concise opening suitable for the candidate's target. Do not mention reviewers, verification, Codex, or automation.

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -35,6 +36,8 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 		PID: os.Getpid(), Repo: "acme/api", Number: 7, Title: "a fix", Author: "example-user",
 		Branch: "feature", StartedAt: started, MaxIter: 12, MaxCIFixes: 3,
 		Round: 2, CI: CIGreen, Reviewed: true, Blockers: 1, Critical: 2, Commits: 4,
+		Review: engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"},
+		Fix:    engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"},
 	}}
 	r.enter(PhaseFix)
 
@@ -63,11 +66,50 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 	if !got.Reviewed || got.Blockers != 1 || got.Critical != 2 || got.Commits != 4 {
 		t.Errorf("round result was lost: %+v", got)
 	}
+	if got.Review.Tag() != "gpt-5.6-terra/max" || got.Fix.Tag() != "opus/high" {
+		t.Errorf("models were lost: review %q, fix %q", got.Review.Tag(), got.Fix.Tag())
+	}
 	if got.RunDir != root {
 		t.Errorf("run dir = %q, want %q", got.RunDir, root)
 	}
 	if got.LogDir() != filepath.Join(root, "logs") {
 		t.Errorf("log dir = %q", got.LogDir())
+	}
+}
+
+// Which of the two models a phase runs on is the whole point of publishing
+// both. Review, divergence and the final PR description are review-side steps,
+// and nothing about the last two says so from their names.
+func TestProgressStepModelFollowsThePhase(t *testing.T) {
+	rev := engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"}
+	fix := engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"}
+	for _, tc := range []struct {
+		phase string
+		want  string // the tag, or empty for "no model at all"
+	}{
+		{PhaseReview, rev.Tag()},
+		{PhaseDivergence, rev.Tag()},
+		{PhaseDescription, rev.Tag()},
+		{PhaseFix, fix.Tag()},
+		{PhaseCIFix, fix.Tag()},
+		{PhaseConflictFix, fix.Tag()},
+		{PhaseStarting, ""},
+		{PhaseCI, ""},
+	} {
+		m, ok := Progress{Phase: tc.phase, Review: rev, Fix: fix}.StepModel()
+		if tc.want == "" {
+			if ok {
+				t.Errorf("phase %q reported %q, but nothing is running on a model there", tc.phase, m.Tag())
+			}
+			continue
+		}
+		if !ok {
+			t.Errorf("phase %q reported no model, want %q", tc.phase, tc.want)
+			continue
+		}
+		if got := m.Tag(); got != tc.want {
+			t.Errorf("phase %q runs on %q, want %q", tc.phase, got, tc.want)
+		}
 	}
 }
 

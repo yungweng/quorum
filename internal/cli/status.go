@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
@@ -594,8 +595,7 @@ func (a *app) sectionActive(
 	for _, run := range manual {
 		if run.Number == 0 {
 			branchLine(w, g, w.Magenta("◆"), run.Repo, run.Branch)
-			w.Printf("      %s\n", w.Dim("review · manual · "+ui.Duration(time.Since(run.StartedAt))+
-				" · "+reviewProgress(run.RunDir, run.Reviewers)))
+			w.Printf("      %s\n", manualTrack(w, run))
 			continue
 		}
 		entry := state.Entry{
@@ -608,8 +608,7 @@ func (a *app) sectionActive(
 			},
 		}
 		a.prLine(w, g, w.Magenta("◆"), entry, ends[entry.Key])
-		w.Printf("      %s\n", w.Dim("review · manual · "+ui.Duration(time.Since(run.StartedAt))+
-			" · "+reviewProgress(run.RunDir, run.Reviewers)))
+		w.Printf("      %s\n", manualTrack(w, run))
 	}
 	now := time.Now()
 	for _, p := range babysits {
@@ -633,6 +632,18 @@ func (a *app) sectionActive(
 		}
 		w.Printf("      %s\n", w.Dim("queued · "+reason))
 	}
+}
+
+// manualTrack is the line under a review somebody started in a terminal. The
+// model is the run's own, not the current configuration: a review started
+// before a config change keeps reporting what it is actually spending.
+func manualTrack(w *ui.Writer, run review.LiveRun) string {
+	line := "review · manual · " + ui.Duration(time.Since(run.StartedAt)) +
+		" · " + reviewProgress(run.RunDir, run.Reviewers)
+	if tag := run.Model.Tag(); run.Model != (engine.Model{}) {
+		line += " · " + tag
+	}
+	return w.Dim(line)
 }
 
 func reviewProgress(runDir string, requested int) string {
@@ -685,6 +696,9 @@ func babysitTrack(w *ui.Writer, p loop.Progress, now time.Time) string {
 		add(text, style)
 	}
 	if text, style := phaseSegment(w, p, now); text != "" {
+		add(text, style)
+	}
+	if text, style := modelSegment(w, p); text != "" {
 		add(text, style)
 	}
 	if p.Commits > 0 {
@@ -774,6 +788,22 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 		what += " ● " + ui.Duration(now.Sub(p.Since))
 	}
 	return what, w.Cyan(what)
+}
+
+// modelSegment names the model the current phase runs on. A run has two of
+// them, and the phase decides which: it comes after the phase segment because
+// it only makes sense next to it, and it drops before the phase does when the
+// terminal is too narrow for both.
+// A run started by an older build published no model at all. Its zero value is
+// not "the engine's own default", it is "unrecorded", and every real run names
+// at least its engine - so the empty one says nothing rather than guessing.
+func modelSegment(w *ui.Writer, p loop.Progress) (string, string) {
+	m, ok := p.StepModel()
+	if !ok || m == (engine.Model{}) {
+		return "", ""
+	}
+	tag := m.Tag()
+	return tag, w.Dim(tag)
 }
 
 // sectionHistory lists finished runs, newest first, and returns the pull

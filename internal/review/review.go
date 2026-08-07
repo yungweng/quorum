@@ -768,7 +768,7 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 				return err
 			}
 			lastErr = fmt.Errorf("engine exited nonzero, see %s", logPath)
-		} else if lastErr = ValidateComment(run.candidate); lastErr == nil {
+		} else if lastErr = normalizeAndValidateComment(run.candidate); lastErr == nil {
 			return nil
 		}
 		if attempt == 1 {
@@ -818,7 +818,10 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 			return err
 		}
 
-		validationErr := ValidateComment(run.comment)
+		var validationErr error
+		if err == nil {
+			validationErr = normalizeAndValidateComment(run.comment)
+		}
 		switch {
 		case err != nil:
 			lastErr = fmt.Errorf("engine exited nonzero, see %s", logPath)

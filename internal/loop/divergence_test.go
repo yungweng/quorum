@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
@@ -281,6 +282,47 @@ func TestDisabledDivergenceScanHasNoArtifactsOrValidation(t *testing.T) {
 		DivergenceEscalateTo: []string{"bad target"},
 	}).validate(); err == nil {
 		t.Fatal("enabled scan accepted an invalid escalation target")
+	}
+}
+
+// The divergence scan runs on the review model, not the fix model, and its
+// label says nothing about that. A reader who cannot tell the two apart on the
+// line cannot tell which of them the run is spending its tokens on.
+func TestDivergenceScanReportsTheReviewModel(t *testing.T) {
+	dir := t.TempDir()
+	codexBin := filepath.Join(dir, "codex")
+	result := `{"schema":1,"verdict":"cumulative","summary":"Findings are compatible.","conflicts":[],"recommendation":"Inspect the latest fix."}`
+	codexScript := "#!/bin/sh\n" +
+		"out=''\n" +
+		"while test $# -gt 0; do\n" +
+		"  if test \"$1\" = -o; then shift; out=$1; fi\n" +
+		"  shift\n" +
+		"done\n" +
+		"printf '%s' '" + result + "' > \"$out\"\n"
+	if err := os.WriteFile(codexBin, []byte(codexScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := &warningReporter{}
+	r := &run{
+		p:               &Pipeline{Git: git.New("git")},
+		o:               Options{CodexBin: codexBin, DivergenceScan: true, Post: false, RepoRoot: dir},
+		ctx:             context.Background(),
+		rep:             rep,
+		root:            dir,
+		logDir:          dir,
+		env:             envexec.Env{Worktree: dir},
+		pr:              gh.FullPR{Number: 42},
+		reviewModel:     engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"},
+		fixModel:        engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"},
+		divergenceTrace: sampleDivergenceTrace(),
+	}
+	if err := r.runDivergenceScan(&Result{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "Divergence analysis on gpt-5.6-terra/max"
+	if len(rep.steps) != 1 || rep.steps[0] != want {
+		t.Fatalf("steps = %v, want [%q]", rep.steps, want)
 	}
 }
 

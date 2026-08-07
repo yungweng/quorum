@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/logbook"
@@ -533,6 +534,62 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	}
 	if len(shown) != 1 || shown[0] != "acme/api#42" {
 		t.Errorf("shown = %v, want the fix loop key for end-state tracking", shown)
+	}
+}
+
+// A run has a review model and a fix model, and the dashboard reads a file it
+// did not write. Showing the configured model instead would be wrong for any
+// run started before the configuration changed, so the run publishes its own.
+func TestDashboardNamesTheModelBehindThePhase(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	models := func(phase string) loop.Progress {
+		return loop.Progress{
+			PID: 999999, Repo: "acme/api", Number: 42, Title: "tenant scoping",
+			StartedAt: now.Add(-90 * time.Minute), MaxIter: 12, Round: 3,
+			Phase: phase, Since: now.Add(-18 * time.Minute), CI: loop.CIGreen,
+			Review: engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"},
+			Fix:    engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"},
+		}
+	}
+
+	babysit(t, a, models(loop.PhaseFix))
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(screen, "opus/high") {
+		t.Errorf("the fix phase does not name the fix model:\n%s", screen)
+	}
+	if strings.Contains(screen, "gpt-5.6-terra") {
+		t.Errorf("the fix phase names the review model:\n%s", screen)
+	}
+
+	a2 := testApp(t)
+	babysit(t, a2, models(loop.PhaseReview))
+	screen, _ = render(t, a2, nil)
+	if !strings.Contains(screen, "gpt-5.6-terra/max") {
+		t.Errorf("the review phase does not name the review model:\n%s", screen)
+	}
+	if strings.Contains(screen, "opus/high") {
+		t.Errorf("the review phase names the fix model:\n%s", screen)
+	}
+
+	// Waiting for GitHub is not an engine step. A model on that line would be
+	// billed to a phase that is spending nothing.
+	a3 := testApp(t)
+	babysit(t, a3, models(loop.PhaseCI))
+	screen, _ = render(t, a3, nil)
+	if strings.Contains(screen, "opus/high") || strings.Contains(screen, "gpt-5.6-terra") {
+		t.Errorf("waiting for CI was attributed to a model:\n%s", screen)
+	}
+
+	// A run an older build started published no model. Naming a default there
+	// would put a model on screen that the run may well not be using.
+	a4 := testApp(t)
+	old := models(loop.PhaseFix)
+	old.Review, old.Fix = engine.Model{}, engine.Model{}
+	babysit(t, a4, old)
+	screen, _ = render(t, a4, nil)
+	if strings.Contains(screen, "default") {
+		t.Errorf("a run without a recorded model was given one:\n%s", screen)
 	}
 }
 

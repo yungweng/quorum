@@ -416,23 +416,26 @@ func (l *loopTermReporter) Step(title string) {
 	l.out.Step(title)
 }
 
-func (l *loopTermReporter) StepStart(label string) {
+func (l *loopTermReporter) StepStart(label string, m engine.Model) {
 	if !l.out.Color {
-		l.out.Printf("running: %s\n", label)
+		l.out.Printf("running: %s · %s\n", label, m.Tag())
 	}
 }
 
-func (l *loopTermReporter) StepTick(label string, elapsed time.Duration) {
+func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.Duration) {
 	if !l.verbose {
-		l.status.Spin(label, elapsed)
+		l.status.Spin(label+" · "+m.Tag(), elapsed)
 	}
 }
 
-func (l *loopTermReporter) StepEnd(label string, elapsed time.Duration, ok bool) {
+// StepEnd names the model between the step and its duration. A run has a review
+// model and a fix model, the header scrolls away within the first round, and
+// which one paid for an hour of wall clock is the question the line is read for.
+func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
 	l.status.Clear()
 	if ok {
-		l.out.Printf("%s\n", l.out.Dim(fmt.Sprintf("%s %s · %s",
-			l.out.SymOK(), label, ui.Duration(elapsed))))
+		l.out.Printf("%s\n", l.out.Dim(fmt.Sprintf("%s %s · %s · %s",
+			l.out.SymOK(), label, m.Tag(), ui.Duration(elapsed))))
 	}
 }
 

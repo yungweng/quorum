@@ -152,3 +152,25 @@ func TestKnownEffortDropsOnlyWhatTheEngineCannotUse(t *testing.T) {
 		t.Errorf("KnownEffort(codex, empty) = %q", got)
 	}
 }
+
+// The tag goes on every step line of a babysit run and on the dashboard, so
+// what it does with a half-filled Model is not cosmetic. An unset name is the
+// fix side, where quorum passes no model at all and never learns which one the
+// CLI picked; claiming a name there would be a guess.
+func TestModelTagNamesWhatIsKnown(t *testing.T) {
+	for _, tc := range []struct {
+		m    Model
+		want string
+	}{
+		{Model{Engine: Claude, Name: "opus", Effort: "high"}, "opus/high"},
+		{Model{Engine: Claude, Name: "sonnet"}, "sonnet"},
+		{Model{Engine: Claude}, "claude default"},
+		{Model{Engine: Codex, Effort: "high"}, "codex default/high"},
+		{Model{}, "codex default"},
+		{Model{Effort: "max"}, "codex default/max"},
+	} {
+		if got := tc.m.Tag(); got != tc.want {
+			t.Errorf("Model%+v.Tag() = %q, want %q", tc.m, got, tc.want)
+		}
+	}
+}

@@ -77,6 +77,37 @@ func KnownEffort(name, effort string) string {
 	return ""
 }
 
+// Model is the engine, model and effort one call runs on. It lives here
+// because every layer that reports a step - the pipeline, the reviewer panel,
+// the dashboard, the agent's log - can reach this package, and a single type
+// keeps them from formatting the same three strings four different ways.
+type Model struct {
+	Engine string `json:"engine,omitempty"`
+	Name   string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
+// Tag is the short form a step line carries: "opus/high".
+//
+// An unset name is the engine's own choice, which has no name here: the fix
+// side is handed to the CLI with no -m at all, so quorum knows what it asked
+// for and not what the CLI picked. Saying "codex default" is the whole truth
+// available. An unset effort is left off rather than guessed at.
+func (m Model) Tag() string {
+	name := m.Name
+	if name == "" {
+		eng := m.Engine
+		if eng == "" {
+			eng = Codex
+		}
+		name = eng + " default"
+	}
+	if m.Effort == "" {
+		return name
+	}
+	return name + "/" + m.Effort
+}
+
 // SessionRef is the opaque handle Exec returns and Resume takes back. It is
 // an alias, not a defined type, so the adapters can keep returning plain
 // strings and still satisfy Fixer without importing this package.

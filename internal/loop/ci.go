@@ -114,7 +114,7 @@ func (r *run) finishReview(round int) (review.Findings, string, error) {
 	}
 	br := r.review
 	label := fmt.Sprintf("Review round %d", round)
-	r.rep.StepStart(label)
+	r.rep.StepStart(label, r.reviewModel)
 
 	out := r.waitReview(br, label)
 	r.review = nil
@@ -174,10 +174,10 @@ func (r *run) waitReview(br *bgReview, label string) bgResult {
 	for {
 		select {
 		case out := <-br.done:
-			r.rep.StepEnd(label, time.Since(br.started), out.err == nil)
+			r.rep.StepEnd(label, r.reviewModel, time.Since(br.started), out.err == nil)
 			return out
 		case <-ticker.C:
-			r.rep.StepTick(label, time.Since(br.started))
+			r.rep.StepTick(label, r.reviewModel, time.Since(br.started))
 		case <-r.ctx.Done():
 			br.cancel()
 			out := <-br.done

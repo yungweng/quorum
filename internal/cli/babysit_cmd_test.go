@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
@@ -154,6 +155,30 @@ func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("header is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// Every step line names its own model. The header states both, but it is gone
+// from the screen within the first round of a run that goes on for hours, and
+// the label alone does not say which side a step belongs to.
+func TestStepLinesNameTheModelThatRanTheStep(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+
+	reviewModel := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "max"}
+	fixModel := engine.Model{Engine: "claude", Name: "opus", Effort: "high"}
+	rep.StepEnd("Review round 2 (discarded)", reviewModel, 11*time.Minute, true)
+	rep.StepEnd("CI fix 1", fixModel, 11*time.Minute, true)
+
+	got := out.String()
+	for _, want := range []string{
+		"Review round 2 (discarded) · gpt-5.6-terra/max · 11m",
+		"CI fix 1 · opus/high · 11m",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("step lines are missing %q:\n%s", want, got)
 		}
 	}
 }
