@@ -73,21 +73,12 @@ func testRunWith(t *testing.T, fake *fakeReviewer) *run {
 	}
 }
 
-func commentFile(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "final-pr-comment.md")
-	if err := os.WriteFile(path, []byte("## Summary\nfine\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // An aggregator failure leaves six paid-for reviewer outputs on disk. The
 // retry must reuse exactly that run directory instead of a fresh fan-out.
 func TestFinishReviewRetriesOnceWithResumeRunAfterAnAggregatorFailure(t *testing.T) {
 	fake := &fakeReviewer{}
 	fake.queue(nil, &review.RunDirError{RunDir: "/run/1", Err: review.ErrAggregatorInvalid})
-	fake.queue(&review.Result{RunDir: "/run/1", CommentFile: commentFile(t)}, nil)
+	fake.queue(&review.Result{RunDir: "/run/1", CommentBody: "## Summary\nfine\n"}, nil)
 
 	r := testRunWith(t, fake)
 	_, comment, err := r.finishReview(1)
@@ -108,6 +99,28 @@ func TestFinishReviewRetriesOnceWithResumeRunAfterAnAggregatorFailure(t *testing
 	}
 }
 
+func TestFinishReviewUsesReturnedCommentAfterRunDirectoryIsCollected(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "collected")
+	fake := &fakeReviewer{}
+	fake.queue(&review.Result{
+		RunDir:      runDir,
+		CommentFile: filepath.Join(runDir, "output", "final-pr-comment.md"),
+		CommentBody: "## Summary\nfine\n",
+	}, nil)
+	if _, err := os.Stat(runDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("collected run directory still exists: %v", err)
+	}
+
+	r := testRunWith(t, fake)
+	_, comment, err := r.finishReview(1)
+	if err != nil {
+		t.Fatalf("finishReview: %v", err)
+	}
+	if comment != "## Summary\nfine\n" {
+		t.Fatalf("comment = %q, want the comment returned while the run was claimed", comment)
+	}
+}
+
 func TestFinishReviewDoesNotRetryATooFewReviewersFailure(t *testing.T) {
 	fake := &fakeReviewer{}
 	fake.queue(nil, review.ErrTooFewReviewers)
@@ -125,7 +138,7 @@ func TestFinishReviewDoesNotRetryATooFewReviewersFailure(t *testing.T) {
 // after a usage limit) must actually reuse it for its first round.
 func TestFirstRoundReusesAHandedInResumeDirectory(t *testing.T) {
 	fake := &fakeReviewer{}
-	fake.queue(&review.Result{RunDir: "/run/prior", CommentFile: commentFile(t)}, nil)
+	fake.queue(&review.Result{RunDir: "/run/prior", CommentBody: "## Summary\nfine\n"}, nil)
 
 	r := testRunWith(t, fake)
 	r.o.ResumeRun = "/run/prior"
@@ -148,7 +161,7 @@ func TestFirstRoundFallsBackToAFreshRunWhenTheResumeIsUnusable(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fake := &fakeReviewer{}
 			fake.queue(nil, resumeErr)
-			fake.queue(&review.Result{RunDir: "/run/2", CommentFile: commentFile(t)}, nil)
+			fake.queue(&review.Result{RunDir: "/run/2", CommentBody: "## Summary\nfine\n"}, nil)
 
 			r := testRunWith(t, fake)
 			r.startReviewWith(1, "/run/stale")

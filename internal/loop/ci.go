@@ -138,11 +138,7 @@ func (r *run) finishReview(round int) (review.Findings, string, error) {
 		}
 	}
 
-	comment, err := os.ReadFile(out.res.CommentFile)
-	if err != nil {
-		return review.Findings{}, "", fmt.Errorf("reading the review comment: %w", err)
-	}
-	return out.res.Findings, string(comment), nil
+	return out.res.Findings, out.res.CommentBody, nil
 }
 
 // resumeFallbackEligible reports whether a resumed round failed for a
