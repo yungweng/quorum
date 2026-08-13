@@ -264,7 +264,7 @@ func TestDashboardShowsAManualReviewWithoutTakingAnAgentSlot(t *testing.T) {
 	}, "start\nok 1 30 1\n")
 
 	screen, shown := render(t, a, map[string]string{"acme/api#42": gh.StateOpen})
-	if got := sectionBadge(t, screen, "ACTIVE"); got != "0 / 6" {
+	if got := sectionBadge(t, screen, "ACTIVE"); got != "0/6" {
 		t.Errorf("a manual review took an agent slot: heading says %q", got)
 	}
 	for _, want := range []string{
@@ -448,11 +448,10 @@ func TestDashboardKeepsThePipelineVisibleWhenIdle(t *testing.T) {
 	})
 
 	screen, _ := render(t, a, nil)
-	for _, want := range []string{"ACTIVE", "nothing running", "HISTORY"} {
-		if !strings.Contains(screen, want) {
-			t.Errorf("idle dashboard is missing %q:\n%s", want, screen)
-		}
+	if !strings.Contains(sectionOf(t, screen, "ACTIVE"), "nothing running") {
+		t.Errorf("idle dashboard does not say ACTIVE is idle:\n%s", screen)
 	}
+	sectionOf(t, screen, "HISTORY")
 }
 
 // Cache size is linear in the number of cached files. The dashboard is an
@@ -526,7 +525,7 @@ func TestDashboardShowsATerminalBabysit(t *testing.T) {
 	}
 	// It must not be counted against the review budget: babysit takes no slot,
 	// so a count next to the heading would be a budget that does not exist.
-	if got := sectionBadge(t, screen, "ACTIVE"); got != "0 / 6" {
+	if got := sectionBadge(t, screen, "ACTIVE"); got != "0/6" {
 		t.Errorf("a terminal fix loop was counted against the review slots: heading says %q", got)
 	}
 	if got := lineWith(t, screen, "api #42"); !strings.Contains(got, "merged") {
@@ -632,7 +631,7 @@ func TestDashboardDoesNotShowAnAgentBabysitTwice(t *testing.T) {
 	if !strings.Contains(screen, "waiting for CI") {
 		t.Errorf("the agent's fix loop is missing from ACTIVE:\n%s", screen)
 	}
-	if got := sectionBadge(t, screen, "ACTIVE"); got != "1 / 6" {
+	if got := sectionBadge(t, screen, "ACTIVE"); got != "1/6" {
 		t.Errorf("the agent's fix loop is missing from the scheduler capacity count: heading says %q", got)
 	}
 }
@@ -659,7 +658,7 @@ func TestDashboardShowsADirectRunBeforeItsStateUpdate(t *testing.T) {
 			if strings.Contains(screen, "nothing under review right now") {
 				t.Errorf("a claimed direct review was reported as idle:\n%s", screen)
 			}
-			if got := sectionBadge(t, screen, "ACTIVE"); got != "1 / 6" {
+			if got := sectionBadge(t, screen, "ACTIVE"); got != "1/6" {
 				t.Errorf("preparing direct review is not counted: heading says %q", got)
 			}
 			for _, want := range []string{"api #42", "agent", "starting up"} {
@@ -979,11 +978,11 @@ func TestAnIdleDashboardStaysCompact(t *testing.T) {
 
 	// It still says in words that nothing is running: a section that vanishes
 	// cannot be told apart from a feature that is not there.
-	if !strings.Contains(lineWith(t, screen, "ACTIVE"), "nothing running") {
-		t.Errorf("the idle state is not stated on the ACTIVE line:\n%s", screen)
+	if !strings.Contains(sectionOf(t, screen, "ACTIVE"), "nothing running") {
+		t.Errorf("the idle state is not stated in the ACTIVE section:\n%s", screen)
 	}
-	if !strings.Contains(lineWith(t, screen, "OPEN"), "nothing reviewed is still open") {
-		t.Errorf("the idle state is not stated on the OPEN line:\n%s", screen)
+	if !strings.Contains(sectionOf(t, screen, "OPEN"), "nothing reviewed is still open") {
+		t.Errorf("the idle state is not stated in the OPEN section:\n%s", screen)
 	}
 	// And it says it once, not once per pipeline stage.
 	for _, gone := range []string{"REVIEWING", "BABYSITTING", "QUEUED", "SYSTEM"} {
@@ -991,9 +990,9 @@ func TestAnIdleDashboardStaysCompact(t *testing.T) {
 			t.Errorf("%s still has a heading of its own:\n%s", gone, screen)
 		}
 	}
-	// Three sections, each stating its own idle case in one line, plus header,
+	// Three sections, each a heading and its own idle case, plus header,
 	// status bar and footer.
-	if n := strings.Count(strings.TrimSpace(screen), "\n") + 1; n > 13 {
+	if n := strings.Count(strings.TrimSpace(screen), "\n") + 1; n > 15 {
 		t.Errorf("an idle dashboard is %d lines:\n%s", n, screen)
 	}
 	// The settings did not disappear with the section that held them.
@@ -1063,14 +1062,27 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 func sectionBadge(t *testing.T, screen, heading string) string {
 	t.Helper()
 	for _, line := range strings.Split(ui.StripANSI(screen), "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), heading)
-		if !ok {
-			continue
+		trimmed := strings.TrimSpace(line)
+		// A framed panel titles itself "┌ Active · 1/6 ────", a plain heading
+		// says "ACTIVE  1 / 6"; the badge is whatever follows the name.
+		if rest, ok := strings.CutPrefix(trimmed, "┌ "+panelTitle(heading)); ok {
+			rest = strings.TrimLeft(rest, " ·")
+			if i := strings.IndexRune(rest, '─'); i >= 0 {
+				rest = rest[:i]
+			}
+			return strings.TrimSpace(rest)
 		}
-		return strings.TrimSpace(rest)
+		if rest, ok := strings.CutPrefix(trimmed, heading); ok {
+			return strings.TrimSpace(rest)
+		}
 	}
 	t.Fatalf("no %s heading:\n%s", heading, screen)
 	return ""
+}
+
+// panelTitle is the framed layout's spelling of a section heading.
+func panelTitle(heading string) string {
+	return heading[:1] + strings.ToLower(heading[1:])
 }
 
 // sectionOf returns one section of the dashboard, from its heading to the next
@@ -1080,12 +1092,15 @@ func sectionOf(t *testing.T, screen, heading string) string {
 	t.Helper()
 	lines := strings.Split(screen, "\n")
 	for i, line := range lines {
-		if !strings.Contains(line, heading) {
+		plain := strings.TrimSpace(ui.StripANSI(line))
+		boxTitle := strings.HasPrefix(plain, "┌ "+panelTitle(heading))
+		if !strings.Contains(line, heading) && !boxTitle {
 			continue
 		}
 		out := []string{line}
 		for _, next := range lines[i+1:] {
-			if strings.TrimSpace(next) == "" {
+			rest := strings.TrimSpace(ui.StripANSI(next))
+			if rest == "" || strings.HasPrefix(rest, "└") {
 				break
 			}
 			out = append(out, next)

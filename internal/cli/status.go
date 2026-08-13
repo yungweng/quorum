@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -92,6 +93,19 @@ func recentReviewedPRKeys(reviewed []state.Entry, now time.Time) []string {
 // recent review which could belong under OPEN, even when a cached terminal
 // state keeps it off screen, plus the pull requests drawn elsewhere.
 func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
+	if w.Color {
+		// The framed layout spans the whole terminal: its borders make the
+		// width read as a decision, which a bare rule at 200 columns does not.
+		// The last column stays free. A glyph there arms the terminal's
+		// pending-wrap state, and the erase watch paints at the end of every
+		// line then wipes that very cell, which deletes the right border the
+		// moment it is drawn.
+		w = w.To(w.Out)
+		w.Wide = true
+		if w.Width > 1 {
+			w.Width--
+		}
+	}
 	file, err := state.Read(a.p.StateFile)
 	if err != nil {
 		w.Printf("%s\n", w.Red("state file unreadable: "+err.Error()))
@@ -118,7 +132,9 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		manualKeys[run.Key()] = true
 	}
 
-	a.header(w)
+	if !w.Color {
+		a.header(w)
+	}
 
 	var running, queued, recent []state.Entry
 	seen := map[string]bool{}
@@ -164,7 +180,20 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	// Oldest request first in the queue, matching the order they will start in.
 	sort.SliceStable(queued, func(i, j int) bool { return queued[i].SeenReqAt < queued[j].SeenReqAt })
 
-	a.statusbar(w, len(live), len(babysits), len(queued))
+	if w.Color {
+		// The header panel is what the old header line and status bar said,
+		// framed together: the binary and version name the panel, the live
+		// counts and the agent heartbeat are its content.
+		boxed(w, strings.TrimSpace("quorum "+a.version), w.Cyan, func(iw *ui.Writer) {
+			a.statusLine(iw, len(live), len(babysits), len(queued))
+			iw.Printf("  %s\n", iw.Dim(a.agentLine()))
+			if a.configErr != nil {
+				iw.Printf("  %s\n", iw.Yellow("config: "+a.configErr.Error()))
+			}
+		})
+	} else {
+		a.statusbar(w, len(live), len(babysits), len(queued))
+	}
 
 	// What is in flight is drawn first but printed second: the open section has
 	// to leave out whatever the active section is about to show, or a pull
@@ -208,10 +237,24 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 		recent = nil
 	}
 
-	g := measure(w, open, running, manualReviews, babysits, queued, recent, groups)
-	a.sectionOpen(w, g, open, checking, ends)
-	a.sectionActive(w, g, running, manualReviews, babysits, queued, live, ends)
-	past := a.sectionHistory(w, g, recent, groups, ends)
+	// Panels indent their content by the frame and its padding, so the layout
+	// is measured and built against that inner width rather than the screen's.
+	bw := w
+	if w.Color {
+		bw = w.To(w.Out)
+		bw.Width = w.Cols() - boxOverhead
+	}
+	g := measure(bw, open, running, manualReviews, babysits, queued, recent, groups)
+	panel(w, "Open", len(open), 0, w.Green, func(iw *ui.Writer) {
+		a.sectionOpen(iw, g, open, checking, ends)
+	})
+	panel(w, "Active", len(live), a.cfg.MaxConcurrent, w.Magenta, func(iw *ui.Writer) {
+		a.sectionActive(iw, g, running, manualReviews, babysits, queued, live, ends)
+	})
+	var past []string
+	panel(w, "History", 0, 0, w.Blue, func(iw *ui.Writer) {
+		past = a.sectionHistory(iw, g, recent, groups, ends)
+	})
 	a.footer(w)
 
 	tracked := make([]string, 0, len(reviewed)+len(running)+len(manualReviews)+len(queued)+len(past)+len(babysits))
@@ -311,10 +354,51 @@ func (a *app) header(w *ui.Writer) {
 	}
 }
 
+// boxOverhead is what a panel's frame costs in columns: a border character and
+// a space of padding on either side. Content and column measurement both work
+// against Cols() minus this, so a panel's rows fit its frame exactly.
+const boxOverhead = 4
+
+// boxed renders body into its own buffer at the panel's inner width, then
+// frames it. Only called on a colour terminal.
+func boxed(w *ui.Writer, title string, style func(string) string, body func(*ui.Writer)) {
+	var buf bytes.Buffer
+	iw := w.To(&buf)
+	iw.Width = w.Cols() - boxOverhead
+	body(iw)
+	w.Box(title, style, strings.Split(strings.TrimRight(buf.String(), "\n"), "\n"))
+}
+
+// panel draws one dashboard section: a framed panel with the title and count
+// in the border on a terminal, and the plain heading over the same body when
+// the output is piped, where box drawing would be noise in a log.
+func panel(w *ui.Writer, title string, count, total int, style func(string) string, body func(*ui.Writer)) {
+	if !w.Color {
+		w.Section(title, count, total)
+		body(w)
+		return
+	}
+	switch {
+	case total > 0:
+		title = fmt.Sprintf("%s · %d/%d", title, count, total)
+	case count > 0:
+		title = fmt.Sprintf("%s · %d", title, count)
+	}
+	boxed(w, title, style, body)
+}
+
 // statusbar answers "what is this machine doing right now" in one line, before
 // any section has to be read. Everything on it is live state; the settings that
 // produced it live in the system section.
 func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int) {
+	fmt.Fprintln(w.Out)
+	a.statusLine(w, reviewing, fixing, queued)
+	w.Rule()
+}
+
+// statusLine is the status bar's counts line alone, so the header panel can
+// hold it without the rule the plain layout separates itself with.
+func (a *app) statusLine(w *ui.Writer, reviewing, fixing, queued int) {
 	slots := fmt.Sprintf("%d/%d", reviewing, a.cfg.MaxConcurrent)
 	if reviewing > 0 {
 		slots = w.Cyan(slots)
@@ -344,8 +428,7 @@ func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int) {
 			line += strings.Repeat(" ", gap) + w.Cyan(ui.Spinner(a.tick))
 		}
 	}
-	w.Printf("\n%s\n", line)
-	w.Rule()
+	w.Printf("%s\n", line)
 }
 
 // metric renders one "3 fix" pair, coloured only when the number is not zero.
@@ -488,16 +571,13 @@ func openPRs(reviewed []state.Entry, busy map[string]bool, ends map[string]strin
 // is merged or closed.
 func (a *app) sectionOpen(w *ui.Writer, g grid, open []state.Entry, checking int, ends map[string]string) {
 	if len(open) == 0 && checking == 0 {
-		fmt.Fprintln(w.Out)
-		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim("      nothing reviewed is still open"))
+		w.Printf("  %s\n", w.Dim("nothing reviewed is still open"))
 		return
 	}
 	if len(open) == 0 {
-		fmt.Fprintln(w.Out)
-		w.Printf("%s %s\n", w.Bold("OPEN"), w.Dim(fmt.Sprintf("      checking GitHub for %d reviewed PR%s", checking, plural(checking))))
+		w.Printf("  %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d reviewed PR%s", checking, plural(checking))))
 		return
 	}
-	w.Section("open", len(open), 0)
 	now := time.Now()
 	for _, e := range open {
 		a.prLine(w, g, openMark(w, e), e, ends[e.Key])
@@ -573,12 +653,9 @@ func (a *app) sectionActive(
 	ends map[string]string,
 ) {
 	if len(running)+len(manual)+len(babysits)+len(queued) == 0 {
-		fmt.Fprintln(w.Out)
-		w.Printf("%s %s\n", w.Bold("ACTIVE"), w.Dim("    nothing running"))
+		w.Printf("  %s\n", w.Dim("nothing running"))
 		return
 	}
-	w.Section("active", len(live), a.cfg.MaxConcurrent)
-
 	for _, e := range running {
 		_, alive := live[e.Key]
 		a.prLine(w, g, w.Cyan("●"), e, ends[e.Key])
@@ -818,7 +895,6 @@ func modelSegment(w *ui.Writer, p loop.Progress) (string, string) {
 // is empty, so upgrading to a build that keeps a log does not start on a blank
 // screen; the first logged run takes over from it.
 func (a *app) sectionHistory(w *ui.Writer, g grid, fallback []state.Entry, groups []historyGroup, ends map[string]string) []string {
-	w.Section("history", 0, 0)
 	if len(groups) == 0 && len(fallback) == 0 {
 		w.Printf("  %s\n", w.Dim("nothing has finished yet"))
 		return nil

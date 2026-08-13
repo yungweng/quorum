@@ -25,6 +25,11 @@ type Writer struct {
 	// Height is the terminal's row count, 0 when it is not a terminal. Only
 	// watch uses it, to keep a frame from scrolling the screen it is painting.
 	Height int
+	// Wide lifts the MaxWidth cap. The cap exists because bare rules and right
+	// aligned fields running to the edge of a very wide screen read as a
+	// mistake; a framed panel owns its edges, so the boxed dashboard spans the
+	// whole terminal instead.
+	Wide   bool
 	indent string
 }
 
@@ -62,7 +67,7 @@ const MaxWidth = 160
 
 // Cols is the width layout is built against.
 func (w *Writer) Cols() int {
-	if w.Width < MaxWidth {
+	if w.Wide || w.Width < MaxWidth {
 		return w.Width
 	}
 	return MaxWidth
