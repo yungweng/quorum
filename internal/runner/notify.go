@@ -50,6 +50,22 @@ func (r *Runner) notifyApprovalRequired(repo string, number int) {
 	}
 }
 
+// notifyReadyToMerge mirrors notifyApprovalRequired: a persistent, clickable
+// Notification Center item per pull request whose clean review was not merged.
+func (r *Runner) notifyReadyToMerge(repo string, number int) {
+	if !r.Cfg.Notify {
+		return
+	}
+	url := fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
+	if err := macnotify.ReadyToMerge(repo, number, url); err != nil {
+		r.logNotificationError(err)
+		if r.TerminalNotify != nil {
+			r.TerminalNotify("quorum: ready to merge",
+				fmt.Sprintf("%s#%d is clean and ready to merge.", repo, number))
+		}
+	}
+}
+
 func terminalNotifierCommand(title, body, url string) (*exec.Cmd, error) {
 	bin, err := exec.LookPath("terminal-notifier")
 	if err != nil {

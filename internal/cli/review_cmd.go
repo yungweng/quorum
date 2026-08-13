@@ -151,7 +151,7 @@ func (a *app) cmdReview(argv []string) int {
 	}
 	number = res.Findings.PR
 	mergeStatus := ""
-	if automerge.Allowed(a.cfg.AutoMergeReview, a.cfg.Post, res.Findings) {
+	if automerge.Allowed(a.cfg.AutoMerge, a.cfg.Post, res.Findings) {
 		mergeResult, mergeErr := a.autoMerge(ctx, client, repoRoot, repo, number, res.Findings.HeadSHA)
 		if mergeErr != nil {
 			// The review finished and was posted. Keep that result in OPEN;
@@ -171,6 +171,10 @@ func (a *app) cmdReview(argv []string) int {
 		}
 	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
+	if notify && a.cfg.NotifyReadyToMerge && mergeStatus == "" && automerge.Eligible(res.Findings) {
+		a.notifyReadyToMerge(notify, repo, number, "")
+		return exitOK
+	}
 	if notify && mergeStatus != automerge.ApprovalRequired {
 		rep.mu.Lock()
 		branch := rep.branch

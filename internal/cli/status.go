@@ -1255,20 +1255,10 @@ func (a *app) footer(w *ui.Writer) {
 }
 
 func autoMergeSummary(cfg config.Config) string {
-	var sources []string
-	if cfg.AutoMergeAgent {
-		sources = append(sources, "agent")
-	}
-	if cfg.AutoMergeReview {
-		sources = append(sources, "review")
-	}
-	if cfg.AutoMergeBabysit {
-		sources = append(sources, "babysit")
-	}
-	if len(sources) == 0 {
+	if !cfg.AutoMerge {
 		return "auto-merge off"
 	}
-	return "auto-merge " + strings.Join(sources, "+") + " (repo method)"
+	return "auto-merge on (repo method)"
 }
 
 func runLabelText(run history.Run) string {

@@ -406,7 +406,7 @@ func (a *app) cmdReviewOne(args []string) int {
 		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, ClaudeBin: t.Claude, GrokBin: t.Grok, DirenvBin: t.Direnv,
 		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
 	}
-	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt, runner.InvocationAgent); err != nil {
+	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt); err != nil {
 		return 1
 	}
 	return 0

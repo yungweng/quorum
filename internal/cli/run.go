@@ -58,7 +58,7 @@ func (a *app) cmdRun(args []string) int {
 			a.out.Notify("quorum: "+title, body)
 		},
 	}
-	if err := r.Review(ctx, key, repo, number, details.HeadRefOid, details.Title, details.Author.Login, "", runner.InvocationManual); err != nil {
+	if err := r.Review(ctx, key, repo, number, details.HeadRefOid, details.Title, details.Author.Login, ""); err != nil {
 		return 1
 	}
 	return 0

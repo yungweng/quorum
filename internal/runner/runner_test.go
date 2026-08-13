@@ -198,28 +198,6 @@ func TestTerminalNotifierDoesNotFallBackWhenMissing(t *testing.T) {
 	}
 }
 
-func TestAutoMergeSettingFollowsInvocationSource(t *testing.T) {
-	r := &Runner{Cfg: config.Config{AutoMergeAgent: true}}
-	if !r.autoMergeEnabled(InvocationAgent) {
-		t.Fatal("agent invocation ignored AUTO_MERGE_AGENT")
-	}
-	if r.autoMergeEnabled(InvocationManual) {
-		t.Fatal("manual invocation used AUTO_MERGE_AGENT")
-	}
-
-	r.Cfg.AutoMergeAgent = false
-	r.Cfg.AutoMergeReview = true
-	if r.autoMergeEnabled(InvocationAgent) {
-		t.Fatal("agent invocation used AUTO_MERGE_REVIEW")
-	}
-	if !r.autoMergeEnabled(InvocationManual) {
-		t.Fatal("manual invocation ignored AUTO_MERGE_REVIEW")
-	}
-	if r.autoMergeEnabled(InvocationSource(99)) {
-		t.Fatal("unknown invocation source enabled auto-merge")
-	}
-}
-
 func TestAutoMergeFailurePreservesSuccessfulReview(t *testing.T) {
 	dir := t.TempDir()
 	r := &Runner{P: paths.P{
