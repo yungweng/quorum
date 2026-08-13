@@ -85,13 +85,10 @@ type Config struct {
 	// Only possible now that both live in one binary.
 	AgentAction string
 
-	// Auto-merge is opt-in per source. An agent run uses AutoMergeAgent even
-	// when AgentAction is "babysit"; the other two fields only affect commands
-	// started explicitly in a terminal. AutoMergeTimeout bounds the wait for
+	// AutoMerge is one opt-in for every source: agent runs, `quorum review`
+	// and `quorum babysit` alike. AutoMergeTimeout bounds the wait for
 	// checks and mergeability; zero leaves it bounded only by the run context.
-	AutoMergeAgent   bool
-	AutoMergeReview  bool
-	AutoMergeBabysit bool
+	AutoMerge        bool
 	AutoMergeTimeout time.Duration
 	// AutoMergeAuthors limits auto-merge to pull requests whose author is one
 	// of these GitHub logins, compared case-insensitively. Empty keeps the old
@@ -99,6 +96,10 @@ type Config struct {
 	AutoMergeAuthors []string
 
 	Notify bool
+	// NotifyReadyToMerge leaves one persistent, clickable Notification Center
+	// item per pull request whose clean review was not auto-merged, so "ready
+	// to merge" survives until the user opens the PR or dismisses it.
+	NotifyReadyToMerge bool
 
 	// ReviewArgs is the retired pass-through string. It is still read so an
 	// existing config keeps working, and dropped when the file is rewritten.
@@ -320,6 +321,8 @@ func (c *Config) set(key, value string) {
 		c.SkipOwn = truthy(value)
 	case "NOTIFY":
 		c.Notify = truthy(value)
+	case "NOTIFY_READY_TO_MERGE":
+		c.NotifyReadyToMerge = truthy(value)
 	case "MAX_RETRIES":
 		c.MaxRetries = intOr(value, c.MaxRetries)
 	case "MAX_CONCURRENT":
@@ -380,12 +383,15 @@ func (c *Config) set(key, value string) {
 		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
 			c.AgentAction = v
 		}
+	case "AUTO_MERGE":
+		c.AutoMerge = truthy(value)
 	case "AUTO_MERGE_AGENT":
-		c.AutoMergeAgent = truthy(value)
-	case "AUTO_MERGE_REVIEW":
-		c.AutoMergeReview = truthy(value)
-	case "AUTO_MERGE_BABYSIT":
-		c.AutoMergeBabysit = truthy(value)
+		// Retired: auto-merge used to be a separate opt-in per source. The
+		// agent value migrates because unattended runs are where the setting
+		// matters most; the other two keys are read no more and dropped when
+		// the file is written again.
+		c.AutoMerge = truthy(value)
+	case "AUTO_MERGE_REVIEW", "AUTO_MERGE_BABYSIT":
 	case "AUTO_MERGE_TIMEOUT":
 		c.AutoMergeTimeout = durationOr(value, c.AutoMergeTimeout)
 	case "AUTO_MERGE_AUTHORS":
@@ -533,15 +539,15 @@ func (c Config) Render() string {
 	w("AGENT_ACTION=%q\n\n", c.AgentAction)
 
 	w("# Approve a clean reviewed head and ask GitHub to merge it with a merge\n")
-	w("# commit once its branch rules pass. Each source is opt-in.\n")
-	w("AUTO_MERGE_AGENT=%s\n", bit(c.AutoMergeAgent))
-	w("AUTO_MERGE_REVIEW=%s\n", bit(c.AutoMergeReview))
-	w("AUTO_MERGE_BABYSIT=%s\n", bit(c.AutoMergeBabysit))
+	w("# commit once its branch rules pass. One switch for agent, review and\n")
+	w("# babysit runs alike.\n")
+	w("AUTO_MERGE=%s\n", bit(c.AutoMerge))
 	w("AUTO_MERGE_TIMEOUT=%q\t# wait for checks and mergeability; 0 disables timeout\n", FormatDuration(c.AutoMergeTimeout))
 	w("AUTO_MERGE_AUTHORS=%q\t# only merge PRs from these logins; empty allows every author\n\n",
 		strings.Join(c.AutoMergeAuthors, " "))
 
 	w("NOTIFY=%s\n", bit(c.Notify))
+	w("NOTIFY_READY_TO_MERGE=%s\t# persistent alert per PR whose clean review was not auto-merged\n", bit(c.NotifyReadyToMerge))
 
 	if c.ReviewArgs != "" {
 		w("\n# Retired: pr-codex-review is built in now, so this is no longer passed\n")

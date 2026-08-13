@@ -60,6 +60,9 @@ Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) and
 Foreground commands normally notify through the terminal. When an own pull
 request needs another person's approval, quorum leaves a dedicated macOS
 Notification Center item that later completion notifications cannot replace.
+With `NOTIFY_READY_TO_MERGE=1`, a clean review that quorum did not merge
+leaves the same kind of item, named `owner/repo#number`; clicking it opens the
+pull request on GitHub.
 `direnv` is optional and only needed for projects that have an `.envrc`.
 
 `make install-hooks` is needed once per clone and after a tracked hook changes.
@@ -180,12 +183,11 @@ targets only when a manual decision may be needed.
 
 ## Auto-merge
 
-Auto-merge is off by default and enabled separately for each source:
+Auto-merge is off by default and is one switch for agent, review and babysit
+runs alike:
 
 ```text
-AUTO_MERGE_AGENT=0
-AUTO_MERGE_REVIEW=0
-AUTO_MERGE_BABYSIT=0
+AUTO_MERGE=0
 AUTO_MERGE_TIMEOUT="2h"
 AUTO_MERGE_AUTHORS=""
 ```
@@ -204,9 +206,7 @@ dedicated macOS Notification Center item. A moved head, a local report
 requires a merge queue are not merged. A repository with no supported merge
 method is rejected before approval.
 
-The agent setting applies to every agent run, including `AGENT_ACTION=babysit`.
-The other two settings apply only to the matching command started in a
-terminal. The wait for protected checks and mergeability defaults to two hours;
+The wait for protected checks and mergeability defaults to two hours;
 set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these
 settings with `quorum config` or in the config file.
 

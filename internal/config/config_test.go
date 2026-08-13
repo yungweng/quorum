@@ -164,6 +164,7 @@ func TestRoundTrip(t *testing.T) {
 	want.CacheBudgetGB = 2
 	want.SkipOwn = false
 	want.Notify = false
+	want.NotifyReadyToMerge = true
 	want.ReviewModel = "gpt-5.4-mini"
 	want.ReviewEffort = "low"
 	want.Post = false
@@ -176,9 +177,7 @@ func TestRoundTrip(t *testing.T) {
 	want.BabysitDrafts = true
 	want.ResolveConflicts = false
 	want.AgentAction = ActionBabysit
-	want.AutoMergeAgent = true
-	want.AutoMergeReview = true
-	want.AutoMergeBabysit = true
+	want.AutoMerge = true
 	want.AutoMergeTimeout = 90 * time.Minute
 	want.AutoMergeAuthors = []string{"example-user", "trusted-bot[bot]"}
 	want.Unknown = map[string]string{"FUTURE_KEY": "keep me"}
@@ -236,6 +235,39 @@ func TestRetiredReviewArgsMapsDryRunAndIsNotRewritten(t *testing.T) {
 
 // Every review runs all of its passes at once, so the peak is simply the
 // product. Nothing divides the passes between reviews any more.
+// The three per-source auto-merge keys collapsed into one AUTO_MERGE. The old
+// agent key migrates, the other two are read no more and vanish on rewrite.
+func TestRetiredPerSourceAutoMergeKeysMigrateFromAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	legacy := "AUTO_MERGE_AGENT=1\nAUTO_MERGE_REVIEW=0\nAUTO_MERGE_BABYSIT=1\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AutoMerge {
+		t.Fatal("AUTO_MERGE_AGENT=1 did not migrate to AutoMerge")
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"AUTO_MERGE_AGENT", "AUTO_MERGE_REVIEW", "AUTO_MERGE_BABYSIT"} {
+		if strings.Contains(string(rewritten), key) {
+			t.Errorf("rewritten config still contains %s", key)
+		}
+	}
+	if !strings.Contains(string(rewritten), "AUTO_MERGE=1") {
+		t.Error("rewritten config lost AUTO_MERGE=1")
+	}
+}
+
 func TestCodexPeakIsTheProduct(t *testing.T) {
 	cases := []struct{ maxConcurrent, reviewers, want int }{
 		{6, 6, 36},

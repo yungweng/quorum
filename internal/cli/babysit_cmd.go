@@ -176,7 +176,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	rep.status.Clear()
 	mergeStatus := ""
 	var mergeErr error
-	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMergeBabysit, a.cfg.Post, res.LastFindings) {
+	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMerge, a.cfg.Post, res.LastFindings) {
 		if res.PR.IsDraft {
 			// The auto-merge path refuses drafts outright; a converged draft
 			// run must not turn that refusal into a failure of the whole run.
@@ -191,6 +191,12 @@ func (a *app) cmdBabysit(argv []string) int {
 				err = mergeErr
 			}
 		}
+	}
+
+	if err == nil && res != nil && a.cfg.NotifyReadyToMerge && mergeStatus == "" &&
+		!res.PR.IsDraft && automerge.Eligible(res.LastFindings) {
+		a.notifyReadyToMerge(rep.notify, repo, res.PR.Number, res.PR.URL)
+		rep.readySent = rep.notify
 	}
 
 	a.logRun(babysitHistory(repo, number, started, res, err))
@@ -370,6 +376,9 @@ type loopTermReporter struct {
 	status  *ui.Status
 	notify  bool
 	verbose bool
+	// readySent records that the persistent ready-to-merge notification went
+	// out, so the summary skips its own transient completion notification.
+	readySent bool
 }
 
 func (l *loopTermReporter) Header(h loop.Header) {
@@ -584,7 +593,7 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 			o.Row("auto-merge", o.Yellow(automerge.ApprovalRequired))
 		}
 		o.Rule()
-		if mergeStatus != automerge.ApprovalRequired {
+		if mergeStatus != automerge.ApprovalRequired && !l.readySent {
 			l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
 		}
 	case res.Divergence != nil && res.Divergence.Verdict == loop.DivergenceDiverged:

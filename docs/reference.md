@@ -297,12 +297,11 @@ BABYSIT_DRAFTS=0         # 1 lets quorum babysit work on draft PRs without --dra
 RESOLVE_CONFLICTS=1      # merge the base branch and resolve conflicts before reviewing
 
 AGENT_ACTION="review"    # or "babysit"
-AUTO_MERGE_AGENT=0       # agent runs, whatever AGENT_ACTION selects
-AUTO_MERGE_REVIEW=0      # manual quorum review runs
-AUTO_MERGE_BABYSIT=0     # manual quorum babysit runs
+AUTO_MERGE=0             # one switch for agent, review and babysit runs
 AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
 AUTO_MERGE_AUTHORS=""    # only merge PRs from these logins; empty allows every author
 NOTIFY=1                 # terminal; macOS system alerts need terminal-notifier
+NOTIFY_READY_TO_MERGE=0  # persistent alert per PR whose clean review was not auto-merged
 ```
 
 Durations accept a bare number of seconds or a value like `30m`, `45m`, `2h`.
@@ -313,10 +312,11 @@ Zero disables the timeout it belongs to.
 
 ### Auto-merge
 
-The three `AUTO_MERGE_*` settings are independent and default to `0`. The agent
-uses only `AUTO_MERGE_AGENT`, even when `AGENT_ACTION="babysit"`; `quorum
-review` and `quorum run` use `AUTO_MERGE_REVIEW`, and `quorum babysit` uses
-`AUTO_MERGE_BABYSIT`.
+`AUTO_MERGE` defaults to `0` and is one switch for every source: agent runs,
+`quorum review`, `quorum run` and `quorum babysit`. The retired per-source keys
+are still read for migration: `AUTO_MERGE_AGENT` carries its value over,
+`AUTO_MERGE_REVIEW` and `AUTO_MERGE_BABYSIT` are ignored, and all three are
+removed when the file is rewritten.
 
 `AUTO_MERGE_TIMEOUT` defaults to two hours. Set it above the longest protected
 check or merge queue wait in the repository. A value of `0` waits until the run
@@ -355,6 +355,18 @@ persistent request. An Auto-Merge failure returns exit code 1. An own PR that
 is awaiting approval is a successful review, not an Auto-Merge failure. Agent
 runs record the review request as handled, so a failure after a successful
 review does not spend tokens repeating that review.
+
+### Ready-to-merge notifications
+
+`NOTIFY_READY_TO_MERGE=1` leaves one persistent macOS Notification Center item
+per pull request whose review came back with zero Blockers and zero Critical
+findings but was not merged by quorum, typically because auto-merge is off.
+The notification names `owner/repo#number`; clicking it opens the
+pull request on GitHub. It replaces the routine completion notification for
+that run and stays visible until dismissed, like the `awaiting approval` item.
+It requires `terminal-notifier` and `NOTIFY=1`, obeys `--no-notify`, and never
+fires for a merged PR, a branch-only run, `POST=0`, or `--dry-run`. The
+default is `0`.
 
 ### Keeping the machine usable
 

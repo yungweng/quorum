@@ -484,11 +484,10 @@ func TestDashboardShowsAutoMergeConfiguration(t *testing.T) {
 		t.Fatalf("dashboard did not show the safe default:\n%s", screen)
 	}
 
-	a.cfg.AutoMergeAgent = true
-	a.cfg.AutoMergeBabysit = true
+	a.cfg.AutoMerge = true
 	screen, _ = render(t, a, nil)
-	if !strings.Contains(ui.StripANSI(screen), "auto-merge agent+babysit (repo method)") {
-		t.Fatalf("dashboard did not name the enabled sources:\n%s", screen)
+	if !strings.Contains(ui.StripANSI(screen), "auto-merge on (repo method)") {
+		t.Fatalf("dashboard did not show auto-merge as enabled:\n%s", screen)
 	}
 }
 

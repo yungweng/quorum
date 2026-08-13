@@ -51,31 +51,10 @@ type Runner struct {
 	DirenvBin string
 }
 
-// InvocationSource selects the auto-merge setting for a review run.
-type InvocationSource int
-
-const (
-	// InvocationAgent is a scheduled review started by the launchd agent.
-	InvocationAgent InvocationSource = iota
-	// InvocationManual is an explicit quorum run command.
-	InvocationManual
-)
-
-func (r *Runner) autoMergeEnabled(source InvocationSource) bool {
-	switch source {
-	case InvocationAgent:
-		return r.Cfg.AutoMergeAgent
-	case InvocationManual:
-		return r.Cfg.AutoMergeReview
-	default:
-		return false
-	}
-}
-
 // Review clones or refreshes the repository, reviews the pull request and
 // records the outcome. It runs in the detached child process that owns the
 // marker.
-func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, author, reqAt string, source InvocationSource) error {
+func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, author, reqAt string) error {
 	r.applyPriority()
 
 	clone, err := r.ensureClone(ctx, repo)
@@ -130,7 +109,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 
 	if runErr == nil {
 		mergeStatus := ""
-		if automerge.Allowed(r.autoMergeEnabled(source), r.Cfg.Post, findings) {
+		if automerge.Allowed(r.Cfg.AutoMerge, r.Cfg.Post, findings) {
 			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA, r.Cfg.AutoMergeAuthors)
 			if errors.Is(mergeErr, automerge.ErrMergeNotReady) {
 				r.Log.Printf("%s: waiting for required checks before merge", key)
@@ -174,9 +153,12 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		case automerge.ApprovalRequired:
 			note += "; awaiting approval"
 		}
-		if mergeStatus == automerge.ApprovalRequired {
+		switch {
+		case mergeStatus == automerge.ApprovalRequired:
 			r.notifyApprovalRequired(repo, number)
-		} else {
+		case r.Cfg.NotifyReadyToMerge && mergeStatus == "" && automerge.Eligible(findings):
+			r.notifyReadyToMerge(repo, number)
+		default:
 			r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
 		}
 		return nil
