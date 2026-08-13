@@ -168,6 +168,7 @@ type Result struct {
 	RunDir                  string
 	OutputDir               string
 	CommentFile             string
+	CommentBody             string
 	VerificationChangesFile string
 	CommentURL              string
 	Posted                  bool
@@ -335,9 +336,14 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}), reviewedHead, rep); err != nil {
 		return nil, &RunDirError{RunDir: run.root, Err: err}
 	}
+	commentBody, err := os.ReadFile(run.comment)
+	if err != nil {
+		return nil, fmt.Errorf("reading the verified comment: %w", err)
+	}
 
 	res := &Result{
 		RunDir: run.root, OutputDir: run.output, CommentFile: run.comment,
+		CommentBody:             string(commentBody),
 		VerificationChangesFile: run.changes,
 		BaseDriftNote:           driftNote,
 	}
