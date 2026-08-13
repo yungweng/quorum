@@ -24,384 +24,420 @@ type setting struct {
 	edit  func(*app, *bufio.Reader, *config.Config) error
 }
 
-func (a *app) settings() []setting {
-	return []setting{
-		{"scope", func(c config.Config) string {
-			switch {
-			case len(c.Repos) > 0:
-				return strings.Join(c.Repos, " ")
-			case len(c.Orgs) > 0:
-				return strings.Join(c.Orgs, " ")
-			}
-			return "every repository that asks you"
-		}, (*app).editScope},
+// settingGroup is one titled section of the config screen.
+type settingGroup struct {
+	title string
+	items []setting
+}
 
-		{"never review", func(c config.Config) string {
-			return orNone(strings.Join(c.ExcludeRepos, " "))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "repositories to never review, as owner/name", strings.Join(c.ExcludeRepos, " "))
-			if err != nil {
-				return err
-			}
-			c.ExcludeRepos = fieldsOrNil(v)
-			return nil
-		}},
-
-		{"team requests", func(c config.Config) string {
-			if !c.IncludeTeams {
-				return "ignored, only requests aimed at you directly"
-			}
-			if len(c.Teams) > 0 {
-				return strings.Join(c.Teams, " ")
-			}
-			return "picked up, teams discovered automatically"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Requests aimed at a team you belong to?", c, []option{
-				{"pick them up", "your teams are discovered automatically",
-					func(c *config.Config) { c.IncludeTeams, c.Teams = true, nil },
-					func(c config.Config) bool { return c.IncludeTeams && len(c.Teams) == 0 }},
-				{"pick them up, but only for teams I name", "you will be asked which", nil,
-					func(c config.Config) bool { return c.IncludeTeams && len(c.Teams) > 0 }},
-				{"ignore them", "only requests aimed at you personally",
-					func(c *config.Config) { c.IncludeTeams = false },
-					func(c config.Config) bool { return !c.IncludeTeams }},
-			}, func(choice int) error {
-				if choice != 1 {
-					return nil
+func (a *app) settingGroups() []settingGroup {
+	return []settingGroup{
+		{"agent", []setting{
+			{"scope", func(c config.Config) string {
+				switch {
+				case len(c.Repos) > 0:
+					return strings.Join(c.Repos, " ")
+				case len(c.Orgs) > 0:
+					return strings.Join(c.Orgs, " ")
 				}
-				v, err := a.askText(in, "teams as org/slug", strings.Join(c.Teams, " "))
+				return "every repository that asks you"
+			}, (*app).editScope},
+
+			{"never review", func(c config.Config) string {
+				return orNone(strings.Join(c.ExcludeRepos, " "))
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, "repositories to never review, as owner/name", strings.Join(c.ExcludeRepos, " "))
 				if err != nil {
 					return err
 				}
-				c.IncludeTeams, c.Teams = true, fieldsOrNil(v)
+				c.ExcludeRepos = fieldsOrNil(v)
 				return nil
-			})
-		}},
+			}},
 
-		{"reviews at once", func(c config.Config) string {
-			return fmt.Sprintf("%d", c.MaxConcurrent)
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.editNumber(in, "how many reviews may run at the same time", c.MaxConcurrent, 1, 20, &c.MaxConcurrent)
-		}},
-
-		{"reviewers each", func(c config.Config) string {
-			return fmt.Sprintf("%d, all in parallel, so up to %d Codex processes at peak",
-				c.Reviewers, c.Codex())
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.editNumber(in, "how many reviewer passes per review", c.Reviewers, 1, 12, &c.Reviewers)
-		}},
-
-		{"poll interval", func(c config.Config) string {
-			return fmt.Sprintf("every %s", ui.Duration(secs(c.PollInterval)))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "How often should quorum look for new requests?", c, []option{
-				{"every 2 minutes", "picks things up quickly",
-					func(c *config.Config) { c.PollInterval = 120 },
-					func(c config.Config) bool { return c.PollInterval <= 120 }},
-				{"every 5 minutes", "the default",
-					func(c *config.Config) { c.PollInterval = 300 },
-					func(c config.Config) bool { return c.PollInterval > 120 && c.PollInterval <= 300 }},
-				{"every 15 minutes", "quietest",
-					func(c *config.Config) { c.PollInterval = 900 },
-					func(c config.Config) bool { return c.PollInterval > 300 }},
-			}, nil)
-		}},
-
-		{"attempts", func(c config.Config) string {
-			return fmt.Sprintf("%d before quorum gives up on a request", c.MaxRetries)
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.editNumber(in, "attempts per request before giving up", c.MaxRetries, 1, 10, &c.MaxRetries)
-		}},
-
-		{"priority", func(c config.Config) string {
-			if c.Nice <= 0 {
-				return "normal, reviews compete with your own work"
-			}
-			return fmt.Sprintf("nice %d, reviews give way to your own work", c.Nice)
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "What priority should reviews run at?", c, []option{
-				{"below your own work", "nice 10",
-					func(c *config.Config) { c.Nice = 10 },
-					func(c config.Config) bool { return c.Nice > 0 }},
-				{"normal", "reviews compete with everything else",
-					func(c *config.Config) { c.Nice = 0 },
-					func(c config.Config) bool { return c.Nice <= 0 }},
-			}, nil)
-		}},
-
-		{"load limit", func(c config.Config) string {
-			if c.LoadLimit <= 0 {
-				return "off, reviews start whenever they are requested"
-			}
-			return fmt.Sprintf("hold new reviews back above a 1-minute load of %.0f", c.LoadLimit)
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Hold reviews back while the machine is busy?", c, []option{
-				{"no", "a requested review starts, whatever else is going on",
-					func(c *config.Config) { c.LoadLimit = 0 },
-					func(c config.Config) bool { return c.LoadLimit <= 0 }},
-				{"yes, above a load I name", "they wait in the queue and start on a later poll", nil,
-					func(c config.Config) bool { return c.LoadLimit > 0 }},
-			}, func(choice int) error {
-				if choice != 1 {
-					return nil
+			{"team requests", func(c config.Config) string {
+				if !c.IncludeTeams {
+					return "ignored, only requests aimed at you directly"
 				}
-				v, err := a.askText(in, "hold back above this 1-minute load", trimNum(c.LoadLimit))
+				if len(c.Teams) > 0 {
+					return strings.Join(c.Teams, " ")
+				}
+				return "picked up, teams discovered automatically"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Requests aimed at a team you belong to?", c, []option{
+					{"pick them up", "your teams are discovered automatically",
+						func(c *config.Config) { c.IncludeTeams, c.Teams = true, nil },
+						func(c config.Config) bool { return c.IncludeTeams && len(c.Teams) == 0 }},
+					{"pick them up, but only for teams I name", "you will be asked which", nil,
+						func(c config.Config) bool { return c.IncludeTeams && len(c.Teams) > 0 }},
+					{"ignore them", "only requests aimed at you personally",
+						func(c *config.Config) { c.IncludeTeams = false },
+						func(c config.Config) bool { return !c.IncludeTeams }},
+				}, func(choice int) error {
+					if choice != 1 {
+						return nil
+					}
+					v, err := a.askText(in, "teams as org/slug", strings.Join(c.Teams, " "))
+					if err != nil {
+						return err
+					}
+					c.IncludeTeams, c.Teams = true, fieldsOrNil(v)
+					return nil
+				})
+			}},
+
+			{"drafts", skipLabel(func(c config.Config) bool { return c.SkipDrafts }),
+				skipEdit("Review draft pull requests?", func(c *config.Config, v bool) { c.SkipDrafts = v },
+					func(c config.Config) bool { return c.SkipDrafts })},
+
+			{"fork PRs", skipLabel(func(c config.Config) bool { return c.SkipForks }),
+				skipEdit("Review pull requests from forks? They run their own code on this machine.",
+					func(c *config.Config, v bool) { c.SkipForks = v },
+					func(c config.Config) bool { return c.SkipForks })},
+
+			{"bot PRs", skipLabel(func(c config.Config) bool { return c.SkipBots }),
+				skipEdit("Review pull requests opened by a bot?",
+					func(c *config.Config, v bool) { c.SkipBots = v },
+					func(c config.Config) bool { return c.SkipBots })},
+
+			{"your own PRs", skipLabel(func(c config.Config) bool { return c.SkipOwn }),
+				skipEdit("Review your own pull requests?",
+					func(c *config.Config, v bool) { c.SkipOwn = v },
+					func(c config.Config) bool { return c.SkipOwn })},
+		}},
+
+		{"resources", []setting{
+			{"poll interval", func(c config.Config) string {
+				return fmt.Sprintf("every %s", ui.Duration(secs(c.PollInterval)))
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "How often should quorum look for new requests?", c, []option{
+					{"every 2 minutes", "picks things up quickly",
+						func(c *config.Config) { c.PollInterval = 120 },
+						func(c config.Config) bool { return c.PollInterval <= 120 }},
+					{"every 5 minutes", "the default",
+						func(c *config.Config) { c.PollInterval = 300 },
+						func(c config.Config) bool { return c.PollInterval > 120 && c.PollInterval <= 300 }},
+					{"every 15 minutes", "quietest",
+						func(c *config.Config) { c.PollInterval = 900 },
+						func(c config.Config) bool { return c.PollInterval > 300 }},
+				}, nil)
+			}},
+
+			{"attempts", func(c config.Config) string {
+				return fmt.Sprintf("%d before quorum gives up on a request", c.MaxRetries)
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.editNumber(in, "attempts per request before giving up", c.MaxRetries, 1, 10, &c.MaxRetries)
+			}},
+
+			{"reviews at once", func(c config.Config) string {
+				return fmt.Sprintf("%d", c.MaxConcurrent)
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.editNumber(in, "how many reviews may run at the same time", c.MaxConcurrent, 1, 20, &c.MaxConcurrent)
+			}},
+
+			{"reviewers each", func(c config.Config) string {
+				return fmt.Sprintf("%d, all in parallel, so up to %d Codex processes at peak",
+					c.Reviewers, c.Codex())
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.editNumber(in, "how many reviewer passes per review", c.Reviewers, 1, 12, &c.Reviewers)
+			}},
+
+			{"priority", func(c config.Config) string {
+				if c.Nice <= 0 {
+					return "normal, reviews compete with your own work"
+				}
+				return fmt.Sprintf("nice %d, reviews give way to your own work", c.Nice)
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "What priority should reviews run at?", c, []option{
+					{"below your own work", "nice 10",
+						func(c *config.Config) { c.Nice = 10 },
+						func(c config.Config) bool { return c.Nice > 0 }},
+					{"normal", "reviews compete with everything else",
+						func(c *config.Config) { c.Nice = 0 },
+						func(c config.Config) bool { return c.Nice <= 0 }},
+				}, nil)
+			}},
+
+			{"load limit", func(c config.Config) string {
+				if c.LoadLimit <= 0 {
+					return "off, reviews start whenever they are requested"
+				}
+				return fmt.Sprintf("hold new reviews back above a 1-minute load of %.0f", c.LoadLimit)
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Hold reviews back while the machine is busy?", c, []option{
+					{"no", "a requested review starts, whatever else is going on",
+						func(c *config.Config) { c.LoadLimit = 0 },
+						func(c config.Config) bool { return c.LoadLimit <= 0 }},
+					{"yes, above a load I name", "they wait in the queue and start on a later poll", nil,
+						func(c config.Config) bool { return c.LoadLimit > 0 }},
+				}, func(choice int) error {
+					if choice != 1 {
+						return nil
+					}
+					v, err := a.askText(in, "hold back above this 1-minute load", trimNum(c.LoadLimit))
+					if err != nil {
+						return err
+					}
+					if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 {
+						c.LoadLimit = f
+					}
+					return nil
+				})
+			}},
+
+			{"cache budget", func(c config.Config) string {
+				if c.CacheBudgetGB <= 0 {
+					return "off, the cache is never trimmed"
+				}
+				return fmt.Sprintf("%s GB across runs and dependency trees", trimNum(c.CacheBudgetGB))
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, "cache budget in GB, 0 turns it off", trimNum(c.CacheBudgetGB))
 				if err != nil {
 					return err
 				}
-				if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f > 0 {
-					c.LoadLimit = f
+				if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f >= 0 {
+					c.CacheBudgetGB = f
 				}
 				return nil
-			})
+			}},
 		}},
 
-		{"cache budget", func(c config.Config) string {
-			if c.CacheBudgetGB <= 0 {
-				return "off, the cache is never trimmed"
-			}
-			return fmt.Sprintf("%s GB across runs and dependency trees", trimNum(c.CacheBudgetGB))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "cache budget in GB, 0 turns it off", trimNum(c.CacheBudgetGB))
-			if err != nil {
-				return err
-			}
-			if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && f >= 0 {
-				c.CacheBudgetGB = f
-			}
-			return nil
+		{"review", []setting{
+			{"review engine", func(c config.Config) string {
+				return engineDesc(c.ReviewEngine)
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Which engine runs the reviewers, aggregator and verifier? (switching resets model and effort to the engine's default)", c,
+					engineOptions(
+						func(c *config.Config) *string { return &c.ReviewEngine },
+						func(c *config.Config) *string { return &c.ReviewModel },
+						func(c *config.Config) *string { return &c.ReviewEffort },
+					), nil)
+			}},
+
+			{"review model", reviewModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, fmt.Sprintf(
+					"model for the reviewers, aggregator and verifier: %s (enter keeps, - resets to the engine's default)",
+					modelHint(c.ReviewEngine)), c.ReviewModel)
+				if err != nil {
+					return err
+				}
+				c.ReviewModel = clearable(v)
+				return a.pick(in, "How hard should the reviewers think?", c, defaultEffortOptions(
+					c.ReviewEngine, func(c *config.Config) *string { return &c.ReviewEffort }), nil)
+			}},
+
+			{"posting", func(c config.Config) string {
+				if !c.Post {
+					return "kept local, nothing is posted to GitHub"
+				}
+				return "posted as a comment on the pull request"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Should reviews be posted to GitHub?", c, []option{
+					{"post them", "a comment on the pull request",
+						func(c *config.Config) { c.Post = true },
+						func(c config.Config) bool { return c.Post }},
+					{"keep them local", "findings stay in the run directory",
+						func(c *config.Config) { c.Post = false },
+						func(c config.Config) bool { return !c.Post }},
+				}, nil)
+			}},
+
+			{"notifications", func(c config.Config) string {
+				if c.Notify {
+					return "when a review finishes or fails"
+				}
+				return "off"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Notifications?", c, []option{
+					{"when a review finishes or fails", "click to open the posted comment",
+						func(c *config.Config) { c.Notify = true },
+						func(c config.Config) bool { return c.Notify }},
+					{"none", "check with: quorum",
+						func(c *config.Config) { c.Notify = false },
+						func(c config.Config) bool { return !c.Notify }},
+				}, nil)
+			}},
 		}},
 
-		{"drafts", skipLabel(func(c config.Config) bool { return c.SkipDrafts }),
-			skipEdit("Review draft pull requests?", func(c *config.Config, v bool) { c.SkipDrafts = v },
-				func(c config.Config) bool { return c.SkipDrafts })},
+		{"auto-merge", []setting{
+			{"agent does", func(c config.Config) string {
+				if c.AgentAction == config.ActionBabysit {
+					return "the full fix loop: review, fix, CI, repeat"
+				}
+				return "one review, posted as a comment"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "What should the agent do with a PR that asks for your review?", c, []option{
+					{"review it", "post one review and stop",
+						func(c *config.Config) { c.AgentAction = config.ActionReview },
+						func(c config.Config) bool { return c.AgentAction != config.ActionBabysit }},
+					{"babysit it", "review, fix the findings, wait for CI, repeat until clean",
+						func(c *config.Config) { c.AgentAction = config.ActionBabysit },
+						func(c config.Config) bool { return c.AgentAction == config.ActionBabysit }},
+				}, nil)
+			}},
 
-		{"fork PRs", skipLabel(func(c config.Config) bool { return c.SkipForks }),
-			skipEdit("Review pull requests from forks? They run their own code on this machine.",
-				func(c *config.Config, v bool) { c.SkipForks = v },
-				func(c config.Config) bool { return c.SkipForks })},
+			autoMergeSetting("agent auto-merge", "Auto-merge after an agent run?",
+				func(c config.Config) bool { return c.AutoMergeAgent },
+				func(c *config.Config, v bool) { c.AutoMergeAgent = v }),
 
-		{"bot PRs", skipLabel(func(c config.Config) bool { return c.SkipBots }),
-			skipEdit("Review pull requests opened by a bot?",
-				func(c *config.Config, v bool) { c.SkipBots = v },
-				func(c config.Config) bool { return c.SkipBots })},
+			autoMergeSetting("review auto-merge", "Auto-merge after a manual quorum review?",
+				func(c config.Config) bool { return c.AutoMergeReview },
+				func(c *config.Config, v bool) { c.AutoMergeReview = v }),
 
-		{"your own PRs", skipLabel(func(c config.Config) bool { return c.SkipOwn }),
-			skipEdit("Review your own pull requests?",
-				func(c *config.Config, v bool) { c.SkipOwn = v },
-				func(c config.Config) bool { return c.SkipOwn })},
+			autoMergeSetting("babysit auto-merge", "Auto-merge after a manual quorum babysit?",
+				func(c config.Config) bool { return c.AutoMergeBabysit },
+				func(c *config.Config, v bool) { c.AutoMergeBabysit = v }),
 
-		{"notifications", func(c config.Config) string {
-			if c.Notify {
-				return "when a review finishes or fails"
-			}
-			return "off"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Notifications?", c, []option{
-				{"when a review finishes or fails", "click to open the posted comment",
-					func(c *config.Config) { c.Notify = true },
-					func(c config.Config) bool { return c.Notify }},
-				{"none", "check with: quorum",
-					func(c *config.Config) { c.Notify = false },
-					func(c config.Config) bool { return !c.Notify }},
-			}, nil)
+			{"auto-merge wait", func(c config.Config) string {
+				if c.AutoMergeTimeout == 0 {
+					return "no limit; waits until the run is stopped"
+				}
+				return config.FormatDuration(c.AutoMergeTimeout) + " for checks and mergeability"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, "how long to wait for checks and mergeability; 0 means no limit",
+					config.FormatDuration(c.AutoMergeTimeout))
+				if err != nil {
+					return err
+				}
+				if d, err := config.ParseDuration(v); err == nil {
+					c.AutoMergeTimeout = d
+				}
+				return nil
+			}},
+
+			{"auto-merge authors", func(c config.Config) string {
+				if len(c.AutoMergeAuthors) == 0 {
+					return "every author with a clean review"
+				}
+				return "only " + strings.Join(c.AutoMergeAuthors, " ")
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, "GitHub logins whose PRs may be auto-merged; empty allows every author",
+					strings.Join(c.AutoMergeAuthors, " "))
+				if err != nil {
+					return err
+				}
+				c.AutoMergeAuthors = fieldsOrNil(v)
+				return nil
+			}},
 		}},
 
-		{"posting", func(c config.Config) string {
-			if !c.Post {
-				return "kept local, nothing is posted to GitHub"
-			}
-			return "posted as a comment on the pull request"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Should reviews be posted to GitHub?", c, []option{
-				{"post them", "a comment on the pull request",
-					func(c *config.Config) { c.Post = true },
-					func(c config.Config) bool { return c.Post }},
-				{"keep them local", "findings stay in the run directory",
-					func(c *config.Config) { c.Post = false },
-					func(c config.Config) bool { return !c.Post }},
-			}, nil)
-		}},
+		{"babysit", []setting{
+			{"fix engine", func(c config.Config) string {
+				return engineDesc(c.FixEngine)
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Which engine runs the fix sessions? (switching resets model and effort to the engine's default)", c,
+					engineOptions(
+						func(c *config.Config) *string { return &c.FixEngine },
+						func(c *config.Config) *string { return &c.FixModel },
+						func(c *config.Config) *string { return &c.FixEffort },
+					), nil)
+			}},
 
-		{"review engine", func(c config.Config) string {
-			return engineDesc(c.ReviewEngine)
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Which engine runs the reviewers, aggregator and verifier? (switching resets model and effort to the engine's default)", c,
-				engineOptions(
-					func(c *config.Config) *string { return &c.ReviewEngine },
-					func(c *config.Config) *string { return &c.ReviewModel },
-					func(c *config.Config) *string { return &c.ReviewEffort },
-				), nil)
-		}},
+			{"fix model", fixModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, fmt.Sprintf(
+					"model for the fix sessions: %s (enter keeps, - resets to the engine's default)",
+					modelHint(c.FixEngine)), c.FixModel)
+				if err != nil {
+					return err
+				}
+				c.FixModel = clearable(v)
+				return a.pick(in, "How hard should the fix sessions think?", c, defaultEffortOptions(
+					c.FixEngine, func(c *config.Config) *string { return &c.FixEffort }), nil)
+			}},
 
-		{"review model", reviewModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, fmt.Sprintf(
-				"model for the reviewers, aggregator and verifier: %s (enter keeps, - resets to the engine's default)",
-				modelHint(c.ReviewEngine)), c.ReviewModel)
-			if err != nil {
-				return err
-			}
-			c.ReviewModel = clearable(v)
-			return a.pick(in, "How hard should the reviewers think?", c, defaultEffortOptions(
-				c.ReviewEngine, func(c *config.Config) *string { return &c.ReviewEffort }), nil)
-		}},
+			{"fix sessions", func(c config.Config) string {
+				return fmt.Sprintf("up to %d rounds, %s per step", c.MaxIter, config.FormatDuration(c.FixTimeout))
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				n, err := a.askText(in, "maximum review to fix rounds", fmt.Sprint(c.MaxIter))
+				if err != nil {
+					return err
+				}
+				if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && i >= 1 {
+					c.MaxIter = i
+				}
+				return nil
+			}},
 
-		{"agent does", func(c config.Config) string {
-			if c.AgentAction == config.ActionBabysit {
-				return "the full fix loop: review, fix, CI, repeat"
-			}
-			return "one review, posted as a comment"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "What should the agent do with a PR that asks for your review?", c, []option{
-				{"review it", "post one review and stop",
-					func(c *config.Config) { c.AgentAction = config.ActionReview },
-					func(c config.Config) bool { return c.AgentAction != config.ActionBabysit }},
-				{"babysit it", "review, fix the findings, wait for CI, repeat until clean",
-					func(c *config.Config) { c.AgentAction = config.ActionBabysit },
-					func(c config.Config) bool { return c.AgentAction == config.ActionBabysit }},
-			}, nil)
-		}},
+			{"draft babysit", func(c config.Config) string {
+				if c.BabysitDrafts {
+					return "quorum babysit works on drafts without --draft"
+				}
+				return "drafts need an explicit --draft"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Let quorum babysit work on draft pull requests?", c, []option{
+					{"only with --draft", "each run has to say so",
+						func(c *config.Config) { c.BabysitDrafts = false },
+						func(c config.Config) bool { return !c.BabysitDrafts }},
+					{"always", "drafts are handled like ready PRs",
+						func(c *config.Config) { c.BabysitDrafts = true },
+						func(c config.Config) bool { return c.BabysitDrafts }},
+				}, nil)
+			}},
 
-		autoMergeSetting("agent auto-merge", "Auto-merge after an agent run?",
-			func(c config.Config) bool { return c.AutoMergeAgent },
-			func(c *config.Config, v bool) { c.AutoMergeAgent = v }),
+			{"conflict resolution", func(c config.Config) string {
+				if c.ResolveConflicts {
+					return "merge the base branch and resolve conflicts before reviewing"
+				}
+				return "off, conflicted branches stop the run"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Resolve merge conflicts with the base branch during babysit?", c, []option{
+					{"resolve them", "merge the base, fix the conflicts, then review",
+						func(c *config.Config) { c.ResolveConflicts = true },
+						func(c config.Config) bool { return c.ResolveConflicts }},
+					{"off", "leave conflicted branches to a human",
+						func(c *config.Config) { c.ResolveConflicts = false },
+						func(c config.Config) bool { return !c.ResolveConflicts }},
+				}, nil)
+			}},
 
-		autoMergeSetting("review auto-merge", "Auto-merge after a manual quorum review?",
-			func(c config.Config) bool { return c.AutoMergeReview },
-			func(c *config.Config, v bool) { c.AutoMergeReview = v }),
+			{"divergence scan", func(c config.Config) string {
+				if c.DivergenceScan {
+					return "analyze the review/fix history after the round limit"
+				}
+				return "off"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "Analyze the review/fix history after the round limit?", c, []option{
+					{"off", "stop with the existing not-converged result",
+						func(c *config.Config) { c.DivergenceScan = false },
+						func(c config.Config) bool { return !c.DivergenceScan }},
+					{"on", "write and post a report, then stop",
+						func(c *config.Config) { c.DivergenceScan = true },
+						func(c config.Config) bool { return c.DivergenceScan }},
+				}, nil)
+			}},
 
-		autoMergeSetting("babysit auto-merge", "Auto-merge after a manual quorum babysit?",
-			func(c config.Config) bool { return c.AutoMergeBabysit },
-			func(c *config.Config, v bool) { c.AutoMergeBabysit = v }),
-
-		{"auto-merge wait", func(c config.Config) string {
-			if c.AutoMergeTimeout == 0 {
-				return "no limit; waits until the run is stopped"
-			}
-			return config.FormatDuration(c.AutoMergeTimeout) + " for checks and mergeability"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "how long to wait for checks and mergeability; 0 means no limit",
-				config.FormatDuration(c.AutoMergeTimeout))
-			if err != nil {
-				return err
-			}
-			if d, err := config.ParseDuration(v); err == nil {
-				c.AutoMergeTimeout = d
-			}
-			return nil
-		}},
-
-		{"auto-merge authors", func(c config.Config) string {
-			if len(c.AutoMergeAuthors) == 0 {
-				return "every author with a clean review"
-			}
-			return "only " + strings.Join(c.AutoMergeAuthors, " ")
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "GitHub logins whose PRs may be auto-merged; empty allows every author",
-				strings.Join(c.AutoMergeAuthors, " "))
-			if err != nil {
-				return err
-			}
-			c.AutoMergeAuthors = fieldsOrNil(v)
-			return nil
-		}},
-
-		{"fix engine", func(c config.Config) string {
-			return engineDesc(c.FixEngine)
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Which engine runs the fix sessions? (switching resets model and effort to the engine's default)", c,
-				engineOptions(
-					func(c *config.Config) *string { return &c.FixEngine },
-					func(c *config.Config) *string { return &c.FixModel },
-					func(c *config.Config) *string { return &c.FixEffort },
-				), nil)
-		}},
-
-		{"fix model", fixModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, fmt.Sprintf(
-				"model for the fix sessions: %s (enter keeps, - resets to the engine's default)",
-				modelHint(c.FixEngine)), c.FixModel)
-			if err != nil {
-				return err
-			}
-			c.FixModel = clearable(v)
-			return a.pick(in, "How hard should the fix sessions think?", c, defaultEffortOptions(
-				c.FixEngine, func(c *config.Config) *string { return &c.FixEffort }), nil)
-		}},
-
-		{"fix sessions", func(c config.Config) string {
-			return fmt.Sprintf("up to %d rounds, %s per step", c.MaxIter, config.FormatDuration(c.FixTimeout))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			n, err := a.askText(in, "maximum review to fix rounds", fmt.Sprint(c.MaxIter))
-			if err != nil {
-				return err
-			}
-			if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && i >= 1 {
-				c.MaxIter = i
-			}
-			return nil
-		}},
-
-		{"draft babysit", func(c config.Config) string {
-			if c.BabysitDrafts {
-				return "quorum babysit works on drafts without --draft"
-			}
-			return "drafts need an explicit --draft"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Let quorum babysit work on draft pull requests?", c, []option{
-				{"only with --draft", "each run has to say so",
-					func(c *config.Config) { c.BabysitDrafts = false },
-					func(c config.Config) bool { return !c.BabysitDrafts }},
-				{"always", "drafts are handled like ready PRs",
-					func(c *config.Config) { c.BabysitDrafts = true },
-					func(c config.Config) bool { return c.BabysitDrafts }},
-			}, nil)
-		}},
-
-		{"conflict resolution", func(c config.Config) string {
-			if c.ResolveConflicts {
-				return "merge the base branch and resolve conflicts before reviewing"
-			}
-			return "off, conflicted branches stop the run"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Resolve merge conflicts with the base branch during babysit?", c, []option{
-				{"resolve them", "merge the base, fix the conflicts, then review",
-					func(c *config.Config) { c.ResolveConflicts = true },
-					func(c config.Config) bool { return c.ResolveConflicts }},
-				{"off", "leave conflicted branches to a human",
-					func(c *config.Config) { c.ResolveConflicts = false },
-					func(c config.Config) bool { return !c.ResolveConflicts }},
-			}, nil)
-		}},
-
-		{"divergence scan", func(c config.Config) string {
-			if c.DivergenceScan {
-				return "analyze the review/fix history after the round limit"
-			}
-			return "off"
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			return a.pick(in, "Analyze the review/fix history after the round limit?", c, []option{
-				{"off", "stop with the existing not-converged result",
-					func(c *config.Config) { c.DivergenceScan = false },
-					func(c config.Config) bool { return !c.DivergenceScan }},
-				{"on", "write and post a report, then stop",
-					func(c *config.Config) { c.DivergenceScan = true },
-					func(c config.Config) bool { return c.DivergenceScan }},
-			}, nil)
-		}},
-
-		{"divergence escalation", func(c config.Config) string {
-			return orNone(strings.Join(c.DivergenceEscalateTo, " "))
-		}, func(a *app, in *bufio.Reader, c *config.Config) error {
-			v, err := a.askText(in, "users or org/team slugs to mention on divergence, without @",
-				strings.Join(c.DivergenceEscalateTo, " "))
-			if err != nil {
-				return err
-			}
-			c.DivergenceEscalateTo = fieldsOrNil(v)
-			return nil
+			{"divergence escalation", func(c config.Config) string {
+				return orNone(strings.Join(c.DivergenceEscalateTo, " "))
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				v, err := a.askText(in, "users or org/team slugs to mention on divergence, without @",
+					strings.Join(c.DivergenceEscalateTo, " "))
+				if err != nil {
+					return err
+				}
+				c.DivergenceEscalateTo = fieldsOrNil(v)
+				return nil
+			}},
 		}},
 	}
+}
+
+// settings is the flat row list the cursor walks and the tests index.
+func (a *app) settings() []setting {
+	var out []setting
+	for _, g := range a.settingGroups() {
+		out = append(out, g.items...)
+	}
+	return out
+}
+
+// settingNameWidth is the name column, sized by the longest row name.
+func settingNameWidth(groups []settingGroup) int {
+	w := 0
+	for _, g := range groups {
+		for _, s := range g.items {
+			w = max(w, ui.Cells(s.name))
+		}
+	}
+	return w
 }
 
 func autoMergeSetting(name, title string, enabled func(config.Config) bool, set func(*config.Config, bool)) setting {
@@ -444,9 +480,14 @@ func (a *app) cmdConfig(args []string) int {
 
 func (a *app) printSettings() {
 	w := a.out
+	groups := a.settingGroups()
+	width := settingNameWidth(groups)
 	w.Printf("%s\n", a.p.Config)
-	for _, s := range a.settings() {
-		w.Printf("  %s %s\n", ui.Pad(s.name, 16), s.value(a.cfg))
+	for _, g := range groups {
+		w.Printf("\n%s\n", w.Dim(g.title))
+		for _, s := range g.items {
+			w.Printf("  %s %s\n", ui.Pad(s.name, width), s.value(a.cfg))
+		}
 	}
 }
 
@@ -456,19 +497,32 @@ func (a *app) settingsMenu() int {
 	w := a.out
 	in := bufio.NewReader(os.Stdin)
 	cfg := a.cfg
+	groups := a.settingGroups()
 	items := a.settings()
+	width := settingNameWidth(groups)
 	cursor, dirty := 0, false
+	// The rows, a title per group, a blank line between groups, and the
+	// blank plus state line at the bottom.
+	total := len(items) + 2*len(groups) + 1
 
 	draw := func(first bool) {
 		if !first {
-			fmt.Fprintf(w.Out, "\x1b[%dA", len(items)+2)
+			fmt.Fprintf(w.Out, "\x1b[%dA", total)
 		}
-		for i, s := range items {
-			pointer, name := "  ", ui.Pad(s.name, 16)
-			if i == cursor {
-				pointer, name = w.Cyan("› "), w.Bold(ui.Pad(s.name, 16))
+		i := 0
+		for gi, g := range groups {
+			if gi > 0 {
+				fmt.Fprintf(w.Out, "\r\x1b[K\r\n")
 			}
-			fmt.Fprintf(w.Out, "\r\x1b[K%s%s %s\r\n", pointer, name, w.Dim(s.value(cfg)))
+			fmt.Fprintf(w.Out, "\r\x1b[K%s\r\n", w.Dim(g.title))
+			for _, s := range g.items {
+				pointer, name := "  ", ui.Pad(s.name, width)
+				if i == cursor {
+					pointer, name = w.Cyan("› "), w.Bold(ui.Pad(s.name, width))
+				}
+				fmt.Fprintf(w.Out, "\r\x1b[K%s%s %s\r\n", pointer, name, w.Dim(s.value(cfg)))
+				i++
+			}
 		}
 		state := a.p.Config
 		if dirty {
