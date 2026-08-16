@@ -49,10 +49,23 @@ func (w *Writer) Row(label, value string) {
 }
 
 // Step prints a section heading with a blank line before it, in the same voice
-// as Section so a babysit run and the dashboard read as one tool.
+// as Section so a babysit run and the dashboard read as one tool. On a
+// terminal a dim rule fills the rest of the line, so the phases of a long run
+// are findable while scrolling; piped output keeps the bare heading.
 func (w *Writer) Step(title string) {
 	fmt.Fprintln(w.Out)
-	fmt.Fprintln(w.Out, w.Bold(strings.ToUpper(title)))
+	head := strings.ToUpper(title)
+	if !w.Color {
+		fmt.Fprintln(w.Out, head)
+		return
+	}
+	fill := w.Cols() - Cells(head) - 1
+	if fill > 0 {
+		head = w.Bold(head) + " " + w.Dim(strings.Repeat("─", fill))
+	} else {
+		head = w.Bold(head)
+	}
+	fmt.Fprintln(w.Out, head)
 }
 
 // Status is the single transient line at the bottom of the output, redrawn in

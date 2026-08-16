@@ -250,7 +250,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 
 	rep.Header(RunHeader{
-		Repo: o.Repo, Number: pr.Number, Title: pr.Title, Author: pr.Author.Login,
+		Repo: o.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL, Author: pr.Author.Login,
 		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 		BaseRef: baseRef, BaseSHA: pr.BaseRefOid, HeadSHA: pr.HeadRefOid,
 		Draft: pr.IsDraft, Runs: o.Runs, Concurrency: o.Concurrency,

@@ -129,7 +129,17 @@ func (l *loopLogReporter) RoundResult(round int, f review.Findings, clean bool) 
 	l.printf("review round %d: %s (%s)", round, f.Summary(), verdict)
 }
 
-func (l *loopLogReporter) CIGreen() { l.printf("CI green") }
+// CIWait logs only the start of a wait: the per-second ticks exist to animate
+// a terminal status line and would fill a log with identical lines.
+func (l *loopLogReporter) CIWait(pr int, elapsed time.Duration) {
+	if elapsed == 0 {
+		l.printf("waiting for CI on PR #%d...", pr)
+	}
+}
+
+func (l *loopLogReporter) CIGreen(elapsed time.Duration) {
+	l.printf("CI green after %s", elapsed.Round(time.Second))
+}
 func (l *loopLogReporter) CIRed(attempt, max int) {
 	l.printf("CI red; fix attempt %d/%d", attempt, max)
 }

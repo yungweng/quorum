@@ -377,3 +377,44 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 		})
 	}
 }
+
+// A finished review round used to print twice: once as a step line with model
+// and duration, once as a result line with the counts. The step facts are held
+// back and merged into the result, so the round is one line.
+func TestReviewRoundStepAndResultMergeIntoOneLine(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"}
+
+	rep.StepEnd("Review round 1", model, 6*time.Minute, true)
+	if out.Len() != 0 {
+		t.Fatalf("the review-round step printed before its result:\n%s", out.String())
+	}
+	rep.RoundResult(1, review.Findings{Critical: 1}, false)
+
+	got := out.String()
+	if want := "Review round 1 · gpt-5.6-terra/medium · 6m · 1 critical"; !strings.Contains(got, want) {
+		t.Errorf("merged round line is missing %q:\n%s", want, got)
+	}
+	if strings.Count(got, "Review round 1") != 1 {
+		t.Errorf("the round printed more than once:\n%s", got)
+	}
+}
+
+// A held round line whose RoundResult never arrives (the run failed in
+// between) must still reach the terminal with the next output.
+func TestPendingReviewRoundLineIsFlushedByLaterOutput(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"}
+
+	rep.StepEnd("Review round 3", model, time.Minute, true)
+	rep.Info("the review is for another head")
+
+	got := out.String()
+	if !strings.Contains(got, "Review round 3 · gpt-5.6-terra/medium · 1m") {
+		t.Errorf("the held round line was lost:\n%s", got)
+	}
+}

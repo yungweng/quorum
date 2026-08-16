@@ -13,6 +13,7 @@ type Header struct {
 	Repo           string
 	Number         int
 	Title          string
+	URL            string
 	Branch         string
 	Base           string
 	BranchOnly     bool
@@ -52,7 +53,11 @@ type Reporter interface {
 	StepTick(label string, m engine.Model, elapsed time.Duration)
 	StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool)
 	RoundResult(round int, f review.Findings, clean bool)
-	CIGreen()
+	// CIWait is called once when a CI wait starts, with elapsed zero, and then
+	// about once a second while it lasts. CIGreen carries how long that wait
+	// took, which is often half a run's wall clock and otherwise invisible.
+	CIWait(pr int, elapsed time.Duration)
+	CIGreen(elapsed time.Duration)
 	CIRed(attempt, max int)
 	Info(string)
 	Warn(string)
@@ -75,7 +80,8 @@ func (NopReporter) StepStart(string, engine.Model)                    {}
 func (NopReporter) StepTick(string, engine.Model, time.Duration)      {}
 func (NopReporter) StepEnd(string, engine.Model, time.Duration, bool) {}
 func (NopReporter) RoundResult(int, review.Findings, bool)            {}
-func (NopReporter) CIGreen()                                          {}
+func (NopReporter) CIWait(int, time.Duration)                         {}
+func (NopReporter) CIGreen(time.Duration)                             {}
 func (NopReporter) CIRed(int, int)                                    {}
 func (NopReporter) Info(string)                                       {}
 func (NopReporter) Warn(string)                                       {}

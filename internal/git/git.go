@@ -140,9 +140,12 @@ func (g G) CleanUntracked(ctx context.Context, dir string) error {
 	return err
 }
 
-// LogOneline lists the commits in a range, one per line.
+// LogOneline lists the commits in a range, one per line, following only the
+// first parent. A fix round that merged the base branch would otherwise list
+// every commit the merge brought in - other PRs' work - as its own; with
+// --first-parent that merge stays a single line.
 func (g G) LogOneline(ctx context.Context, dir, revRange string) string {
-	out, _ := g.run(ctx, dir, "log", "--oneline", revRange)
+	out, _ := g.run(ctx, dir, "log", "--oneline", "--first-parent", revRange)
 	return out
 }
 

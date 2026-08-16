@@ -377,7 +377,12 @@ func (t *termReporter) Header(h review.RunHeader) {
 		o.Row("branch", o.Bold(h.Branch)+o.Dim("  ·  no open PR"))
 		o.Row("repo", h.Repo)
 	} else {
-		o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title))+draftTag(o, h.Draft))
+		o.Row("pr", o.Link(o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)), h.URL)+draftTag(o, h.Draft))
+		// The URL is spelled out as well: the OSC 8 link above is invisible in
+		// terminals without hyperlink support and cannot be copied anywhere.
+		if h.URL != "" {
+			o.Row("url", o.Link(o.Blue(h.URL), h.URL))
+		}
 		o.Row("repo", h.Repo+o.Dim("  ·  @"+h.Author))
 	}
 	o.Row("base", fmt.Sprintf("%s %s", h.BaseRef, o.Dim(shortSHA(h.BaseSHA))))
