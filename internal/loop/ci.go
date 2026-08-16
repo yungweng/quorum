@@ -215,16 +215,16 @@ func (r *run) killReview() {
 // ensureCIGreen waits for CI and repairs it, up to MaxCIFixes attempts.
 func (r *run) ensureCIGreen() error {
 	for attempt := 0; ; {
-		r.rep.Info(fmt.Sprintf("waiting for CI on PR #%d...", r.pr.Number))
 		r.prog.CI = CIWaiting
 		r.enter(PhaseCI)
-		state, err := r.watchCI()
+		waitStarted := time.Now()
+		state, err := r.awaitChecks(waitStarted)
 		if err != nil {
 			return err
 		}
 		switch state {
 		case gh.ChecksPass:
-			r.rep.CIGreen()
+			r.rep.CIGreen(time.Since(waitStarted))
 			r.prog.CI = CIGreen
 			r.publish()
 			return nil
@@ -282,6 +282,34 @@ func (r *run) ensureCIGreen() error {
 		}
 		if err := r.postFixComment(tag, label, "", "", preSHA); err != nil {
 			return err
+		}
+	}
+}
+
+// awaitChecks runs watchCI in the background so the reporter can tick the CI
+// wait the way waitReview ticks a review: `gh pr checks --watch` blocks for as
+// long as CI runs, so the elapsed time cannot come from inside the poll loop.
+// Cancellation needs no extra case here: watchCI's own ctx handling makes it
+// return, which closes the wait through the same channel.
+func (r *run) awaitChecks(started time.Time) (gh.CheckState, error) {
+	r.rep.CIWait(r.pr.Number, 0)
+	type checksResult struct {
+		state gh.CheckState
+		err   error
+	}
+	done := make(chan checksResult, 1)
+	go func() {
+		state, err := r.watchCI()
+		done <- checksResult{state, err}
+	}()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case out := <-done:
+			return out.state, out.err
+		case <-ticker.C:
+			r.rep.CIWait(r.pr.Number, time.Since(started))
 		}
 	}
 }

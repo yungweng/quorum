@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -379,6 +380,30 @@ type loopTermReporter struct {
 	// readySent records that the persistent ready-to-merge notification went
 	// out, so the summary skips its own transient completion notification.
 	readySent bool
+	// pending holds a finished review round's step facts until its RoundResult
+	// arrives a moment later, so the round prints as one line carrying model,
+	// duration and findings instead of two lines repeating each other.
+	pending struct {
+		label   string
+		model   engine.Model
+		elapsed time.Duration
+	}
+	hasPending bool
+}
+
+// reviewRoundLabel matches exactly the step labels that a RoundResult follows.
+// Discarded, resumed or fresh retries carry a suffix and print on their own.
+var reviewRoundLabel = regexp.MustCompile(`^Review round \d+$`)
+
+// flushPending prints a held review-round line whose RoundResult never came,
+// which happens when the run fails between the review and its result.
+func (l *loopTermReporter) flushPending() {
+	if !l.hasPending {
+		return
+	}
+	l.hasPending = false
+	l.out.Printf("%s\n", l.out.Dim(fmt.Sprintf("%s %s · %s · %s",
+		l.out.SymOK(), l.pending.label, l.pending.model.Tag(), ui.Duration(l.pending.elapsed))))
 }
 
 func (l *loopTermReporter) Header(h loop.Header) {
@@ -390,7 +415,12 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	case h.BranchOnly:
 		o.Row("target", o.Bold(h.Branch)+o.Dim("  ·  no open PR"))
 	default:
-		o.Row("pr", o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title))+draftTag(o, h.Draft))
+		o.Row("pr", o.Link(o.Bold(fmt.Sprintf("#%d %s", h.Number, h.Title)), h.URL)+draftTag(o, h.Draft))
+		// The URL is spelled out as well: the OSC 8 link above is invisible in
+		// terminals without hyperlink support and cannot be copied anywhere.
+		if h.URL != "" {
+			o.Row("url", o.Link(o.Blue(h.URL), h.URL))
+		}
 	}
 	o.Row("repo", h.Repo)
 	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
@@ -422,6 +452,7 @@ func (l *loopTermReporter) Header(h loop.Header) {
 
 func (l *loopTermReporter) Step(title string) {
 	l.status.Clear()
+	l.flushPending()
 	l.out.Step(title)
 }
 
@@ -440,12 +471,24 @@ func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.D
 // StepEnd names the model between the step and its duration. A run has a review
 // model and a fix model, the header scrolls away within the first round, and
 // which one paid for an hour of wall clock is the question the line is read for.
+// A review round's facts are held back and merged into its RoundResult; a
+// discarded round is crossed out, so a rerun of the same number below it does
+// not read as the run counting twice.
 func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
 	l.status.Clear()
-	if ok {
-		l.out.Printf("%s\n", l.out.Dim(fmt.Sprintf("%s %s · %s · %s",
-			l.out.SymOK(), label, m.Tag(), ui.Duration(elapsed))))
+	if !ok {
+		return
 	}
+	if reviewRoundLabel.MatchString(label) {
+		l.pending.label, l.pending.model, l.pending.elapsed = label, m, elapsed
+		l.hasPending = true
+		return
+	}
+	line := fmt.Sprintf("%s %s · %s · %s", l.out.SymOK(), label, m.Tag(), ui.Duration(elapsed))
+	if strings.Contains(label, "(discarded)") {
+		line = l.out.Strike(line)
+	}
+	l.out.Printf("%s\n", l.out.Dim(line))
 }
 
 func (l *loopTermReporter) RoundResult(round int, f review.Findings, clean bool) {
@@ -456,13 +499,34 @@ func (l *loopTermReporter) RoundResult(round int, f review.Findings, clean bool)
 	} else {
 		line = l.out.Red(line)
 	}
-	l.out.Printf("%s %s\n",
-		l.out.Dim(fmt.Sprintf("%s Review round %d ·", l.out.SymOK(), round)), line)
+	prefix := fmt.Sprintf("%s Review round %d", l.out.SymOK(), round)
+	if l.hasPending && l.pending.label == fmt.Sprintf("Review round %d", round) {
+		l.hasPending = false
+		prefix += fmt.Sprintf(" · %s · %s", l.pending.model.Tag(), ui.Duration(l.pending.elapsed))
+	} else {
+		l.flushPending()
+	}
+	l.out.Printf("%s %s\n", l.out.Dim(prefix+" ·"), line)
 }
 
-func (l *loopTermReporter) CIGreen() {
+// CIWait keeps the wait on the transient status line; only a terminal-less run
+// records it as a permanent line, once per wait.
+func (l *loopTermReporter) CIWait(pr int, elapsed time.Duration) {
+	if elapsed == 0 {
+		l.flushPending()
+	}
+	if l.out.Color {
+		l.status.Spin(fmt.Sprintf("waiting for CI on PR #%d", pr), elapsed)
+		return
+	}
+	if elapsed == 0 {
+		l.out.Printf("waiting for CI on PR #%d...\n", pr)
+	}
+}
+
+func (l *loopTermReporter) CIGreen(elapsed time.Duration) {
 	l.status.Clear()
-	l.out.Printf("%s\n", l.out.Green("CI green."))
+	l.out.Printf("%s%s\n", l.out.Green("CI green"), l.out.Dim("  ·  waited "+ui.Duration(elapsed)))
 }
 
 func (l *loopTermReporter) CIRed(attempt, max int) {
@@ -472,6 +536,7 @@ func (l *loopTermReporter) CIRed(attempt, max int) {
 
 func (l *loopTermReporter) Info(s string) {
 	l.status.Clear()
+	l.flushPending()
 	l.out.Printf("%s\n", l.out.Dim(s))
 }
 
@@ -511,6 +576,7 @@ func (l *loopTermReporter) Notify(title, body string) {
 // summary prints the closing block of a run.
 func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus string, mergeErr error) {
 	o := l.out
+	l.flushPending()
 	fmt.Println()
 	o.Rule()
 	switch {

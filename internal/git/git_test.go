@@ -146,3 +146,35 @@ func TestIsAncestorDistinguishesBehindFromDiverged(t *testing.T) {
 		t.Fatal("an unresolvable revision was not reported as an error")
 	}
 }
+
+// The round summary and the fix-log comment list a round's commits with this.
+// A round that merged the base branch must not claim the base's commits as its
+// own work: only the first-parent line belongs to the round.
+func TestLogOnelineFollowsFirstParent(t *testing.T) {
+	dir := conflictRepo(t)
+	g := G{Bin: "git"}
+	ctx := context.Background()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	// The clean branch merges main, which brings in "main change".
+	run("checkout", "-q", "clean")
+	run("merge", "-q", "--no-edit", "main")
+
+	out := g.LogOneline(ctx, dir, "main~1..clean")
+	if !strings.Contains(out, "clean change") {
+		t.Fatalf("the branch's own commit is missing:\n%s", out)
+	}
+	if strings.Contains(out, "main change") {
+		t.Fatalf("a commit merged in from the base is listed as the branch's own:\n%s", out)
+	}
+}

@@ -11,6 +11,7 @@ type RunHeader struct {
 	Repo        string
 	Number      int
 	Title       string
+	URL         string
 	Author      string
 	Branch      string
 	BranchOnly  bool

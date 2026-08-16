@@ -449,7 +449,7 @@ func (r *run) prepare() error {
 	}
 
 	r.rep.Header(Header{
-		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title,
+		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Draft: pr.IsDraft, Local: r.o.Local,
 		Engine: r.o.Engine, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,

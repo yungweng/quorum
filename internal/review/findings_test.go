@@ -283,3 +283,18 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// The summary names only what was found. Round lines are read for the one
+// count that changed, and "0 blockers, 0 suggestions" around it is noise.
+func TestSummaryOmitsEmptyCategories(t *testing.T) {
+	if got := (Findings{}).Summary(); got != "no findings" {
+		t.Errorf("empty findings rendered as %q", got)
+	}
+	if got := (Findings{Critical: 1}).Summary(); got != "1 critical" {
+		t.Errorf("got %q", got)
+	}
+	f := Findings{Blockers: 1, Critical: 2, Suggestions: 1, Questions: 3}
+	if got := f.Summary(); got != "1 blocker, 2 critical, 1 suggestion, 3 questions" {
+		t.Errorf("got %q", got)
+	}
+}

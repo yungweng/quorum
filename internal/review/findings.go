@@ -41,10 +41,28 @@ type Findings struct {
 func (f Findings) Blocking() int { return f.Blockers + f.Critical }
 
 // Summary renders the counts the way both the status output and the
-// notifications phrase them.
+// notifications phrase them. Empty categories are left out: a reader scanning
+// round lines wants the one number that changed, not three zeroes around it.
 func (f Findings) Summary() string {
-	return fmt.Sprintf("%d blockers, %d critical, %d suggestions, %d questions",
-		f.Blockers, f.Critical, f.Suggestions, f.Questions)
+	var parts []string
+	count := func(n int, singular, plural string) {
+		if n == 0 {
+			return
+		}
+		word := plural
+		if n == 1 {
+			word = singular
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", n, word))
+	}
+	count(f.Blockers, "blocker", "blockers")
+	count(f.Critical, "critical", "critical")
+	count(f.Suggestions, "suggestion", "suggestions")
+	count(f.Questions, "question", "questions")
+	if len(parts) == 0 {
+		return "no findings"
+	}
+	return strings.Join(parts, ", ")
 }
 
 var (
