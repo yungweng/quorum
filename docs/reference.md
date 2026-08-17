@@ -142,7 +142,11 @@ means. An agent with full file and network access on your machine, for up to
 `--sandboxed` opts out, but then the engine's own configuration must allow
 commands, network and push or every fix round fails. Reviewers, the aggregator
 and the verifier remain read-only. A separate Git integrity gate rejects any
-changed HEAD or staged, unstaged or untracked file after verification.
+changed HEAD or staged, unstaged or untracked file after verification. One
+exception: tracked files the environment setup itself rewrote before any
+reviewer ran (devbox regenerating its lock file, typically) are recorded with
+their exact content and tolerated by that gate; different content in those
+files, or any other tracked change, still fails the run.
 
 ## Usage limits
 

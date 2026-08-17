@@ -66,7 +66,10 @@ reporting without breaking the build.
   automatic `direnv allow` on an `.envrc` the PR changed, refusing a fenced or
   structurally wrong aggregator answer, refusing dirty or diverged checkouts and
   fork PRs, stopping a fix round that produced nothing. Do not weaken one to
-  make a run pass. Each has a test.
+  make a run pass. Each has a test. The one recorded tolerance: tracked files
+  the environment prewarm rewrote before any reviewer ran (devbox regenerating
+  its lock) pass the review cleanliness gates with exactly that content;
+  anything else still fails.
 - **The five-section contract is load-bearing.** `findings.json` is produced by
   counting bullets under `## Blockers`, `## Critical`, `## Suggestions` and
   `## Questions`. A renamed heading or a finding written as prose counts as

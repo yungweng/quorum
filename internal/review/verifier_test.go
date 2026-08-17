@@ -117,7 +117,7 @@ None.
 `
 	run, env, opts, g, head := fakeVerifier(t, filtered, false)
 	err := (&Runner{Git: g}).verify(context.Background(), Options{ReviewTimeout: 5 * time.Second},
-		run, env, opts, "verify", head, NopReporter{})
+		run, env, opts, "verify", head, nil, NopReporter{})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -148,7 +148,7 @@ None.
 `
 	run, env, opts, g, head := fakeVerifier(t, added, false)
 	err := (&Runner{Git: g}).verify(context.Background(), Options{ReviewTimeout: 5 * time.Second},
-		run, env, opts, "verify", head, NopReporter{})
+		run, env, opts, "verify", head, nil, NopReporter{})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -164,7 +164,7 @@ None.
 func TestVerifierFailsClosedWhenItChangesTheWorktree(t *testing.T) {
 	run, env, opts, g, head := fakeVerifier(t, goodComment, true)
 	err := (&Runner{Git: g}).verify(context.Background(), Options{ReviewTimeout: 5 * time.Second},
-		run, env, opts, "verify", head, NopReporter{})
+		run, env, opts, "verify", head, nil, NopReporter{})
 	if !errors.Is(err, ErrVerifierInvalid) || !strings.Contains(err.Error(), "untracked changes") {
 		t.Fatalf("verify error = %v, want dirty-worktree ErrVerifierInvalid", err)
 	}
@@ -173,7 +173,7 @@ func TestVerifierFailsClosedWhenItChangesTheWorktree(t *testing.T) {
 func TestVerifierFailsClosedAfterTwoMalformedReports(t *testing.T) {
 	run, env, opts, g, head := fakeVerifier(t, "not a review report\n", false)
 	err := (&Runner{Git: g}).verify(context.Background(), Options{ReviewTimeout: 5 * time.Second},
-		run, env, opts, "verify", head, NopReporter{})
+		run, env, opts, "verify", head, nil, NopReporter{})
 	if !errors.Is(err, ErrVerifierInvalid) || !strings.Contains(err.Error(), "after 2 attempts") {
 		t.Fatalf("verify error = %v, want two-attempt ErrVerifierInvalid", err)
 	}
@@ -182,7 +182,7 @@ func TestVerifierFailsClosedAfterTwoMalformedReports(t *testing.T) {
 func TestVerifierRejectsAnUnexpectedHead(t *testing.T) {
 	run, _, _, g, _ := fakeVerifier(t, goodComment, false)
 	err := (&Runner{Git: g}).worktreeUnchanged(context.Background(), run.worktree,
-		"ffffffffffffffffffffffffffffffffffffffff")
+		"ffffffffffffffffffffffffffffffffffffffff", nil)
 	if err == nil || !strings.Contains(err.Error(), "changed HEAD") {
 		t.Fatalf("HEAD check error = %v", err)
 	}

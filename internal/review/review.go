@@ -10,10 +10,14 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -282,13 +286,25 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	// symlinks into the shared cache come out either way.
 	defer func() { deps.Unlink(linked) }()
 
+	// A resume finds a worktree the reviewers already ran in, where setup
+	// noise and reviewer edits can no longer be told apart, so it keeps the
+	// strict gates by leaving setupChanges empty.
+	var setupChanges setupDrift
 	if o.ResumeRun == "" {
 		linked = r.prepareDeps(ctx, o, run, env, rep)
+		setupChanges, err = r.captureSetupDrift(ctx, run.worktree)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrReviewerInvalid, err)
+		}
+		if len(setupChanges) > 0 {
+			rep.Warn(fmt.Sprintf("environment setup rewrote tracked files, tolerating exactly that content: %s",
+				strings.Join(setupChanges.paths(), ", ")))
+		}
 		if err := r.runReviewers(ctx, o, run, env, eng, baseRef, rep); err != nil {
 			return nil, &RunDirError{RunDir: run.root, Err: err}
 		}
 	}
-	if err := r.cleanReviewerArtifacts(ctx, run, reviewedHead, rep); err != nil {
+	if err := r.cleanReviewerArtifacts(ctx, run, reviewedHead, setupChanges, rep); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrReviewerInvalid, err)
 	}
 
@@ -333,7 +349,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		URL: pr.URL, Title: pr.Title, Author: pr.Author.Login, BaseRef: baseRef,
 		BaseSHA: reviewedBase, HeadSHA: reviewedHead,
 		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
-	}), reviewedHead, rep); err != nil {
+	}), reviewedHead, setupChanges, rep); err != nil {
 		return nil, &RunDirError{RunDir: run.root, Err: err}
 	}
 	commentBody, err := os.ReadFile(run.comment)
@@ -661,12 +677,97 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 	return ctx.Err()
 }
 
+// setupDrift records the tracked files the environment setup rewrote before
+// any reviewer ran, keyed by path with a digest of the rewritten content.
+// devbox and similar tools rewrite their lock file on every environment
+// entry, and they do it again whenever a reviewer or the aggregator enters
+// the environment, so the cleanliness gates tolerate exactly that content.
+// Any other tracked change, including different content in one of these
+// files, still fails the run.
+type setupDrift map[string]string
+
+// captureSetupDrift records what the environment setup rewrote. A change it
+// cannot attribute precisely (a rename, a quoted path) fails the run here,
+// before any reviewer spends tokens on a worktree the gates will reject.
+func (r *Runner) captureSetupDrift(ctx context.Context, worktree string) (setupDrift, error) {
+	tracked, err := r.Git.StatusPorcelainTracked(ctx, worktree)
+	if err != nil || tracked == "" {
+		return nil, err
+	}
+	drift := setupDrift{}
+	for line := range strings.Lines(tracked) {
+		line = strings.TrimSuffix(line, "\n")
+		p := porcelainPath(line)
+		if p == "" {
+			return nil, fmt.Errorf("environment setup left a tracked change reviews cannot tolerate: %s", line)
+		}
+		drift[p] = hashFile(filepath.Join(worktree, p))
+	}
+	return drift, nil
+}
+
+// filterExplained returns the porcelain status lines the recorded setup drift
+// does not explain: a line is dropped only when its path was rewritten by the
+// setup and still holds byte-identical content.
+func (d setupDrift) filterExplained(worktree, status string) string {
+	if len(d) == 0 || status == "" {
+		return status
+	}
+	var kept []string
+	for line := range strings.Lines(status) {
+		line = strings.TrimSuffix(line, "\n")
+		p := porcelainPath(line)
+		if want, ok := d[p]; !ok || hashFile(filepath.Join(worktree, p)) != want {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+func (d setupDrift) paths() []string {
+	return slices.Sorted(maps.Keys(d))
+}
+
+// porcelainPath extracts the path from one `git status --porcelain` line.
+// git.run trims its output, so the first line may have lost the leading space
+// of its two-character status field. Renamed and quoted paths return "" and
+// are therefore never explained away.
+func porcelainPath(line string) string {
+	if len(line) < 4 || strings.Contains(line, " -> ") {
+		return ""
+	}
+	var path string
+	switch {
+	case line[2] == ' ':
+		path = line[3:] // XY path
+	case line[1] == ' ':
+		path = line[2:] // Y path, leading space trimmed
+	default:
+		return ""
+	}
+	if strings.HasPrefix(path, `"`) {
+		return ""
+	}
+	return path
+}
+
+// hashFile digests a file's content; a missing or unreadable file digests to
+// "", which matches a setup-deleted file staying deleted.
+func hashFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // cleanReviewerArtifacts restores the disposable worktree to its checked-out
 // state after the reviewer fan-out. Reviewers may run builds and tests that
 // leave untracked caches behind; those are safe to discard because a fresh
 // worktree starts without untracked files. A moved HEAD or tracked mutation is
 // not repaired: reviewers may already have based findings on the changed code.
-func (r *Runner) cleanReviewerArtifacts(ctx context.Context, run runPaths, expectedHead string, rep Reporter) error {
+func (r *Runner) cleanReviewerArtifacts(ctx context.Context, run runPaths, expectedHead string, setup setupDrift, rep Reporter) error {
 	head, err := r.Git.RevParse(ctx, run.worktree, "HEAD")
 	if err != nil {
 		return fmt.Errorf("checking reviewer HEAD: %w", err)
@@ -679,15 +780,15 @@ func (r *Runner) cleanReviewerArtifacts(ctx context.Context, run runPaths, expec
 	if err != nil {
 		return fmt.Errorf("checking reviewer tracked status: %w", err)
 	}
-	if tracked != "" {
-		return fmt.Errorf("reviewers left staged or unstaged tracked changes:\n%s", tracked)
+	if leftover := setup.filterExplained(run.worktree, tracked); leftover != "" {
+		return fmt.Errorf("reviewers left staged or unstaged tracked changes:\n%s", leftover)
 	}
 
 	status, err := r.Git.StatusPorcelain(ctx, run.worktree)
 	if err != nil {
 		return fmt.Errorf("checking reviewer worktree status: %w", err)
 	}
-	if status == "" {
+	if setup.filterExplained(run.worktree, status) == "" {
 		return nil
 	}
 
@@ -698,7 +799,7 @@ func (r *Runner) cleanReviewerArtifacts(ctx context.Context, run runPaths, expec
 	if err := r.Git.CleanUntracked(ctx, run.worktree); err != nil {
 		return fmt.Errorf("removing reviewer artifacts: %w", err)
 	}
-	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead); err != nil {
+	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead, setup); err != nil {
 		return fmt.Errorf("reviewer cleanup incomplete: %w", err)
 	}
 	rep.Warn(fmt.Sprintf("removed untracked reviewer artifacts; details in %s", logPath))
@@ -789,11 +890,11 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 // The model may refine the report, but HEAD and the complete porcelain status
 // must remain unchanged. Any repository mutation fails immediately; malformed
 // report output gets one retry. Nothing is posted before both gates pass.
-func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, prompt, expectedHead string, rep Reporter) error {
+func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, prompt, expectedHead string, setup setupDrift, rep Reporter) error {
 	logPath := filepath.Join(run.output, "verifier.log")
 	var lastErr error
 	appendEvent(run.output, "verify")
-	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead); err != nil {
+	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead, setup); err != nil {
 		return fmt.Errorf("%w before execution: %v", ErrVerifierInvalid, err)
 	}
 
@@ -816,7 +917,7 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 		err = eng.Verify(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
 		candidate.Close()
 		logFile.Close()
-		if stateErr := r.worktreeUnchanged(ctx, run.worktree, expectedHead); stateErr != nil {
+		if stateErr := r.worktreeUnchanged(ctx, run.worktree, expectedHead, setup); stateErr != nil {
 			return fmt.Errorf("%w: verifier changed repository state: %v; refusing to retry or post", ErrVerifierInvalid, stateErr)
 		}
 		// Same reasoning as in aggregate: a usage limit outlives any retry.
@@ -847,7 +948,7 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 		ErrVerifierInvalid, lastErr, run.comment)
 }
 
-func (r *Runner) worktreeUnchanged(ctx context.Context, worktree, expectedHead string) error {
+func (r *Runner) worktreeUnchanged(ctx context.Context, worktree, expectedHead string, setup setupDrift) error {
 	head, err := r.Git.RevParse(ctx, worktree, "HEAD")
 	if err != nil {
 		return fmt.Errorf("checking worktree HEAD: %w", err)
@@ -859,8 +960,8 @@ func (r *Runner) worktreeUnchanged(ctx context.Context, worktree, expectedHead s
 	if err != nil {
 		return fmt.Errorf("checking worktree status: %w", err)
 	}
-	if status != "" {
-		return fmt.Errorf("worktree has staged, unstaged, or untracked changes:\n%s", status)
+	if leftover := setup.filterExplained(worktree, status); leftover != "" {
+		return fmt.Errorf("worktree has staged, unstaged, or untracked changes:\n%s", leftover)
 	}
 	return nil
 }
