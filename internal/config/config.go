@@ -79,6 +79,10 @@ type Config struct {
 	// conflicts before any review round, instead of polishing a branch that
 	// cannot land.
 	ResolveConflicts bool
+	// FixSuggestions has babysit run one terminal fix round when the final
+	// review is clean but still lists Suggestions: triage each one, implement
+	// what is worth it, and end without another review.
+	FixSuggestions bool
 
 	// AgentAction is what the daemon does with a pull request that asks for a
 	// review: "review" posts one and stops, "babysit" runs the full fix loop.
@@ -161,6 +165,7 @@ func Default() Config {
 		MaxCIFixes:       3,
 		FixTimeout:       2 * time.Hour,
 		ResolveConflicts: true,
+		FixSuggestions:   true,
 
 		AgentAction:      ActionReview,
 		AutoMergeTimeout: 2 * time.Hour,
@@ -379,6 +384,8 @@ func (c *Config) set(key, value string) {
 		c.BabysitDrafts = truthy(value)
 	case "RESOLVE_CONFLICTS":
 		c.ResolveConflicts = truthy(value)
+	case "FIX_SUGGESTIONS":
+		c.FixSuggestions = truthy(value)
 	case "AGENT_ACTION":
 		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
 			c.AgentAction = v
@@ -532,7 +539,8 @@ func (c Config) Render() string {
 		strings.Join(c.DivergenceEscalateTo, " "))
 	w("SANDBOXED=%s\t\t# 1 uses the engine's own sandbox/approval defaults instead of bypassing them\n", bit(c.Sandboxed))
 	w("BABYSIT_DRAFTS=%s\t# 1 lets `quorum babysit` work on draft PRs without --draft\n", bit(c.BabysitDrafts))
-	w("RESOLVE_CONFLICTS=%s\t# merge the base branch and resolve conflicts before reviewing\n\n", bit(c.ResolveConflicts))
+	w("RESOLVE_CONFLICTS=%s\t# merge the base branch and resolve conflicts before reviewing\n", bit(c.ResolveConflicts))
+	w("FIX_SUGGESTIONS=%s\t# after a clean final review, triage and implement leftover Suggestions once\n\n", bit(c.FixSuggestions))
 
 	w("# What the agent does with a pull request that asks for your review:\n")
 	w("# \"review\" posts a review and stops, \"babysit\" runs the full fix loop.\n")

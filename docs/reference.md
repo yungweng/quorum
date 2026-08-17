@@ -56,6 +56,15 @@ Draft PRs are refused unless the run says `--draft` or the config says
 merged and the conflicts resolved through the fix session before the first
 review; `RESOLVE_CONFLICTS=0` or `--no-resolve-conflicts` turns that off.
 
+When the final review comes back with zero Blockers and Critical findings but
+still lists Suggestions, one last fix round triages them in the same session:
+it implements the ones worth keeping, skips the ones that describe intended
+behavior or stem from the reviewers' isolated worktree, and no further review
+follows. A round that changes nothing ends the run exactly like a clean review
+did before. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns the round off.
+If it pushes commits, the run still waits for CI on them, and auto-merge is
+skipped because the review never saw those commits.
+
 After a posted PR run converges with green CI, a fresh read-only Codex pass
 writes a local PR-description candidate. The result describes the final
 implementation, not the sequence of findings and fixes. It keeps relevant
@@ -83,6 +92,7 @@ generation.
 | `--draft` | Work on a draft PR | off, or `BABYSIT_DRAFTS=1` |
 | `--local` | Ignore any open PR and work on the pushed branch only | off |
 | `--no-resolve-conflicts` | Do not merge the base branch on conflicts | resolution on |
+| `--no-fix-suggestions` | Skip the suggestion triage round after a clean review | round on |
 | `--sandboxed` | Use the engine's own sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
@@ -299,6 +309,7 @@ DIVERGENCE_ESCALATE_TO="" # users or org/team slugs to mention, without @
 SANDBOXED=0
 BABYSIT_DRAFTS=0         # 1 lets quorum babysit work on draft PRs without --draft
 RESOLVE_CONFLICTS=1      # merge the base branch and resolve conflicts before reviewing
+FIX_SUGGESTIONS=1        # after a clean final review, triage and implement leftover Suggestions once
 
 AGENT_ACTION="review"    # or "babysit"
 AUTO_MERGE=0             # one switch for agent, review and babysit runs

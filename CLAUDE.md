@@ -77,7 +77,10 @@ reporting without breaking the build.
   `ValidateComment` fails the run instead of posting.
 - **Only Blockers and Critical keep the loop alive.** Suggestions and Questions
   go to each fix round once. Making either of them blocking prevents
-  convergence.
+  convergence. The one terminal exception: after a clean final review,
+  `FIX_SUGGESTIONS` runs a single triage round over the leftover Suggestions,
+  with no review after it; it must never re-enter the loop, and commits it
+  pushes disqualify the head from auto-merge.
 - **Fix sessions run with the sandbox bypassed** (`--sandboxed` opts out). They
   push and run tests unattended, which a sandboxed `codex exec` would silently
   skip. Reviews never get the bypass and run read-only.

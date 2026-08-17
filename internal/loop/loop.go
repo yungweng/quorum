@@ -106,6 +106,10 @@ type Options struct {
 	// ResolveConflicts merges origin/<base> through the fix session whenever
 	// the branch conflicts with its base, before any review round.
 	ResolveConflicts bool
+	// FixSuggestions runs one terminal fix round when the final review is
+	// clean but still lists Suggestions: triage each one, implement what is
+	// worth it, and end the run without another review.
+	FixSuggestions bool
 	// ResumeRun reuses a prior review run's completed reviewer output for the
 	// first review round, the way a failed round's in-run retry does. Later
 	// rounds always fan out fresh: they review a head the saved output has
@@ -174,6 +178,10 @@ type Result struct {
 	RoundLog             []RoundEntry
 	RunDir               string
 	Duration             time.Duration
+	// SuggestionCommits records that the terminal suggestion round pushed
+	// commits the final review has never seen. Auto-merge must skip such a
+	// head: the approval would claim a review that did not happen.
+	SuggestionCommits    bool
 	LastFindings         review.Findings
 	Divergence           *DivergenceReport
 	DivergenceReportPath string
@@ -542,6 +550,13 @@ func (r *run) execute() (*Result, error) {
 		r.publish()
 		if findings.Blocking() == 0 {
 			res.Converged = true
+			if suggestionRoundDue(r.o, findings) {
+				pushed, err := r.suggestionRound(iteration, findings, comment, currentSHA)
+				res.SuggestionCommits = pushed
+				if err != nil {
+					return res, err
+				}
+			}
 			break
 		}
 
@@ -644,6 +659,58 @@ func (r *run) execute() (*Result, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+// suggestionRoundDue keeps Suggestions strictly terminal: the round runs at
+// most once, only after a review with zero Blockers and Critical findings, and
+// never re-enters the review loop.
+func suggestionRoundDue(o Options, f review.Findings) bool {
+	return o.FixSuggestions && f.Blocking() == 0 && f.Suggestions > 0
+}
+
+// suggestionRound is the one fix step allowed to run after convergence, when
+// the clean final review still left Suggestions on the table. It triages
+// rather than obeys: leftover Suggestions are often artifacts of the
+// reviewers' isolated worktree, and no review follows to catch an overzealous
+// change. A round that changes nothing is a legitimate outcome here, not
+// ErrNoProgress: no Blockers remain that would demand progress.
+func (r *run) suggestionRound(round int, findings review.Findings, comment, preSHA string) (bool, error) {
+	r.rep.Step("Suggestion round")
+	r.enter(PhaseFix)
+	tag := "suggestion-round"
+	if err := r.codexCall(tag, suggestionRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, comment)); err != nil {
+		return false, err
+	}
+	if err := r.questionGate(tag); err != nil {
+		return false, err
+	}
+	if err := r.ensureCommitted(tag); err != nil {
+		return false, err
+	}
+	afterSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+	if err != nil {
+		return false, err
+	}
+	if afterSHA == preSHA {
+		r.rep.Info("no suggestion was worth a change; the reviewed head stands")
+		return false, nil
+	}
+	r.recordRound("Suggestion round", preSHA)
+	if err := r.pushBranch(); err != nil {
+		return true, err
+	}
+	if err := r.postFixComment(tag, "Suggestion round",
+		fmt.Sprintf("Review round %d", round), findingsCommentURL(findings), preSHA); err != nil {
+		return true, err
+	}
+	// The run still ends on this push, so the same barrier as any other round
+	// applies: babysit must not report success on a head whose checks are red.
+	if !r.target.BranchOnly {
+		if err := r.ensureCIGreen(); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
 }
 
 func (r *run) targetLabel() string {
@@ -1090,6 +1157,8 @@ func stepLabel(tag string) string {
 		return "Fix round " + strings.TrimPrefix(tag, "fix-round-")
 	case strings.HasPrefix(tag, "ci-fix-"):
 		return "CI fix " + strings.TrimPrefix(tag, "ci-fix-")
+	case strings.HasPrefix(tag, "suggestion-round"):
+		return "Suggestion round" + strings.TrimPrefix(tag, "suggestion-round")
 	default:
 		return "Codex " + tag
 	}

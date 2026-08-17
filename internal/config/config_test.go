@@ -151,6 +151,9 @@ func TestBabysitDraftAndConflictDefaults(t *testing.T) {
 	if !cfg.ResolveConflicts {
 		t.Error("conflict resolution defaults to off; a conflicted branch would stall every run")
 	}
+	if !cfg.FixSuggestions {
+		t.Error("the suggestion round defaults to off; leftover Suggestions would stay unaddressed")
+	}
 }
 
 func TestRoundTrip(t *testing.T) {
@@ -176,6 +179,7 @@ func TestRoundTrip(t *testing.T) {
 	want.Sandboxed = true
 	want.BabysitDrafts = true
 	want.ResolveConflicts = false
+	want.FixSuggestions = false
 	want.AgentAction = ActionBabysit
 	want.AutoMerge = true
 	want.AutoMergeTimeout = 90 * time.Minute

@@ -111,8 +111,9 @@ func TestFixSessionPromptsRequireACleanWorktree(t *testing.T) {
 // billed to the fix session.
 func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 	for name, prompt := range map[string]string{
-		"ci fix":    ciFixPrompt(12, "[]"),
-		"fix round": fixRoundPrompt(12, "", false, "## Summary\n\nfine"),
+		"ci fix":           ciFixPrompt(12, "[]"),
+		"fix round":        fixRoundPrompt(12, "", false, "## Summary\n\nfine"),
+		"suggestion round": suggestionRoundPrompt(12, "", false, "## Summary\n\nfine"),
 	} {
 		if !strings.Contains(prompt, "Do not wait for CI") {
 			t.Errorf("%s prompt does not tell the session to leave CI to the pipeline", name)
@@ -122,8 +123,9 @@ func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 
 func TestPRFixPromptsRequireACommentBlock(t *testing.T) {
 	for name, prompt := range map[string]string{
-		"ci fix":     ciFixPrompt(12, "[]"),
-		"review fix": fixRoundPrompt(12, "", false, "## Summary\n\nfine"),
+		"ci fix":           ciFixPrompt(12, "[]"),
+		"review fix":       fixRoundPrompt(12, "", false, "## Summary\n\nfine"),
+		"suggestion round": suggestionRoundPrompt(12, "", false, "## Summary\n\nfine"),
 	} {
 		if !strings.Contains(prompt, "a line that is exactly:\n"+MarkerComment) {
 			t.Errorf("%s prompt does not require the PR comment marker", name)

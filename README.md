@@ -164,6 +164,12 @@ Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.
 All fix rounds share one Codex session, so context carries across rounds.
 
+When the final review is clean but still lists Suggestions, one last fix round
+triages them: it implements the ones worth keeping and skips the rest, and no
+further review follows. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns
+that off. If that round pushes commits, auto-merge is skipped because the
+review never saw them.
+
 An opt-in divergence scan can explain why a run still has findings at its round
 limit:
 

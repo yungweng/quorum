@@ -97,11 +97,12 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		runDir            string
 		divergenceVerdict string
 		divergenceURL     string
+		suggestionCommits bool
 		runErr            error
 	)
 	switch action {
 	case config.ActionBabysit:
-		findings, runDir, divergenceVerdict, divergenceURL, runErr =
+		findings, runDir, divergenceVerdict, divergenceURL, suggestionCommits, runErr =
 			r.babysit(ctx, clone, repo, number, resumeDir, runLog)
 	default:
 		findings, runDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, resumeDir, runLog)
@@ -109,7 +110,12 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 
 	if runErr == nil {
 		mergeStatus := ""
-		if automerge.Allowed(r.Cfg.AutoMerge, r.Cfg.Post, findings) {
+		if suggestionCommits && automerge.Allowed(r.Cfg.AutoMerge, r.Cfg.Post, findings) {
+			// Auto-merge approves the reviewed head only. The suggestion round
+			// pushed commits past it, so merging now would claim a review that
+			// never saw them.
+			r.Log.Printf("%s: auto-merge skipped, the suggestion round pushed commits the final review has not seen", key)
+		} else if automerge.Allowed(r.Cfg.AutoMerge, r.Cfg.Post, findings) {
 			mergeResult, mergeErr := automerge.Run(ctx, r.GH, repo, number, findings.HeadSHA, r.Cfg.AutoMergeAuthors)
 			if errors.Is(mergeErr, automerge.ErrMergeNotReady) {
 				r.Log.Printf("%s: waiting for required checks before merge", key)
@@ -385,10 +391,10 @@ func (r *Runner) recordUsageLimit(key, sha, runDir, runLog string, until time.Ti
 // This is what the three separate tools could not do: the daemon knew how to
 // start a review but had no way to reach the fix pipeline, because that was a
 // different binary with its own idea of where things live.
-func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, resumeDir, runLog string) (review.Findings, string, string, string, error) {
+func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, resumeDir, runLog string) (review.Findings, string, string, string, bool, error) {
 	logFile, err := os.Create(runLog)
 	if err != nil {
-		return review.Findings{}, "", "", "", err
+		return review.Findings{}, "", "", "", false, err
 	}
 	defer logFile.Close()
 
@@ -424,6 +430,7 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		// explicit opt-in the manual --draft flag provides in a terminal.
 		AllowDraft:       !r.Cfg.SkipDrafts,
 		ResolveConflicts: r.Cfg.ResolveConflicts,
+		FixSuggestions:   r.Cfg.FixSuggestions,
 		ResumeRun:        resumeDir,
 		Bypass:           !r.Cfg.Sandboxed,
 		Interactive:      false,
@@ -437,13 +444,13 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		DirenvBin:        r.DirenvBin,
 	})
 	if res == nil {
-		return review.Findings{}, "", "", "", err
+		return review.Findings{}, "", "", "", false, err
 	}
 	verdict := ""
 	if res.Divergence != nil {
 		verdict = res.Divergence.Verdict
 	}
-	return res.LastFindings, res.RunDir, verdict, res.DivergenceCommentURL, err
+	return res.LastFindings, res.RunDir, verdict, res.DivergenceCommentURL, res.SuggestionCommits, err
 }
 
 // reviewOptions maps the daemon's configuration onto a review run.
