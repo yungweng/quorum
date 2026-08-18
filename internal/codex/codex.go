@@ -153,10 +153,32 @@ func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration
 // Review runs `codex exec review` against baseRef and writes the reviewer's
 // findings to outFile. --ephemeral keeps the run out of the session history:
 // reviewers are throwaway and nothing ever resumes them.
-func (o Options) Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, outFile string, log io.Writer) error {
+func (o Options) Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, rules, outFile string, log io.Writer) error {
+	return o.run(ctx, env, timeout, o.reviewArgs(baseRef, rules, outFile), nil, log)
+}
+
+// reviewArgs builds the argument list for one reviewer pass. Without rules it
+// is the plain `--base` review. With rules it cannot be: codex rejects --base
+// next to the positional custom-instructions argument, so the prompt itself
+// has to carry the diff task codex would otherwise derive from --base. The
+// built-in review rubric stays the session's system prompt either way; only
+// the task prompt is replaced.
+func (o Options) reviewArgs(baseRef, rules, outFile string) []string {
 	args := append([]string{"exec", "review"}, o.reviewFlags()...)
-	args = append(args, "--base", baseRef, "--ephemeral", "-o", outFile)
-	return o.run(ctx, env, timeout, args, nil, log)
+	if rules == "" {
+		return append(args, "--base", baseRef, "--ephemeral", "-o", outFile)
+	}
+	return append(args, "--ephemeral", "-o", outFile, reviewInstructions(baseRef, rules))
+}
+
+// reviewInstructions mirrors the task prompt codex builds for --base, with the
+// repository's own rules appended as additional review criteria.
+func reviewInstructions(baseRef, rules string) string {
+	return fmt.Sprintf(`Review the code changes against the base '%s'. Start by finding the merge base (git merge-base HEAD %s), then run git diff against that SHA to inspect the changes. Perform the full general review and provide prioritized, actionable findings.
+
+In addition, this repository defines its own review rules below. A violation of one of these rules is a real finding at the severity the rule states, even where a general review would not report it:
+
+%s`, baseRef, baseRef, rules)
 }
 
 // Aggregate runs the aggregator pass: read-only, ephemeral, prompt as the

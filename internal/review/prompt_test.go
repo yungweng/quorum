@@ -54,3 +54,37 @@ func TestVerifierPromptIsNeutralAndAllowsEvidenceBasedEditing(t *testing.T) {
 		}
 	}
 }
+
+// Repository rules must survive the aggregator's "drop polish, taste, naming"
+// rule and the verifier's scope rule; both prompts state that rule findings
+// are real at the severity the rule names. A repo without rules gets the
+// prompts it always got.
+func TestPromptsCarryRepositoryRules(t *testing.T) {
+	rules := "- No new UI components; reuse existing ones first (Blocker)."
+	meta := promptMeta{
+		URL: "https://example.invalid/acme/api/pull/42", Title: "Bound retries",
+		Author: "example-user", BaseRef: "origin/main", BaseSHA: "base-sha", HeadSHA: "head-sha",
+		Rules: rules,
+	}
+	for name, prompt := range map[string]string{
+		"aggregator": aggregatorPrompt(meta),
+		"verifier":   verifierPrompt(meta),
+	} {
+		if !strings.Contains(prompt, rules) {
+			t.Errorf("%s prompt is missing the rules text", name)
+		}
+		if !strings.Contains(prompt, "severity the rule states") {
+			t.Errorf("%s prompt is missing the severity framing", name)
+		}
+	}
+
+	meta.Rules = ""
+	for name, prompt := range map[string]string{
+		"aggregator": aggregatorPrompt(meta),
+		"verifier":   verifierPrompt(meta),
+	} {
+		if strings.Contains(prompt, "Repository-specific review rules") {
+			t.Errorf("%s prompt grew a rules block without rules", name)
+		}
+	}
+}

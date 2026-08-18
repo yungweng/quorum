@@ -15,6 +15,7 @@ import (
 // P holds the resolved locations for one process.
 type P struct {
 	Config       string // the config file itself
+	RulesDir     string // per-repo review rules: <RulesDir>/<owner>/<repo>.md
 	StateDir     string
 	StateFile    string
 	PRStatesFile string // cached GitHub state for dashboard pull requests
@@ -66,6 +67,7 @@ func Resolve() P {
 
 	p := P{
 		Config:       env("QUORUM_CONFIG", filepath.Join(configHome, "quorum", "config")),
+		RulesDir:     filepath.Join(configHome, "quorum", "rules"),
 		StateDir:     stateDir,
 		StateFile:    filepath.Join(stateDir, "state.json"),
 		PRStatesFile: filepath.Join(stateDir, "pr-states.json"),

@@ -75,6 +75,11 @@ type Options struct {
 	RepoRoot string
 	Number   int
 	Context  string // extra text handed to the fix session
+	// Rules is the repository's user-local review rules file, verbatim. Review
+	// rounds hand it to every reviewer pass, the aggregator and the verifier;
+	// fix sessions get it appended to their standing rules so a fix cannot
+	// resolve a finding by violating the rule that produced it.
+	Rules string
 
 	Engine string // fix-session engine: codex, claude or grok; empty means codex
 	Model  string
@@ -443,7 +448,7 @@ func (r *run) prepare() error {
 		return err
 	}
 	r.fixer = fixer
-	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly)
+	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly, r.o.Rules)
 	if tgt.BranchOnly {
 		r.prCtx = branchContext(r.branch, pr.BaseRefName, r.o.Context)
 	} else {

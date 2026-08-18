@@ -27,7 +27,7 @@ const (
 //     itself via gh so it appears as a normal comment from the user;
 //   - the DISPUTED FINDINGS contract, which is the only way a round with no
 //     commits is allowed to end without stopping the run.
-func standingRules(branch string, autonomous, branchOnly bool) string {
+func standingRules(branch string, autonomous, branchOnly bool, repoRules string) string {
 	target := "an existing pull request"
 	pipeline := "CI checks -> external code review -> fix rounds"
 	record := "in the PR comment section of your final message"
@@ -43,7 +43,7 @@ followed by short numbered questions. Use this marker for nothing else. You will
 		decision = fmt.Sprintf("- No human is available during this run. Make every decision yourself, including product decisions: pick the most conservative reasonable option and record notable decisions %s. Do not stop to ask questions.", record)
 	}
 
-	return fmt.Sprintf(`You are the fix agent for %s, running unattended inside a pipeline (%s), in a dedicated git worktree on a detached checkout of the pushed branch head.
+	rules := fmt.Sprintf(`You are the fix agent for %s, running unattended inside a pipeline (%s), in a dedicated git worktree on a detached checkout of the pushed branch head.
 
 Standing rules for every step:
 - Follow this repository's contributor and agent instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING) where present.
@@ -58,6 +58,15 @@ Standing rules for every step:
 DISPUTED FINDINGS:
 followed by short numbered rebuttals, one per disputed finding, each naming the finding and why it is wrong. Use this marker only for Blocker/Critical findings you are confident are incorrect, never to avoid work, and never together with code changes that already resolve the finding.`,
 		target, pipeline, branch, decision)
+
+	if repoRules != "" {
+		rules += fmt.Sprintf(`
+
+This repository additionally defines its own rules below. The external review enforces them, so apply them to every change you make; never resolve a finding in a way that itself violates one of them:
+
+%s`, repoRules)
+	}
+	return rules
 }
 
 // firstPrompt wraps the opening step in the standing rules and PR context.

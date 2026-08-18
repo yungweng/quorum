@@ -56,7 +56,7 @@ DISPUTED FINDINGS:
 // that stalls on questions nobody will answer, or a session inventing product
 // decisions while a human sits waiting.
 func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
-	auto := standingRules("feature/crumb-tray", true, false)
+	auto := standingRules("feature/crumb-tray", true, false, "")
 	if !strings.Contains(auto, "No human is available during this run") {
 		t.Error("autonomous rules do not tell the session to decide itself")
 	}
@@ -64,7 +64,7 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 		t.Error("autonomous rules still invite the session to ask questions")
 	}
 
-	interactive := standingRules("feature/crumb-tray", false, false)
+	interactive := standingRules("feature/crumb-tray", false, false, "")
 	if !strings.Contains(interactive, MarkerQuestions) {
 		t.Error("interactive rules do not describe the questions marker")
 	}
@@ -73,7 +73,7 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 // The push command is spelled out because a bare `git push` fails on the
 // detached checkout the pipeline works in.
 func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
-	rules := standingRules("feature/crumb-tray", true, false)
+	rules := standingRules("feature/crumb-tray", true, false, "")
 	want := "git push origin HEAD:refs/heads/feature/crumb-tray"
 	if !strings.Contains(rules, want) {
 		t.Errorf("the standing rules do not contain %q", want)
@@ -83,7 +83,7 @@ func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
 // The pipeline posts the fix log itself so it appears as an ordinary comment
 // from the user. A session that posts its own would produce duplicates.
 func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
-	rules := standingRules("main", true, false)
+	rules := standingRules("main", true, false, "")
 	if !strings.Contains(rules, "Never create or edit PRs or comments") {
 		t.Error("the standing rules do not forbid the session from commenting")
 	}
@@ -93,7 +93,7 @@ func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
 }
 
 func TestFixSessionPromptsRequireACleanWorktree(t *testing.T) {
-	rules := standingRules("main", true, false)
+	rules := standingRules("main", true, false, "")
 	for _, want := range []string{"$TMPDIR or /tmp", "leave git status --porcelain empty", "remove only temporary artifacts you created"} {
 		if !strings.Contains(rules, want) {
 			t.Errorf("the standing rules are missing %q", want)
@@ -197,5 +197,21 @@ func TestFinalDescriptionPromptDescribesStateWithoutHistory(t *testing.T) {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("final description prompt contains %q", unwanted)
 		}
+	}
+}
+
+// Repository rules join the standing rules so a fix round cannot resolve a
+// finding in a way that itself violates the rule that produced it.
+func TestStandingRulesCarryRepositoryRules(t *testing.T) {
+	repoRules := "- No new UI components; reuse existing ones first (Blocker)."
+	rules := standingRules("main", true, false, repoRules)
+	if !strings.Contains(rules, repoRules) {
+		t.Error("the standing rules are missing the repository rules")
+	}
+	if !strings.Contains(rules, "never resolve a finding in a way that itself violates one of them") {
+		t.Error("the repository rules block lost its framing")
+	}
+	if strings.Contains(standingRules("main", true, false, ""), "its own rules below") {
+		t.Error("a rules block appeared without repository rules")
 	}
 }

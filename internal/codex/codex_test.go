@@ -198,3 +198,27 @@ func TestFindSessionSkipsUnreadableRollouts(t *testing.T) {
 		t.Errorf("session = %s", got)
 	}
 }
+
+// Without rules a reviewer pass is the plain --base review it always was. With
+// rules it cannot be: codex rejects --base next to the positional
+// custom-instructions argument, so the rules ride in a custom prompt that
+// carries the base-diff task itself.
+func TestReviewArgsSwapBaseForCustomInstructionsWhenRulesExist(t *testing.T) {
+	plain := (Options{}).reviewArgs("origin/main", "", "out.md")
+	if got := strings.Join(plain, " "); !strings.Contains(got, "--base origin/main") {
+		t.Errorf("--base missing without rules: %s", got)
+	}
+
+	rules := "- UI changes must be mobile responsive (Critical)."
+	withRules := (Options{}).reviewArgs("origin/main", rules, "out.md")
+	joined := strings.Join(withRules, " ")
+	if strings.Contains(joined, "--base") {
+		t.Errorf("--base conflicts with custom instructions and must not appear: %s", joined)
+	}
+	prompt := withRules[len(withRules)-1]
+	for _, want := range []string{"origin/main", "git merge-base HEAD origin/main", "full general review", rules} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("custom review prompt is missing %q", want)
+		}
+	}
+}

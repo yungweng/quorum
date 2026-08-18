@@ -233,10 +233,27 @@ case "$@" in
 esac
 echo '`+envelope+`'`)
 	out := filepath.Join(t.TempDir(), "reviewer-1.md")
-	if err := (Options{Bin: bin}).Review(context.Background(), env, 0, "base", out, io.Discard); err != nil {
+	if err := (Options{Bin: bin}).Review(context.Background(), env, 0, "base", "", out, io.Discard); err != nil {
 		t.Fatalf("Review: %v", err)
 	}
 	if b, _ := os.ReadFile(out); string(b) != "all done" {
 		t.Errorf("reviewer output = %q", b)
+	}
+}
+
+// Repository rules ride into the reviewer prompt as additional criteria; a
+// repo without rules gets exactly the prompt it always got.
+func TestReviewPromptCarriesRepositoryRules(t *testing.T) {
+	rules := "- No new UI components; reuse existing ones first (Blocker)."
+	with := reviewPrompt("origin/main", "diff", rules)
+	if !strings.Contains(with, rules) {
+		t.Errorf("rules missing from prompt: %s", with)
+	}
+	if !strings.Contains(with, "real finding you must report") {
+		t.Error("rules block lost its severity framing")
+	}
+	without := reviewPrompt("origin/main", "diff", "")
+	if strings.Contains(without, "its own review rules") {
+		t.Errorf("rules block appeared without rules: %s", without)
 	}
 }

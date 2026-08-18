@@ -113,9 +113,11 @@ func (m Model) Tag() string {
 // strings and still satisfy Fixer without importing this package.
 type SessionRef = string
 
-// Reviewer runs the read-only, non-resumable passes of a review.
+// Reviewer runs the read-only, non-resumable passes of a review. rules is the
+// repository's user-local review rules, or empty when the repository has none;
+// each adapter injects them into its reviewer prompt.
 type Reviewer interface {
-	Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, outFile string, log io.Writer) error
+	Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, rules, outFile string, log io.Writer) error
 	Aggregate(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error
 	Verify(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error
 	DescribePR(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error
