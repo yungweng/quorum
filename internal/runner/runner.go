@@ -127,7 +127,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 				}
 				r.Log.Printf("%s: FAILED, %s", key, reason)
 				r.recordAutoMergeFailure(key, reqAt, runDir, findings, reason)
-				r.notify(fmt.Sprintf("Auto-merge failed: %s#%d", nameOf(repo), number), reason, urlOf(findings))
+				r.notify(fmt.Sprintf("Auto-merge failed: %s#%d", nameOf(repo), number), reason)
 				return fmt.Errorf("%s: %s", key, reason)
 			}
 		}
@@ -159,7 +159,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		case r.Cfg.NotifyReadyToMerge && mergeStatus == "" && automerge.Eligible(findings):
 			r.notifyReadyToMerge(repo, number)
 		default:
-			r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note, urlOf(findings))
+			r.notify(fmt.Sprintf("Reviewed %s#%d", nameOf(repo), number), note)
 		}
 		return nil
 	}
@@ -177,7 +177,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		r.Log.Printf("%s: usage limit hit, pausing new reviews until %s", key, until.Format(time.RFC3339))
 		r.recordUsageLimit(key, sha, recordableRunDir(runDir, runErr), runLog, until, runErr)
 		if wrote {
-			r.notify("Usage limit hit", "Pausing new reviews until "+until.Format(time.RFC1123), "")
+			r.notify("Usage limit hit", "Pausing new reviews until "+until.Format(time.RFC1123))
 		}
 		return fmt.Errorf("%s: usage limit, paused until %s", key, until.Format(time.RFC3339))
 	}
@@ -191,7 +191,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		}
 		r.recordDivergenceResult(key, recordedSHA, reqAt, runDir, runLog, divergenceURL, findings, reason)
 		r.notify(fmt.Sprintf("Review loop stopped: %s#%d", nameOf(repo), number),
-			"divergence analysis: "+divergenceVerdict, divergenceURL)
+			"divergence analysis: "+divergenceVerdict)
 		return fmt.Errorf("%s: %s", key, reason)
 	}
 	r.Log.Printf("%s: FAILED, %s (log: %s)", key, reason, runLog)
@@ -201,7 +201,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	// instead of paying for a fresh fan-out.
 	resumable := errors.Is(runErr, review.ErrAggregatorInvalid) || errors.Is(runErr, review.ErrVerifierInvalid)
 	r.recordFailureWith(key, sha, recordableRunDir(runDir, runErr), reason, runLog, resumable)
-	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason, "")
+	r.notify(fmt.Sprintf("Review failed: %s#%d", nameOf(repo), number), reason)
 	return fmt.Errorf("%s: %s", key, reason)
 }
 

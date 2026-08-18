@@ -2,16 +2,14 @@ package runner
 
 import (
 	"fmt"
-	"os/exec"
 	"runtime"
 
 	macnotify "github.com/yungweng/quorum/internal/notify"
 )
 
-// notify uses the terminal for foreground runs and terminal-notifier for the
-// detached launchd agent. AppleScript is deliberately not a fallback: macOS
-// attributes those notifications to Script Editor rather than to the terminal.
-func (r *Runner) notify(title, body, url string) {
+// notify uses the terminal for foreground runs and Notification Center for
+// the detached launchd agent.
+func (r *Runner) notify(title, body string) {
 	if !r.Cfg.Notify {
 		return
 	}
@@ -22,26 +20,18 @@ func (r *Runner) notify(title, body, url string) {
 	if runtime.GOOS != "darwin" {
 		return
 	}
-
-	cmd, err := terminalNotifierCommand(title, body, url)
-	if err != nil {
-		r.logNotificationError(err)
-		return
-	}
-	if err := cmd.Run(); err != nil {
+	if err := macnotify.Send(title, body); err != nil {
 		r.logNotificationError(err)
 	}
 }
 
 // notifyApprovalRequired always uses Notification Center, including for a
-// foreground run. Its per-PR group is not replaced by routine completion
-// notifications, so the action stays visible until the user dismisses it.
+// foreground run, so the alert outlives the terminal session.
 func (r *Runner) notifyApprovalRequired(repo string, number int) {
 	if !r.Cfg.Notify {
 		return
 	}
-	url := fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
-	if err := macnotify.ApprovalRequired(repo, number, url); err != nil {
+	if err := macnotify.ApprovalRequired(repo, number); err != nil {
 		r.logNotificationError(err)
 		if r.TerminalNotify != nil {
 			r.TerminalNotify("quorum: approval required",
@@ -50,32 +40,19 @@ func (r *Runner) notifyApprovalRequired(repo string, number int) {
 	}
 }
 
-// notifyReadyToMerge mirrors notifyApprovalRequired: a persistent, clickable
-// Notification Center item per pull request whose clean review was not merged.
+// notifyReadyToMerge mirrors notifyApprovalRequired for a pull request whose
+// clean review was not merged.
 func (r *Runner) notifyReadyToMerge(repo string, number int) {
 	if !r.Cfg.Notify {
 		return
 	}
-	url := fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
-	if err := macnotify.ReadyToMerge(repo, number, url); err != nil {
+	if err := macnotify.ReadyToMerge(repo, number); err != nil {
 		r.logNotificationError(err)
 		if r.TerminalNotify != nil {
 			r.TerminalNotify("quorum: ready to merge",
 				fmt.Sprintf("%s#%d is clean and ready to merge.", repo, number))
 		}
 	}
-}
-
-func terminalNotifierCommand(title, body, url string) (*exec.Cmd, error) {
-	bin, err := exec.LookPath("terminal-notifier")
-	if err != nil {
-		return nil, fmt.Errorf("terminal-notifier not found: %w", err)
-	}
-	args := []string{"-title", title, "-message", body, "-group", "io.github.quorum"}
-	if url != "" {
-		args = append(args, "-open", url)
-	}
-	return exec.Command(bin, args...), nil
 }
 
 func (r *Runner) logNotificationError(err error) {

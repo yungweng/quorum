@@ -186,7 +186,7 @@ func (a *app) cmdBabysit(argv []string) int {
 			mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
 			mergeStatus, mergeErr = mergeResult.Status, finishErr
 			if mergeErr == nil && mergeStatus == automerge.ApprovalRequired {
-				a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
+				a.notifyApprovalRequired(rep.notify, repo, res.PR.Number)
 			}
 			if mergeErr != nil {
 				err = mergeErr
@@ -196,7 +196,7 @@ func (a *app) cmdBabysit(argv []string) int {
 
 	if err == nil && res != nil && a.cfg.NotifyReadyToMerge && mergeStatus == "" &&
 		!res.PR.IsDraft && automerge.Eligible(res.LastFindings) {
-		a.notifyReadyToMerge(rep.notify, repo, res.PR.Number, res.PR.URL)
+		a.notifyReadyToMerge(rep.notify, repo, res.PR.Number)
 		rep.readySent = rep.notify
 	}
 

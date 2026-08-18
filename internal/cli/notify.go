@@ -6,14 +6,11 @@ import (
 	macnotify "github.com/yungweng/quorum/internal/notify"
 )
 
-func (a *app) notifyReadyToMerge(enabled bool, repo string, number int, url string) {
+func (a *app) notifyReadyToMerge(enabled bool, repo string, number int) {
 	if !enabled {
 		return
 	}
-	if url == "" {
-		url = fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
-	}
-	if err := macnotify.ReadyToMerge(repo, number, url); err != nil {
+	if err := macnotify.ReadyToMerge(repo, number); err != nil {
 		if a.log != nil {
 			a.log.Printf("notification not sent: %v", err)
 		}
@@ -24,14 +21,11 @@ func (a *app) notifyReadyToMerge(enabled bool, repo string, number int, url stri
 	}
 }
 
-func (a *app) notifyApprovalRequired(enabled bool, repo string, number int, url string) {
+func (a *app) notifyApprovalRequired(enabled bool, repo string, number int) {
 	if !enabled {
 		return
 	}
-	if url == "" {
-		url = fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
-	}
-	if err := macnotify.ApprovalRequired(repo, number, url); err != nil {
+	if err := macnotify.ApprovalRequired(repo, number); err != nil {
 		if a.log != nil {
 			a.log.Printf("notification not sent: %v", err)
 		}

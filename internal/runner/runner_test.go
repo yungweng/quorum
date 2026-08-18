@@ -167,7 +167,7 @@ func TestNotifyUsesTerminalForForegroundRun(t *testing.T) {
 		},
 	}
 
-	r.notify("Reviewed api#42", "nothing found", "https://example.invalid/comment/42")
+	r.notify("Reviewed api#42", "nothing found")
 
 	if gotTitle != "Reviewed api#42" || gotBody != "nothing found" {
 		t.Fatalf("terminal notification = %q / %q", gotTitle, gotBody)
@@ -178,23 +178,10 @@ func TestNotifySettingDisablesTerminalNotification(t *testing.T) {
 	called := false
 	r := &Runner{TerminalNotify: func(string, string) { called = true }}
 
-	r.notify("Reviewed api#42", "nothing found", "")
+	r.notify("Reviewed api#42", "nothing found")
 
 	if called {
 		t.Fatal("notification sent although NOTIFY is disabled")
-	}
-}
-
-func TestTerminalNotifierDoesNotFallBackWhenMissing(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	cmd, err := terminalNotifierCommand("Reviewed api#42", "nothing found", "")
-
-	if err == nil || cmd != nil {
-		t.Fatalf("terminalNotifierCommand = (%v, %v), want a missing-tool error", cmd, err)
-	}
-	if !strings.Contains(err.Error(), "terminal-notifier not found") {
-		t.Fatalf("error = %q", err)
 	}
 }
 

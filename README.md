@@ -36,7 +36,7 @@ costs one review no matter how many times it is pushed to.
 ## Install
 
 ```bash
-brew install yungweng/tap/quorum terminal-notifier
+brew install yungweng/tap/quorum
 brew install --cask codex     # Homebrew formulas cannot depend on a cask
 ```
 
@@ -56,13 +56,11 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) and
 `grok` (Grok CLI) are optional and only needed when `REVIEW_ENGINE`/
 `FIX_ENGINE` or `--engine`/`--review-engine` select them.
-`terminal-notifier` sends notifications from detached macOS agent runs.
-Foreground commands normally notify through the terminal. When an own pull
-request needs another person's approval, quorum leaves a dedicated macOS
-Notification Center item that later completion notifications cannot replace.
-With `NOTIFY_READY_TO_MERGE=1`, a clean review that quorum did not merge
-leaves the same kind of item, named `owner/repo#number`; clicking it opens the
-pull request on GitHub.
+Detached macOS agent runs notify through Notification Center via `osascript`;
+macOS attributes those notifications to Script Editor. Foreground commands
+normally notify through the terminal. When an own pull request needs another
+person's approval, or with `NOTIFY_READY_TO_MERGE=1` when a clean review was
+not merged, quorum alerts with sound, naming `owner/repo#number`.
 `direnv` is optional and only needed for projects that have an `.envrc`.
 
 `make install-hooks` is needed once per clone and after a tracked hook changes.

@@ -140,16 +140,6 @@ func (a *app) runChecks() []check {
 		}
 		out = append(out, check{spec.name, versionOf(path), 0, ""})
 	}
-	if runtime.GOOS == "darwin" && a.cfg.Notify {
-		path, err := exec.LookPath("terminal-notifier")
-		if err != nil {
-			out = append(out, check{"notifications", "terminal-notifier not found; detached agent notifications are disabled", 1,
-				"brew install terminal-notifier"})
-		} else {
-			out = append(out, check{"notifications", versionOf(path), 0, ""})
-		}
-	}
-
 	// GitHub authentication.
 	if ghBin, err := exec.LookPath("gh"); err == nil {
 		client := a.newGH(ghBin)

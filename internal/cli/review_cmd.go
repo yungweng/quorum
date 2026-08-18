@@ -165,14 +165,14 @@ func (a *app) cmdReview(argv []string) int {
 		mergeStatus = mergeResult.Status
 		if mergeStatus == automerge.ApprovalRequired {
 			a.out.Printf("auto-merge: %s\n", a.out.Yellow(mergeStatus))
-			a.notifyApprovalRequired(notify, repo, number, "")
+			a.notifyApprovalRequired(notify, repo, number)
 		} else {
 			a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus))
 		}
 	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
 	if notify && a.cfg.NotifyReadyToMerge && mergeStatus == "" && automerge.Eligible(res.Findings) {
-		a.notifyReadyToMerge(notify, repo, number, "")
+		a.notifyReadyToMerge(notify, repo, number)
 		return exitOK
 	}
 	if notify && mergeStatus != automerge.ApprovalRequired {

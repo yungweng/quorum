@@ -304,7 +304,7 @@ AGENT_ACTION="review"    # or "babysit"
 AUTO_MERGE=0             # one switch for agent, review and babysit runs
 AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
 AUTO_MERGE_AUTHORS=""    # only merge PRs from these logins; empty allows every author
-NOTIFY=1                 # terminal; macOS system alerts need terminal-notifier
+NOTIFY=1                 # terminal; detached runs use macOS Notification Center
 NOTIFY_READY_TO_MERGE=0  # persistent alert per PR whose clean review was not auto-merged
 ```
 
@@ -362,13 +362,12 @@ review does not spend tokens repeating that review.
 
 ### Ready-to-merge notifications
 
-`NOTIFY_READY_TO_MERGE=1` leaves one persistent macOS Notification Center item
-per pull request whose review came back with zero Blockers and zero Critical
-findings but was not merged by quorum, typically because auto-merge is off.
-The notification names `owner/repo#number`; clicking it opens the
-pull request on GitHub. It replaces the routine completion notification for
-that run and stays visible until dismissed, like the `awaiting approval` item.
-It requires `terminal-notifier` and `NOTIFY=1`, obeys `--no-notify`, and never
+`NOTIFY_READY_TO_MERGE=1` posts one macOS notification, with sound, per pull
+request whose review came back with zero Blockers and zero Critical findings
+but was not merged by quorum, typically because auto-merge is off. The
+notification names `owner/repo#number`. Like every macOS notification quorum
+sends, it goes through `osascript`, so Notification Center attributes it to
+Script Editor. It requires `NOTIFY=1`, obeys `--no-notify`, and never
 fires for a merged PR, a branch-only run, `POST=0`, or `--dry-run`. The
 default is `0`.
 
