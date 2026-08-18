@@ -27,7 +27,7 @@ import (
 var babysitBoolFlags = map[string]bool{
 	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
 	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true, "divergence-scan": true,
-	"draft": true, "local": true, "no-resolve-conflicts": true,
+	"draft": true, "local": true, "no-resolve-conflicts": true, "no-fix-suggestions": true,
 	"h": true, "help": true,
 }
 
@@ -100,6 +100,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		AllowDraft:           a.cfg.BabysitDrafts || args.boolean("draft"),
 		Local:                args.boolean("local"),
 		ResolveConflicts:     a.cfg.ResolveConflicts && !args.boolean("no-resolve-conflicts"),
+		FixSuggestions:       a.cfg.FixSuggestions && !args.boolean("no-fix-suggestions"),
 		DivergenceScan:       a.cfg.DivergenceScan || args.boolean("divergence-scan"),
 		DivergenceEscalateTo: slices.Clone(a.cfg.DivergenceEscalateTo),
 		DivergenceTimeout:    a.cfg.ReviewTimeout,
@@ -182,6 +183,12 @@ func (a *app) cmdBabysit(argv []string) int {
 			// The auto-merge path refuses drafts outright; a converged draft
 			// run must not turn that refusal into a failure of the whole run.
 			rep.Info("auto-merge: skipped, the PR is a draft")
+		} else if res.SuggestionCommits {
+			// Auto-merge approves the reviewed head only. The suggestion round
+			// pushed commits past it, so merging now would claim a review that
+			// never saw them; the drift refusal inside automerge would fail the
+			// run for the same reason, less legibly.
+			rep.Info("auto-merge: skipped, the suggestion round pushed commits the final review has not seen")
 		} else {
 			mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
 			mergeStatus, mergeErr = mergeResult.Status, finishErr
@@ -324,6 +331,12 @@ branch conflicts with its base, the base is merged and the conflicts resolved
 before the first review; RESOLVE_CONFLICTS=0 or --no-resolve-conflicts turns
 that off.
 
+When the final review is clean but still lists Suggestions, one last fix round
+triages them: it implements the ones worth keeping and skips the rest, without
+another review. FIX_SUGGESTIONS=0 or --no-fix-suggestions turns that off. When
+that round pushes commits, auto-merge is skipped because the review never saw
+them.
+
 The fix sessions run with the engine's sandbox and approvals bypassed by
 default (codex: --dangerously-bypass-approvals-and-sandbox, claude:
 --dangerously-skip-permissions, grok: --always-approve): they must run tests,
@@ -347,6 +360,7 @@ Options:
   --local                Ignore any open PR: review and fix the pushed branch,
                          post nothing to GitHub
   --no-resolve-conflicts Do not merge the base branch when the branch conflicts
+  --no-fix-suggestions   Skip the suggestion triage round after a clean review
   --sandboxed            Use the engine's own sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line

@@ -119,6 +119,38 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 %s`, number, MarkerComment, comment)
 }
 
+// suggestionRoundPrompt hands the Suggestions of the final, otherwise clean
+// review to the session, once. No review round follows, so it demands triage
+// before code: a leftover Suggestion is often an artifact of the reviewers'
+// isolated worktree (a missing service, an unprovisioned test database), and
+// changing nothing is an explicitly allowed outcome.
+func suggestionRoundPrompt(number int, branch string, branchOnly bool, comment string) string {
+	if branchOnly {
+		return fmt.Sprintf(`The final external code review of branch %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so be conservative.
+
+For each Suggestion, first decide whether it is worth implementing. Skip it when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk outweighs its value. Implement the ones that clearly improve the code. Changing nothing is a perfectly fine outcome.
+
+If you changed code: run the affected checks, commit, and push. If you changed nothing, do not commit or push, and briefly state per Suggestion why you skipped it.
+
+---
+
+%s`, branch, comment)
+	}
+	return fmt.Sprintf(`The final external code review of PR #%d found no Blockers and no Critical issues, but it still lists Suggestions. The full review comment follows below. This is the last step of the run and no further review will check your work, so be conservative.
+
+For each Suggestion, first decide whether it is worth implementing. Skip it when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk outweighs its value. Implement the ones that clearly improve the code. Changing nothing is a perfectly fine outcome.
+
+If you changed code: run the affected checks, commit, and push. Do not wait for CI; the pipeline watches the checks for you. Then end your final message with a line that is exactly:
+%s
+followed by a short log comment for the PR: what you changed and how, which checks you ran, and which Suggestions you left unchanged and why. Write it in the language of the PR description, plain and factual, and never mention AI, agents, or automation in it. Use this marker for nothing else.
+
+If you changed nothing, do not commit or push, do not use the marker, and briefly state per Suggestion why you skipped it.
+
+---
+
+%s`, number, MarkerComment, comment)
+}
+
 // conflictFixPrompt asks the session to merge the base branch and resolve the
 // conflicts. The direction is base into head: it keeps the branch's own
 // history intact and is the merge GitHub would attempt for the PR.
