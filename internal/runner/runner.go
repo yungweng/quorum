@@ -412,6 +412,7 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		Repo:                 repo,
 		RepoRoot:             clone,
 		Number:               number,
+		Rules:                r.repoRules(repo),
 		Engine:               r.Cfg.FixEngine,
 		Model:                r.Cfg.FixModel,
 		Effort:               r.Cfg.FixEffort,
@@ -453,12 +454,24 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 	return res.LastFindings, res.RunDir, verdict, res.DivergenceCommentURL, res.SuggestionCommits, err
 }
 
+// repoRules loads the user-local review rules for repo. The unattended agent
+// only warns on a read failure: nobody is present to fix a permission error,
+// and the full general review still runs; the manual commands fail instead.
+func (r *Runner) repoRules(repo string) string {
+	rules, err := config.RepoRules(r.P.RulesDir, repo)
+	if err != nil {
+		r.Log.Printf("%s: reading the review rules failed, continuing without them: %v", repo, err)
+	}
+	return rules
+}
+
 // reviewOptions maps the daemon's configuration onto a review run.
 func (r *Runner) reviewOptions(repo string, number int, clone string) review.Options {
 	return review.Options{
 		Repo:     repo,
 		Number:   number,
 		RepoRoot: clone,
+		Rules:    r.repoRules(repo),
 		// No concurrency limit: every pass runs at once, which is the point. A
 		// review that trickles through its passes is a review you wait for.
 		Runs:          r.Cfg.Reviewers,

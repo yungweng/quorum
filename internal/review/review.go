@@ -109,6 +109,10 @@ type Options struct {
 	BaseBranch    string // empty uses the PR's own base
 	MinSuccessful int    // 0 means a majority of Runs
 	ReviewTimeout time.Duration
+	// Rules is the repository's user-local review rules file, verbatim. It
+	// reaches every reviewer pass, the aggregator and the verifier; empty
+	// means the repository has none.
+	Rules string
 
 	Post             bool
 	KeepWorktree     bool
@@ -340,7 +344,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	prompt := aggregatorPrompt(promptMeta{
 		URL: pr.URL, Title: pr.Title, Author: pr.Author.Login, BaseRef: baseRef,
 		BaseSHA: reviewedBase, HeadSHA: reviewedHead, BaseDriftNote: driftNote,
-		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
+		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly, Rules: o.Rules,
 	})
 	if err := r.aggregate(ctx, o, run, env, eng, prompt, len(indices), rep); err != nil {
 		return nil, &RunDirError{RunDir: run.root, Err: err}
@@ -348,7 +352,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err := r.verify(ctx, o, run, env, eng, verifierPrompt(promptMeta{
 		URL: pr.URL, Title: pr.Title, Author: pr.Author.Login, BaseRef: baseRef,
 		BaseSHA: reviewedBase, HeadSHA: reviewedHead,
-		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
+		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly, Rules: o.Rules,
 	}), reviewedHead, setupChanges, rep); err != nil {
 		return nil, &RunDirError{RunDir: run.root, Err: err}
 	}
@@ -644,7 +648,7 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 
 			rep.ReviewerStarted(idx)
 			begin := time.Now()
-			err = eng.Review(ctx, env, o.ReviewTimeout, baseRef, out, logFile)
+			err = eng.Review(ctx, env, o.ReviewTimeout, baseRef, o.Rules, out, logFile)
 			elapsed := time.Since(begin)
 
 			mu.Lock()

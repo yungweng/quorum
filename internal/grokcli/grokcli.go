@@ -199,12 +199,12 @@ const diffCap = 2 * 1024 * 1024
 // Review runs one reviewer pass and writes its findings to outFile. Codex
 // ships a review subcommand that computes the diff itself; Grok does not,
 // so the diff against baseRef is computed here and handed over inline.
-func (o Options) Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, outFile string, log io.Writer) error {
+func (o Options) Review(ctx context.Context, env envexec.Env, timeout time.Duration, baseRef, rules, outFile string, log io.Writer) error {
 	diff, err := reviewDiff(ctx, env, baseRef, log)
 	if err != nil {
 		return err
 	}
-	prompt := reviewPrompt(baseRef, diff)
+	prompt := reviewPrompt(baseRef, diff, rules)
 	args := append(o.flags(), readOnlyFlags()...)
 	_, err = o.run(ctx, env, timeout, args, strings.NewReader(prompt), outFile, log)
 	return err

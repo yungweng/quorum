@@ -78,6 +78,7 @@ func (r *run) reviewOptions() review.Options {
 		Engine:           r.o.ReviewEngine,
 		Model:            r.o.ReviewModel,
 		Effort:           r.o.ReviewEffort,
+		Rules:            r.o.Rules,
 		BaseBranch:       r.pr.BaseRefName,
 		Post:             r.o.Post && !r.target.BranchOnly,
 		UseDirenv:        r.o.UseDirenv,

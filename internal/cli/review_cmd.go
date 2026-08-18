@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/automerge"
+	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
@@ -121,6 +122,9 @@ func (a *app) cmdReview(argv []string) int {
 	}
 	if o.UseDirenv && t.Direnv == "" {
 		return a.die("direnv is not installed; rerun with --no-direnv")
+	}
+	if o.Rules, err = config.RepoRules(a.p.RulesDir, o.Repo); err != nil {
+		return a.die("reading the review rules for %s: %v", o.Repo, err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

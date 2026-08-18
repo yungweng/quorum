@@ -52,6 +52,7 @@ Important execution rules:
 	fmt.Fprintf(&b, "Base SHA reviewed: %s\n", m.BaseSHA)
 	fmt.Fprintf(&b, "Head SHA: %s\n", m.HeadSHA)
 	fmt.Fprintf(&b, "Base drift note: %s\n\n", drift)
+	b.WriteString(rulesBlock(m.Rules))
 	if m.BranchOnly {
 		fmt.Fprint(&b, `Rules:
 - Be direct, but do not dilute real issues.
@@ -102,7 +103,7 @@ func verifierPrompt(m promptMeta) string {
 
 %s
 
-The candidate report contains claims that require checking. Some may be true positives, some may be false positives, and some may identify a real issue imprecisely. Do not aim for any predetermined outcome or proportion. Judge each finding on the repository evidence, independent of reviewer agreement or wording.
+%sThe candidate report contains claims that require checking. Some may be true positives, some may be false positives, and some may identify a real issue imprecisely. Do not aim for any predetermined outcome or proportion. Judge each finding on the repository evidence, independent of reviewer agreement or wording.
 
 Inspect the local diff and relevant code for every bullet under Blockers, Critical, Suggestions, and Questions. Trace the actual control and error paths. Use read-only inspection first. You may run focused commands or tests when they materially help verify a claim. Do not edit source, tests, configuration, generated files, or repository metadata. Do not stage or commit anything. Put any disposable artifact you intentionally create under $TMPDIR or /tmp, outside the repository.
 
@@ -122,7 +123,26 @@ Output rules:
 - List every final finding as a top-level bullet beginning with "- ". If a section has no findings, write "None." as its only content.
 - Rewrite the summary so it describes only the final findings. Do not discuss discarded claims or the verification process.
 - Preserve a concise opening suitable for the candidate's target. Do not mention reviewers, verification, Codex, or automation.
-- Do not use the network, post comments, or run gh, curl, or xh.`, target.String())
+- Do not use the network, post comments, or run gh, curl, or xh.`, target.String(), rulesBlock(m.Rules))
+}
+
+// rulesBlock frames the repository's own review rules for the aggregator and
+// verifier. Without it their scope rules - "drop polish, taste, naming" on the
+// aggregation side, "outside the changed code's responsibility" on the
+// verification side - would silently delete exactly the findings the rules
+// exist to produce. Empty rules yield an empty block, so a repo without a
+// rules file gets the prompts it always got.
+func rulesBlock(rules string) string {
+	if rules == "" {
+		return ""
+	}
+	return fmt.Sprintf(`Repository-specific review rules are in effect for this repository:
+
+%s
+
+A finding that reports a violation of one of these rules is a real, in-scope finding. Keep it at the severity the rule states; do not drop or downgrade it as polish, taste, naming, style, or out of scope.
+
+`, rules)
 }
 
 // promptMeta is what the aggregator needs to know about the run.
@@ -136,4 +156,6 @@ type promptMeta struct {
 	BaseSHA       string
 	HeadSHA       string
 	BaseDriftNote string
+	// Rules is the repository's user-local review rules, or empty.
+	Rules string
 }
