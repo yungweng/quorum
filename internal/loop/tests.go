@@ -55,6 +55,9 @@ func (r *run) ensureTestsGreen() error {
 		r.rep.Step("Tests: " + r.o.TestCmd)
 		err := r.runTestCmd(logPath)
 		if err == nil {
+			if err := r.requireCleanWorktree(fmt.Sprintf("tests-%d", r.testRuns)); err != nil {
+				return err
+			}
 			r.rep.Info("tests green")
 			return nil
 		}

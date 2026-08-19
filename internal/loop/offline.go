@@ -66,6 +66,9 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			r.rep.Info("CI repairs moved the head past the reviewed commit; reviewing the repaired head")
 			return false, nil
 		}
+		if err := r.requirePublishedHead(r.headSHA); err != nil {
+			return false, fmt.Errorf("checking the pull request head after CI: %w", err)
+		}
 	}
 	return true, nil
 }
