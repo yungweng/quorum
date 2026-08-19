@@ -61,9 +61,6 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 	if err := r.flushFixComments(); err != nil {
 		return false, err
 	}
-	if err := r.postFinalReviewComment(res, round, findings); err != nil {
-		return false, err
-	}
 
 	if !r.target.BranchOnly {
 		prePushSHA := r.headSHA
@@ -78,6 +75,9 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 		if err := r.requirePublishedHead(r.headSHA); err != nil {
 			return false, fmt.Errorf("checking the pull request head after CI: %w", err)
 		}
+	}
+	if err := r.postFinalReviewComment(res, round, findings); err != nil {
+		return false, err
 	}
 	return true, nil
 }
