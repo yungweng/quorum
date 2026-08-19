@@ -1,5 +1,13 @@
 version: "2"
 
+run:
+  # golangci-lint holds a machine-wide lock in its shared cache and refuses to
+  # start while any other instance runs. On this machine several agents and
+  # babysit worktrees lint concurrently, and the collision killed a finished
+  # run at its final pre-push hook. Parallel runners contend on the cache but
+  # stay correct.
+  allow-parallel-runners: true
+
 linters:
   settings:
     errcheck:
