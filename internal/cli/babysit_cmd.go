@@ -357,8 +357,10 @@ iterate on local commits, the per-repo test command guards each round, and only
 a converged run pushes - once - which triggers a single CI run. When CI repairs
 move the head after that push, one more review round checks the repaired head.
 LOOP_MODE=online or --online restores the old behaviour: push and wait for CI
-after every fix round. The test command comes from
-~/.config/quorum/testcmd/<owner>/<repo> (one shell command) or --test-cmd.
+after every fix round. The test command is resolved in this order: --test-cmd,
+the user-local ~/.config/quorum/testcmd/<owner>/<repo>, then the repository's
+own .quorum/testcmd. The repo file is read from the base branch, never from
+the change under review, so a change cannot weaken or hijack its own gate.
 
 Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. When the
 branch conflicts with its base, the base is merged and the conflicts resolved
@@ -392,7 +394,8 @@ Options:
   --offline              Iterate locally, push once at the end (standing default: LOOP_MODE=offline)
   --online               Push and wait for CI after every fix round (LOOP_MODE=online)
   --test-cmd CMD         Shell command the offline loop runs as its local test gate.
-                         Default: ~/.config/quorum/testcmd/<owner>/<repo>, else none
+                         Default: ~/.config/quorum/testcmd/<owner>/<repo>, else the
+                         repo's .quorum/testcmd on the base branch, else none
   --divergence-scan      Analyze the round history after --max-iter, then stop
   --draft                Work on a draft PR (standing default: BABYSIT_DRAFTS=1)
   --local                Ignore any open PR: review and fix the pushed branch,
@@ -492,9 +495,12 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	o.Row("mode", mode)
 	if h.Offline {
 		o.Row("loop", "offline"+o.Dim("  iterate locally, one push and CI run at the end"))
-		gate := o.Dim("none configured  ·  --test-cmd or ~/.config/quorum/testcmd/<owner>/<repo>")
+		gate := o.Dim("none configured  ·  --test-cmd, ~/.config/quorum/testcmd/<owner>/<repo>, or " + loop.RepoTestCmdPath + " on the base branch")
 		if h.TestCmd != "" {
 			gate = h.TestCmd
+			if h.TestCmdNote != "" {
+				gate += o.Dim("  ·  " + h.TestCmdNote)
+			}
 		}
 		o.Row("test gate", gate)
 	} else {

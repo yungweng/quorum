@@ -137,8 +137,10 @@ The loop: review, decide, fix. Zero Blockers and Critical means done. Otherwise
 the already verified review comment goes into a Codex session that checks each
 remaining finding for whether it is real or intended, fixes the real ones and
 commits. By default everything stays local (`LOOP_MODE=offline`): reviews check
-the unpushed worktree head, a per-repo test command
-(`~/.config/quorum/testcmd/<owner>/<repo>` or `--test-cmd`) guards each round,
+the unpushed worktree head, a per-repo test command guards each round (a
+tracked `.quorum/testcmd` in the repo, shared by the whole team and read from
+the base branch so a change cannot weaken its own gate; `--test-cmd` and the
+user-local `~/.config/quorum/testcmd/<owner>/<repo>` override it),
 and only the converged result is pushed - once - so the whole run triggers a
 single CI run instead of one per fix round. After that push quorum posts one
 consolidated fix-log comment plus the final review's comment, and if CI repairs

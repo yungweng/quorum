@@ -34,9 +34,9 @@ func RepoRules(dir, repo string) (string, error) {
 // RepoTestCmd reads the user-local test command for repo ("owner/repo") from
 // dir, the test command root (~/.config/quorum/testcmd). The file holds one
 // shell command; the offline babysit loop runs it in the worktree after every
-// fix round. A missing file simply means no deterministic test gate. It lives
-// user-local for the same reason the rules do: a file in the repo would let
-// the change under review weaken its own gate.
+// fix round. It is the personal override: a missing file falls back to the
+// repository's own tracked .quorum/testcmd, which the pipeline reads from the
+// base branch so the change under review cannot weaken its own gate.
 func RepoTestCmd(dir, repo string) (string, error) {
 	if strings.Contains(repo, "..") {
 		return "", nil

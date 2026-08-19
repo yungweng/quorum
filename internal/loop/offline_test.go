@@ -6,7 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"os"
+	"path/filepath"
+
 	"github.com/yungweng/quorum/internal/envexec"
+	"github.com/yungweng/quorum/internal/git"
 )
 
 // The offline loop's whole point is that nothing reaches origin before the
@@ -95,5 +99,51 @@ func TestEnsureTestsGreenGatesOnTheConfiguredCommand(t *testing.T) {
 	r.o.MaxCIFixes = 0
 	if err := r.ensureTestsGreen(); !errors.Is(err, ErrTestsRed) {
 		t.Fatalf("err = %v, want ErrTestsRed", err)
+	}
+}
+
+// The repo's own gate must come from the base branch, never from the change
+// under review: the fake git only answers for origin/main and fails on any
+// other call, so a read from the worktree or the PR head would blow up here.
+func TestResolveRepoTestCmdReadsTheBaseBranchVersion(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+case "$*" in
+  "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
+  "rev-parse -q --verify origin/main:.quorum/testcmd") echo "blob-sha" ;;
+  "show origin/main:.quorum/testcmd") echo "make check" ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveRepoTestCmd(context.Background(), git.New(bin), t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "make check" {
+		t.Fatalf("test command = %q, want %q", got, "make check")
+	}
+}
+
+// A base branch without the file simply means no repo-provided gate.
+func TestResolveRepoTestCmdMissingFileMeansNoGate(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+case "$*" in
+  "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
+  "rev-parse -q --verify origin/main:.quorum/testcmd") exit 1 ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveRepoTestCmd(context.Background(), git.New(bin), t.TempDir(), "main")
+	if err != nil || got != "" {
+		t.Fatalf("resolveRepoTestCmd = %q, %v; want empty and no error", got, err)
 	}
 }

@@ -65,11 +65,19 @@ fails as non-fast-forward and the run stops instead of overwriting their work.
 `LOOP_MODE=online` or `--online` restores the old behaviour: push and wait for
 CI after every fix round.
 
-The test command lives user-local in `~/.config/quorum/testcmd/<owner>/<repo>`
-(one shell command, run through direnv in the worktree), or comes from
-`--test-cmd`. A red run feeds the output back into the fix session, up to
-`--max-ci-fixes` attempts; without a configured command the fix sessions are
-still told to run the affected checks themselves, but nothing verifies it.
+The test command is resolved in this order: `--test-cmd`, the user-local
+`~/.config/quorum/testcmd/<owner>/<repo>` (a personal override), then the
+repository's own tracked `.quorum/testcmd`, so a team shares one gate by
+committing that file. The repo file is deliberately read from the base branch
+(`origin/<base>`), never from the change under review: the command runs
+unsandboxed on this machine, and reading it out of the diff would let the
+change under babysit weaken or hijack its own gate - the same reasoning as the
+`.envrc` stop. A change that edits `.quorum/testcmd` therefore still runs
+against the old gate; the new one applies once it is merged. The command runs
+through direnv in the worktree; a red run feeds the output back into the fix
+session, up to `--max-ci-fixes` attempts. Without any configured command the
+fix sessions are still told to run the affected checks themselves, but nothing
+verifies it.
 
 Draft PRs are refused unless the run says `--draft` or the config says
 `BABYSIT_DRAFTS=1`. When the branch conflicts with its base branch, the base is
@@ -110,7 +118,7 @@ generation.
 | `--fix-timeout DUR` | Kill a fix step or test run that runs longer | 2h |
 | `--offline` | Iterate locally, push once at the end | on, `LOOP_MODE=offline` |
 | `--online` | Push and wait for CI after every fix round | off, `LOOP_MODE=online` |
-| `--test-cmd CMD` | Shell command the offline loop runs as its test gate | `~/.config/quorum/testcmd/<owner>/<repo>`, else none |
+| `--test-cmd CMD` | Shell command the offline loop runs as its test gate | `~/.config/quorum/testcmd/<owner>/<repo>`, else `.quorum/testcmd` on the base branch, else none |
 | `--divergence-scan` | Analyze all rounds after the limit, write a report, then stop | off |
 | `--draft` | Work on a draft PR | off, or `BABYSIT_DRAFTS=1` |
 | `--local` | Ignore any open PR and work on the pushed branch only | off |

@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,12 +10,34 @@ import (
 	"strings"
 
 	"github.com/yungweng/quorum/internal/envexec"
+	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
 // testLogTailLines bounds how much test output goes into a fix prompt. The
 // full log stays in the run directory.
 const testLogTailLines = 80
+
+// RepoTestCmdPath is the tracked file a repository can define its test gate
+// in, so a team shares one gate instead of each machine configuring its own.
+const RepoTestCmdPath = ".quorum/testcmd"
+
+// resolveRepoTestCmd reads the repository's own test command from the base
+// branch, never from the change under review: the gate runs unsandboxed on
+// this machine, and reading it out of the diff would let the change under
+// babysit weaken or hijack its own gate - the same reasoning as the .envrc
+// stop. A command the change edits therefore only applies once it is merged.
+func resolveRepoTestCmd(ctx context.Context, gitc git.G, repoRoot, base string) (string, error) {
+	if err := gitc.Fetch(ctx, repoRoot, "origin",
+		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", base, base)); err != nil {
+		return "", err
+	}
+	content, ok, err := gitc.ShowFile(ctx, repoRoot, "origin/"+base, RepoTestCmdPath)
+	if err != nil || !ok {
+		return "", err
+	}
+	return strings.TrimSpace(content), nil
+}
 
 // ensureTestsGreen is the offline loop's counterpart of ensureCIGreen: it runs
 // the configured test command in the worktree and repairs failures through the

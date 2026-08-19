@@ -486,13 +486,27 @@ func (r *run) prepare() error {
 		}
 	}
 
+	// The repository's own gate is the fallback: an explicit --test-cmd or the
+	// user-local per-repo file stay personal overrides.
+	testCmdNote := ""
+	if r.o.Offline && r.o.TestCmd == "" {
+		cmd, err := resolveRepoTestCmd(r.ctx, r.p.Git, r.o.RepoRoot, pr.BaseRefName)
+		if err != nil {
+			return err
+		}
+		if cmd != "" {
+			r.o.TestCmd = cmd
+			testCmdNote = fmt.Sprintf("%s @ %s", RepoTestCmdPath, pr.BaseRefName)
+		}
+	}
+
 	r.rep.Header(Header{
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Draft: pr.IsDraft, Local: r.o.Local,
 		Engine: r.o.Engine, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 		ReviewEngine: r.o.ReviewEngine, ReviewModel: reviewModel, ReviewEffort: reviewEffort,
-		Interactive: r.o.Interactive, Offline: r.o.Offline, TestCmd: r.o.TestCmd,
+		Interactive: r.o.Interactive, Offline: r.o.Offline, TestCmd: r.o.TestCmd, TestCmdNote: testCmdNote,
 		MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		DivergenceScan: r.o.DivergenceScan,
 		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
