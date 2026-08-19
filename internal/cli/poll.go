@@ -406,6 +406,9 @@ func (a *app) cmdReviewOne(args []string) int {
 		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, ClaudeBin: t.Claude, GrokBin: t.Grok, DirenvBin: t.Direnv,
 		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
 	}
+	// A finished run is the only thing that grows the cache, so the next
+	// collector has to measure instead of trusting a size from before it.
+	defer a.forgetCacheSize()
 	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt); err != nil {
 		return 1
 	}

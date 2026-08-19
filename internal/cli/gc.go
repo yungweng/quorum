@@ -92,10 +92,13 @@ func (a *app) setCacheSize(n int64) {
 // trusted. cacheSizeTTL only helps within one process, and the agent is a new
 // process every poll, so without the file every poll walked the whole cache;
 // on a cache of a couple of hundred thousand files that took polls past their
-// own interval. Ten minutes of staleness costs at most a few runs' worth of
-// growth before the budget is enforced again, which the budget's purpose,
-// keeping days of use from filling the disk, does not notice.
-const rememberedSizeTTL = 10 * time.Minute
+// own interval. The cache only grows when a run of ours finishes, and each of
+// those forgets the measurement, so the TTL is a backstop for growth no defer
+// observed: a run killed outright, a power loss mid-install, files written in
+// by hand. Six hours of that costs at most a run's worth of overshoot before
+// the budget is enforced again, which the budget's purpose, keeping days of
+// use from filling the disk, does not notice.
+const rememberedSizeTTL = 6 * time.Hour
 
 func (a *app) rememberedSizePath() string {
 	return filepath.Join(a.p.StateDir, "cache-size")

@@ -178,6 +178,9 @@ func (a *app) cmdBabysit(argv []string) int {
 
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 	started := time.Now()
+	// A finished run is the only thing that grows the cache, so the next
+	// collector has to measure instead of trusting a size from before it.
+	defer a.forgetCacheSize()
 	res, err := pipe.Run(ctx, o)
 	rep.status.Clear()
 	mergeStatus := ""

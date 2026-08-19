@@ -58,6 +58,9 @@ func (a *app) cmdRun(args []string) int {
 			a.out.Notify("quorum: "+title, body)
 		},
 	}
+	// A finished run is the only thing that grows the cache, so the next
+	// collector has to measure instead of trusting a size from before it.
+	defer a.forgetCacheSize()
 	if err := r.Review(ctx, key, repo, number, details.HeadRefOid, details.Title, details.Author.Login, ""); err != nil {
 		return 1
 	}

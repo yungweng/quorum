@@ -615,6 +615,40 @@ func TestCollectIgnoresAStaleMeasurement(t *testing.T) {
 	}
 }
 
+// Every command that runs a review or babysit forgets the measurement when it
+// finishes, because a finished run is the only thing that grows the cache.
+// Forgetting has to bring the walk back, or the growth stays invisible until
+// the backstop TTL.
+func TestCollectMeasuresAgainAfterARunForgetsTheSize(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	rememberSize(t, a, time.Now(), 400)
+	a.forgetCacheSize()
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 800, 0)
+	if exists(filepath.Join(run, "worktree")) {
+		t.Error("worktree survived although a run had forgotten the measurement")
+	}
+}
+
+// With runs forgetting the measurement themselves, the TTL is only a backstop
+// for growth no run observed, and it is long on purpose: a short one would put
+// the full cache walk back into every tenth poll.
+func TestCollectStillTrustsAMeasurementOlderThanTenMinutes(t *testing.T) {
+	a := testApp(t)
+	a.cfg.CacheBudgetGB = gigabytes(500)
+	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
+	rememberSize(t, a, time.Now().Add(-time.Hour), 400)
+
+	freed, removed := mustCollect(t, a, false)
+	assertCollected(t, freed, removed, 0, 0)
+	if !exists(filepath.Join(run, "worktree")) {
+		t.Error("collection walked and deleted although the hour-old measurement should still be trusted")
+	}
+}
+
 // A measurement file that does not parse is treated as absent, not as an error.
 func TestCollectIgnoresAGarbageMeasurement(t *testing.T) {
 	a := testApp(t)
