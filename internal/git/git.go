@@ -94,7 +94,13 @@ func (g G) LsRemote(ctx context.Context, dir, remote, ref string) (string, error
 // ShowFile returns a tracked file's content at rev. ok is false when the path
 // does not exist there; only a real read failure is an error.
 func (g G) ShowFile(ctx context.Context, dir, rev, path string) (string, bool, error) {
+	if _, err := g.run(ctx, dir, "rev-parse", "-q", "--verify", rev+"^{tree}"); err != nil {
+		return "", false, err
+	}
 	if _, err := g.run(ctx, dir, "rev-parse", "-q", "--verify", rev+":"+path); err != nil {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
 		return "", false, nil
 	}
 	out, err := g.run(ctx, dir, "show", rev+":"+path)

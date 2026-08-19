@@ -117,6 +117,7 @@ func TestResolveRepoTestCmdReadsTheBaseBranchVersion(t *testing.T) {
 set -eu
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
+  "rev-parse -q --verify origin/main^{tree}") echo "tree-sha" ;;
   "rev-parse -q --verify origin/main:.quorum/testcmd") echo "blob-sha" ;;
   "show origin/main:.quorum/testcmd") echo "make check" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
@@ -141,6 +142,7 @@ func TestResolveRepoTestCmdMissingFileMeansNoGate(t *testing.T) {
 set -eu
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
+  "rev-parse -q --verify origin/main^{tree}") echo "tree-sha" ;;
   "rev-parse -q --verify origin/main:.quorum/testcmd") exit 1 ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac

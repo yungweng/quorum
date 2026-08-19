@@ -129,6 +129,20 @@ func TestCleanUntrackedPreservesTrackedAndIgnoredFiles(t *testing.T) {
 	}
 }
 
+func TestShowFileDistinguishesMissingPathsFromInvalidRevisions(t *testing.T) {
+	dir := conflictRepo(t)
+	g := New("git")
+
+	content, ok, err := g.ShowFile(context.Background(), dir, "main", "missing.txt")
+	if err != nil || ok || content != "" {
+		t.Fatalf("ShowFile missing path = %q, %v, %v; want empty, false, nil", content, ok, err)
+	}
+
+	if _, _, err := g.ShowFile(context.Background(), dir, "not-a-revision", "shared.txt"); err == nil {
+		t.Fatal("ShowFile accepted an invalid revision as a missing file")
+	}
+}
+
 // The diverged-checkout stop leans on this distinction: a local branch that is
 // merely behind origin may proceed, one with commits of its own may not.
 func TestIsAncestorDistinguishesBehindFromDiverged(t *testing.T) {
