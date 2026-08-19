@@ -682,11 +682,6 @@ func (r *run) execute() (*Result, error) {
 						return res, err
 					}
 				}
-				commentURL, commentPosted, err := r.postDisputeComment(
-					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
-				if err != nil {
-					return res, err
-				}
 				if r.o.Offline && !r.target.BranchOnly {
 					preCISHA := r.headSHA
 					if err := r.ensureCIGreen(); err != nil {
@@ -699,6 +694,11 @@ func (r *run) execute() (*Result, error) {
 						}
 						continue
 					}
+				}
+				commentURL, commentPosted, err := r.postDisputeComment(
+					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
+				if err != nil {
+					return res, err
 				}
 				res.Converged = true
 				res.DisputeAccepted = true
