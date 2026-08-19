@@ -24,6 +24,10 @@ type runTarget struct {
 	Branch     string `json:"branch"`
 	BaseBranch string `json:"base_branch"`
 	BranchOnly bool   `json:"branch_only"`
+	// LocalHead pins the exact unpushed commit a local-head run reviewed. A
+	// resume must review that same commit again rather than re-resolving the
+	// branch from origin, which never had it.
+	LocalHead string `json:"local_head,omitempty"`
 }
 
 func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Target, runPaths, error) {
@@ -50,19 +54,30 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 		}
 	}
 
-	tgt, err := target.Resolve(ctx, r.GH, r.Git, o.RepoRoot, o.Number, o.Branch, o.BaseBranch)
-	if err != nil {
-		return target.Target{}, runPaths{}, err
-	}
-	if o.HeadSHA != "" {
-		if !tgt.BranchOnly {
-			return target.Target{}, runPaths{}, fmt.Errorf("a pinned head SHA requires a branch-only target")
+	var tgt target.Target
+	var err error
+	if o.LocalHead {
+		// The head is unpushed, so it cannot be resolved from origin and cannot
+		// drift: only the caller's worktree can move it.
+		tgt, err = target.ResolvePinned(ctx, r.Git, o.RepoRoot, o.Branch, o.HeadSHA, o.BaseBranch)
+		if err != nil {
+			return target.Target{}, runPaths{}, err
 		}
-		if tgt.PR.HeadRefOid != o.HeadSHA {
-			return target.Target{}, runPaths{}, fmt.Errorf(
-				"%w: pipeline worktree is %s, origin/%s is %s",
-				ErrHeadDrifted, o.HeadSHA, tgt.PR.HeadRefName, tgt.PR.HeadRefOid,
-			)
+	} else {
+		tgt, err = target.Resolve(ctx, r.GH, r.Git, o.RepoRoot, o.Number, o.Branch, o.BaseBranch)
+		if err != nil {
+			return target.Target{}, runPaths{}, err
+		}
+		if o.HeadSHA != "" {
+			if !tgt.BranchOnly {
+				return target.Target{}, runPaths{}, fmt.Errorf("a pinned head SHA requires a branch-only target")
+			}
+			if tgt.PR.HeadRefOid != o.HeadSHA {
+				return target.Target{}, runPaths{}, fmt.Errorf(
+					"%w: pipeline worktree is %s, origin/%s is %s",
+					ErrHeadDrifted, o.HeadSHA, tgt.PR.HeadRefName, tgt.PR.HeadRefOid,
+				)
+			}
 		}
 	}
 	if o.ResumeRun == "" {
@@ -86,7 +101,7 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 }
 
 func newRunTarget(o Options, tgt target.Target, baseBranch string) runTarget {
-	return runTarget{
+	meta := runTarget{
 		Schema:     runTargetSchema,
 		Repo:       o.Repo,
 		Number:     tgt.PR.Number,
@@ -94,6 +109,10 @@ func newRunTarget(o Options, tgt target.Target, baseBranch string) runTarget {
 		BaseBranch: baseBranch,
 		BranchOnly: tgt.BranchOnly,
 	}
+	if o.LocalHead {
+		meta.LocalHead = o.HeadSHA
+	}
+	return meta
 }
 
 func applyRunTarget(o *Options, meta runTarget) error {
@@ -112,6 +131,15 @@ func applyRunTarget(o *Options, meta runTarget) error {
 	if o.BaseBranch != "" && o.BaseBranch != meta.BaseBranch {
 		return fmt.Errorf("resume run uses base %s, not %s", meta.BaseBranch, o.BaseBranch)
 	}
+	if meta.LocalHead != "" {
+		if o.HeadSHA != "" && o.HeadSHA != meta.LocalHead {
+			return fmt.Errorf("resume run reviewed local head %s, not %s", meta.LocalHead, o.HeadSHA)
+		}
+		o.LocalHead = true
+		o.HeadSHA = meta.LocalHead
+	} else if o.LocalHead {
+		return fmt.Errorf("resume run did not review a local head")
+	}
 	o.Number = meta.Number
 	o.Branch = meta.Branch
 	o.BaseBranch = meta.BaseBranch
@@ -127,6 +155,9 @@ func (m runTarget) validate() error {
 	}
 	if m.BranchOnly == (m.Number > 0) {
 		return fmt.Errorf("resume target metadata has inconsistent target kind")
+	}
+	if m.LocalHead != "" && !m.BranchOnly {
+		return fmt.Errorf("resume target metadata pins a local head on a pull request target")
 	}
 	return nil
 }

@@ -255,3 +255,18 @@ esac`))
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// ResolvePinned exists for heads that are not pushed anywhere, so it must
+// still refuse the targets that make no sense before it touches the network.
+func TestResolvePinnedRefusesIncompleteAndBaseTargets(t *testing.T) {
+	g := git.G{}
+	if _, err := ResolvePinned(context.Background(), g, "", "", "abc123", "main"); err == nil {
+		t.Fatal("a pinned target without a branch resolved")
+	}
+	if _, err := ResolvePinned(context.Background(), g, "", "feature/crumb-tray", "", "main"); err == nil {
+		t.Fatal("a pinned target without a head sha resolved")
+	}
+	if _, err := ResolvePinned(context.Background(), g, "", "main", "abc123", "main"); err == nil {
+		t.Fatal("the base branch resolved as a pinned target")
+	}
+}

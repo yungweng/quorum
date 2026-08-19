@@ -27,6 +27,8 @@ type Header struct {
 	ReviewEffort   string
 	Bypass         bool
 	Interactive    bool
+	Offline        bool
+	TestCmd        string
 	MaxIter        int
 	MaxCIFixes     int
 	DivergenceScan bool

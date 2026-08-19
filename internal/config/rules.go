@@ -30,3 +30,23 @@ func RepoRules(dir, repo string) (string, error) {
 	}
 	return strings.TrimSpace(string(b)), nil
 }
+
+// RepoTestCmd reads the user-local test command for repo ("owner/repo") from
+// dir, the test command root (~/.config/quorum/testcmd). The file holds one
+// shell command; the offline babysit loop runs it in the worktree after every
+// fix round. A missing file simply means no deterministic test gate. It lives
+// user-local for the same reason the rules do: a file in the repo would let
+// the change under review weaken its own gate.
+func RepoTestCmd(dir, repo string) (string, error) {
+	if strings.Contains(repo, "..") {
+		return "", nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(repo)))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}

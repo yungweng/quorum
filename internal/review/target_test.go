@@ -157,3 +157,56 @@ func targetForTest(number int, branchOnly bool) target.Target {
 		},
 	}
 }
+
+// A local-head run reviews a commit only the caller's worktree has. The
+// metadata must pin that exact commit so a resume reviews it again instead of
+// re-resolving the branch from origin, which never had it - and an online
+// run's directory must never satisfy a local-head resume.
+func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
+	tgt := targetForTest(0, true)
+	meta := newRunTarget(Options{Repo: "acme/api", LocalHead: true, HeadSHA: "abc123"}, tgt, "main")
+	if meta.LocalHead != "abc123" {
+		t.Fatalf("LocalHead = %q, want the pinned sha", meta.LocalHead)
+	}
+	if err := meta.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	o := Options{Repo: "acme/api", LocalHead: true}
+	if err := applyRunTarget(&o, meta); err != nil {
+		t.Fatalf("applyRunTarget: %v", err)
+	}
+	if !o.LocalHead || o.HeadSHA != "abc123" {
+		t.Fatalf("resume did not restore the local head: %+v", o)
+	}
+
+	other := Options{Repo: "acme/api", LocalHead: true, HeadSHA: "def456"}
+	if err := applyRunTarget(&other, meta); err == nil {
+		t.Fatal("a different pinned sha was accepted")
+	}
+
+	online := newRunTarget(Options{Repo: "acme/api"}, tgt, "main")
+	fromOnline := Options{Repo: "acme/api", LocalHead: true}
+	if err := applyRunTarget(&fromOnline, online); err == nil {
+		t.Fatal("an online run's directory satisfied a local-head resume")
+	}
+
+	bad := runTarget{Schema: runTargetSchema, Repo: "acme/api", Number: 42,
+		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123"}
+	if err := bad.validate(); err == nil {
+		t.Fatal("a local head pinned on a PR target validated")
+	}
+}
+
+// LocalHead without the branch, sha and base is a programming error in the
+// caller, and reviewing origin's older head instead would be silent and wrong.
+func TestValidateRequiresTheLocalHeadFields(t *testing.T) {
+	o := Options{Repo: "acme/api", RepoRoot: "/tmp/x", LocalHead: true}.withDefaults()
+	if err := o.validate(); err == nil {
+		t.Fatal("an incomplete local-head target validated")
+	}
+	o.Branch, o.HeadSHA, o.BaseBranch = "feature/crumb-tray", "abc123", "main"
+	if err := o.validate(); err != nil {
+		t.Fatalf("a complete local-head target failed: %v", err)
+	}
+}

@@ -27,7 +27,7 @@ const (
 //     itself via gh so it appears as a normal comment from the user;
 //   - the DISPUTED FINDINGS contract, which is the only way a round with no
 //     commits is allowed to end without stopping the run.
-func standingRules(branch string, autonomous, branchOnly bool, repoRules string) string {
+func standingRules(branch string, autonomous, branchOnly, offline bool, repoRules string) string {
 	target := "an existing pull request"
 	pipeline := "CI checks -> external code review -> fix rounds"
 	record := "in the PR comment section of your final message"
@@ -36,6 +36,9 @@ func standingRules(branch string, autonomous, branchOnly bool, repoRules string)
 		pipeline = "external code review -> fix rounds"
 		record = "in your final message"
 	}
+	if offline {
+		pipeline = "external code review -> fix rounds -> local tests, with one push and one CI run at the very end"
+	}
 	decision := `- Only for product decisions you cannot responsibly make yourself (data semantics, user-visible policy, migration of existing data): stop and end your final message with a line that is exactly:
 OPEN QUESTIONS:
 followed by short numbered questions. Use this marker for nothing else. You will receive the user's answers and can then continue.`
@@ -43,21 +46,28 @@ followed by short numbered questions. Use this marker for nothing else. You will
 		decision = fmt.Sprintf("- No human is available during this run. Make every decision yourself, including product decisions: pick the most conservative reasonable option and record notable decisions %s. Do not stop to ask questions.", record)
 	}
 
+	pushRules := fmt.Sprintf(`- You are on a detached checkout, so push with exactly: git push origin HEAD:refs/heads/%s
+- Only push when a step explicitly tells you to. Never create or edit PRs or comments, never rewrite published history.`, branch)
+	if offline {
+		// CI repair steps after the run's single final push are the one place
+		// a step still tells the session to push.
+		pushRules = fmt.Sprintf(`- Do not push. The pipeline pushes the branch itself, once, at the end of the run. Only when a step explicitly tells you to push, push with exactly: git push origin HEAD:refs/heads/%s
+- Never create or edit PRs or comments, never rewrite published history.`, branch)
+	}
 	rules := fmt.Sprintf(`You are the fix agent for %s, running unattended inside a pipeline (%s), in a dedicated git worktree on a detached checkout of the pushed branch head.
 
 Standing rules for every step:
 - Follow this repository's contributor and agent instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING) where present.
 - Keep changes minimal and focused on the findings you are asked to address; match the existing code style and do not refactor beyond that.
 - Write clean, descriptive commit messages. Never mention AI, agents, Codex, or automation anywhere.
-- You are on a detached checkout, so push with exactly: git push origin HEAD:refs/heads/%s
-- Only push when a step explicitly tells you to. Never create or edit PRs or comments, never rewrite published history.
+%s
 - Put screenshots and other disposable QA artifacts in $TMPDIR or /tmp, not in the worktree. Before finishing a step, leave git status --porcelain empty: commit task files and remove only temporary artifacts you created.
 - Make reasonable technical decisions yourself.
 %s
 - If an external review finding rated Blocker or Critical is factually wrong and no code change is warranted, do not change code just to satisfy the review. Instead end your final message with a line that is exactly:
 DISPUTED FINDINGS:
 followed by short numbered rebuttals, one per disputed finding, each naming the finding and why it is wrong. Use this marker only for Blocker/Critical findings you are confident are incorrect, never to avoid work, and never together with code changes that already resolve the finding.`,
-		target, pipeline, branch, decision)
+		target, pipeline, pushRules, decision)
 
 	if repoRules != "" {
 		rules += fmt.Sprintf(`
@@ -92,12 +102,39 @@ followed by a short log comment for the PR: what failed, what you changed and ho
 		number, failsJSON, MarkerComment)
 }
 
+// testFixPrompt asks the session to repair the repository's local test
+// command, which the pipeline itself ran in the worktree. It is the offline
+// counterpart of ciFixPrompt: same repair loop, but the evidence is the
+// command's own output instead of GitHub's failing checks.
+func testFixPrompt(testCmd, logTail string) string {
+	return fmt.Sprintf(`The pipeline ran the repository's test command in the worktree and it failed.
+
+Command: %s
+
+Last lines of its output:
+
+%s
+
+Fix the problems, run the command yourself to confirm it passes, and commit. Do not push; the pipeline reruns the command for you.
+
+End your final message with a line that is exactly:
+%s
+followed by a short log comment for the PR: what failed, what you changed and how. Write it plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
+		testCmd, logTail, MarkerComment)
+}
+
 // fixRoundPrompt hands a review round's findings to the session.
 //
 // Suggestions and Questions are handed over once per round but never keep the
 // loop alive; only Blockers and Critical do. The PR COMMENT block is what the
 // pipeline posts afterwards.
-func fixRoundPrompt(number int, branch string, branchOnly bool, comment string) string {
+func fixRoundPrompt(number int, branch string, branchOnly, offline bool, comment string) string {
+	finish := "Run the affected checks, commit your work, and push. Do not wait for CI; the pipeline watches the checks for you."
+	finishBranch := "Run the affected checks, commit your work, and push."
+	if offline {
+		finish = "Run the affected checks and commit your work. Do not push."
+		finishBranch = finish
+	}
 	if branchOnly {
 		return fmt.Sprintf(`An external code review of branch %s found issues. The full review report follows below.
 
@@ -105,11 +142,11 @@ Please check for each finding whether it is a real issue or might be intended be
 - For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
 - Suggestions: implement each one unless it describes intended behavior or you have a strong technical reason not to.
 - Resolve the Questions with your best judgment; only raise OPEN QUESTIONS if one truly needs a product decision.
-- Run the affected checks, commit your work, and push.
+- %s
 
 ---
 
-%s`, branch, comment)
+%s`, branch, finishBranch, comment)
 	}
 	return fmt.Sprintf(`An external code review of PR #%d found issues. The full review comment follows below.
 
@@ -117,7 +154,7 @@ Please check for each finding whether it is a real issue or might be intended be
 - For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
 - Suggestions: implement each one unless it describes intended behavior or you have a strong technical reason not to.
 - Resolve the Questions with your best judgment; only raise OPEN QUESTIONS if one truly needs a product decision.
-- Run the affected checks, commit your work, and push. Do not wait for CI; the pipeline watches the checks for you.
+- %s
 
 Unless you end with the DISPUTED FINDINGS marker, end your final message with a line that is exactly:
 %s
@@ -125,7 +162,7 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 
 ---
 
-%s`, number, MarkerComment, comment)
+%s`, number, finish, MarkerComment, comment)
 }
 
 // suggestionRoundPrompt hands the Suggestions of the final, otherwise clean
@@ -133,23 +170,29 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 // before code: a leftover Suggestion is often an artifact of the reviewers'
 // isolated worktree (a missing service, an unprovisioned test database), and
 // changing nothing is an explicitly allowed outcome.
-func suggestionRoundPrompt(number int, branch string, branchOnly bool, comment string) string {
+func suggestionRoundPrompt(number int, branch string, branchOnly, offline bool, comment string) string {
+	finish := "If you changed code: run the affected checks, commit, and push. Do not wait for CI; the pipeline watches the checks for you."
+	finishBranch := "If you changed code: run the affected checks, commit, and push."
+	if offline {
+		finish = "If you changed code: run the affected checks and commit. Do not push."
+		finishBranch = finish
+	}
 	if branchOnly {
 		return fmt.Sprintf(`The final external code review of branch %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so be conservative.
 
 For each Suggestion, first decide whether it is worth implementing. Skip it when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk outweighs its value. Implement the ones that clearly improve the code. Changing nothing is a perfectly fine outcome.
 
-If you changed code: run the affected checks, commit, and push. If you changed nothing, do not commit or push, and briefly state per Suggestion why you skipped it.
+%s If you changed nothing, do not commit or push, and briefly state per Suggestion why you skipped it.
 
 ---
 
-%s`, branch, comment)
+%s`, branch, finishBranch, comment)
 	}
 	return fmt.Sprintf(`The final external code review of PR #%d found no Blockers and no Critical issues, but it still lists Suggestions. The full review comment follows below. This is the last step of the run and no further review will check your work, so be conservative.
 
 For each Suggestion, first decide whether it is worth implementing. Skip it when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk outweighs its value. Implement the ones that clearly improve the code. Changing nothing is a perfectly fine outcome.
 
-If you changed code: run the affected checks, commit, and push. Do not wait for CI; the pipeline watches the checks for you. Then end your final message with a line that is exactly:
+%s Then end your final message with a line that is exactly:
 %s
 followed by a short log comment for the PR: what you changed and how, which checks you ran, and which Suggestions you left unchanged and why. Write it in the language of the PR description, plain and factual, and never mention AI, agents, or automation in it. Use this marker for nothing else.
 
@@ -157,22 +200,26 @@ If you changed nothing, do not commit or push, do not use the marker, and briefl
 
 ---
 
-%s`, number, MarkerComment, comment)
+%s`, number, finish, MarkerComment, comment)
 }
 
 // conflictFixPrompt asks the session to merge the base branch and resolve the
 // conflicts. The direction is base into head: it keeps the branch's own
 // history intact and is the merge GitHub would attempt for the PR.
-func conflictFixPrompt(number int, base, branch string, branchOnly bool) string {
+func conflictFixPrompt(number int, base, branch string, branchOnly, offline bool) string {
 	target := fmt.Sprintf("PR #%d", number)
 	if branchOnly {
 		target = "branch " + branch
 	}
+	finish := ", and push."
+	if offline {
+		finish = ". Do not push."
+	}
 	prompt := fmt.Sprintf(`%s conflicts with its base branch %s and cannot be merged as it is.
 
 Merge the base into the current checkout with exactly: git merge origin/%s
-Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge %s into %s", and push.`,
-		target, base, base, base, branch)
+Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge %s into %s"%s`,
+		target, base, base, base, branch, finish)
 	if branchOnly {
 		return prompt
 	}

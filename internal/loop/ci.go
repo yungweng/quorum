@@ -68,7 +68,7 @@ func (r *run) startReviewWith(round int, resumeDir string) {
 }
 
 func (r *run) reviewOptions() review.Options {
-	return review.Options{
+	o := review.Options{
 		Repo:             r.o.Repo,
 		Number:           r.pr.Number,
 		Branch:           branchOnlyValue(r.target.BranchOnly, r.branch),
@@ -92,6 +92,19 @@ func (r *run) reviewOptions() review.Options {
 		DirenvBin:        r.o.DirenvBin,
 		ReviewTimeout:    review.DefaultReviewTimeout,
 	}
+	if r.o.Offline {
+		// Offline rounds review the worktree's unpushed head. An unresolvable
+		// HEAD leaves HeadSHA empty, which the review's own validation refuses
+		// loudly instead of silently reviewing origin's older head.
+		head, _ := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+		o.LocalHead = true
+		o.Number = 0
+		o.Branch = r.branch
+		o.HeadSHA = head
+		o.BaseBranch = r.pr.BaseRefName
+		o.Post = false
+	}
+	return o
 }
 
 func branchOnlyValue(branchOnly bool, branch string) string {

@@ -432,6 +432,8 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		AllowDraft:       !r.Cfg.SkipDrafts,
 		ResolveConflicts: r.Cfg.ResolveConflicts,
 		FixSuggestions:   r.Cfg.FixSuggestions,
+		Offline:          r.Cfg.LoopMode != config.LoopOnline,
+		TestCmd:          r.repoTestCmd(repo),
 		ResumeRun:        resumeDir,
 		Bypass:           !r.Cfg.Sandboxed,
 		Interactive:      false,
@@ -463,6 +465,17 @@ func (r *Runner) repoRules(repo string) string {
 		r.Log.Printf("%s: reading the review rules failed, continuing without them: %v", repo, err)
 	}
 	return rules
+}
+
+// repoTestCmd loads the user-local test command for repo, with the same
+// warn-and-continue policy as repoRules: without it the offline loop simply
+// runs without a deterministic gate.
+func (r *Runner) repoTestCmd(repo string) string {
+	cmd, err := config.RepoTestCmd(r.P.TestCmdDir, repo)
+	if err != nil {
+		r.Log.Printf("%s: reading the test command failed, continuing without a test gate: %v", repo, err)
+	}
+	return cmd
 }
 
 // reviewOptions maps the daemon's configuration onto a review run.

@@ -95,11 +95,18 @@ const (
 
 // Options configure one review run.
 type Options struct {
-	Repo     string // owner/repo
-	Number   int
-	Branch   string // internal branch target; empty resolves the current checkout
-	HeadSHA  string // internal branch pin; empty reviews the resolved target head
-	RepoRoot string // the checkout the worktree is created from
+	Repo    string // owner/repo
+	Number  int
+	Branch  string // internal branch target; empty resolves the current checkout
+	HeadSHA string // internal branch pin; empty reviews the resolved target head
+	// LocalHead reviews a head that exists only in RepoRoot's object database
+	// and is not pushed anywhere. The offline fix loop sets it for the commits
+	// its fix rounds create. It requires Branch, HeadSHA and BaseBranch, forces
+	// Post off (a comment would reference a commit GitHub does not have), and
+	// skips the remote head fetch and head-drift checks: the caller owns the
+	// worktree that head lives in, so nothing can move it.
+	LocalHead bool
+	RepoRoot  string // the checkout the worktree is created from
 
 	Runs          int
 	Concurrency   int    // 0 means all at once
@@ -217,10 +224,17 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 	baseRef := "origin/" + baseBranch
 	if tgt.BranchOnly {
-		rep.Info(fmt.Sprintf(
-			"branch %s has no open PR; reviewing origin/%s against %s without posting",
-			pr.HeadRefName, pr.HeadRefName, baseRef,
-		))
+		if o.LocalHead {
+			rep.Info(fmt.Sprintf(
+				"reviewing local head %s of branch %s against %s without posting",
+				pr.HeadRefOid, pr.HeadRefName, baseRef,
+			))
+		} else {
+			rep.Info(fmt.Sprintf(
+				"branch %s has no open PR; reviewing origin/%s against %s without posting",
+				pr.HeadRefName, pr.HeadRefName, baseRef,
+			))
+		}
 		o.Post = false
 	}
 
@@ -494,18 +508,29 @@ func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, tgt targ
 		return "", "", err
 	}
 
-	headRef := fmt.Sprintf("refs/quorum/pr/%d", pr.Number)
-	fetchRef := fmt.Sprintf("+pull/%d/head:%s", pr.Number, headRef)
-	if tgt.BranchOnly {
-		headRef = "refs/remotes/origin/" + pr.HeadRefName
-		fetchRef = fmt.Sprintf("+refs/heads/%s:%s", pr.HeadRefName, headRef)
-	}
-	if err := r.Git.Fetch(ctx, o.RepoRoot, "origin", fetchRef); err != nil {
-		return "", "", err
-	}
-	head, err := r.Git.RevParse(ctx, o.RepoRoot, headRef)
-	if err != nil {
-		return "", "", err
+	var head string
+	if o.LocalHead {
+		// The head exists only in the local object database, so there is
+		// nothing to fetch. ^{commit} makes rev-parse verify the object rather
+		// than echo an unknown full SHA back.
+		head, err = r.Git.RevParse(ctx, o.RepoRoot, pr.HeadRefOid+"^{commit}")
+		if err != nil {
+			return "", "", fmt.Errorf("local head %s does not exist in %s: %w", pr.HeadRefOid, o.RepoRoot, err)
+		}
+	} else {
+		headRef := fmt.Sprintf("refs/quorum/pr/%d", pr.Number)
+		fetchRef := fmt.Sprintf("+pull/%d/head:%s", pr.Number, headRef)
+		if tgt.BranchOnly {
+			headRef = "refs/remotes/origin/" + pr.HeadRefName
+			fetchRef = fmt.Sprintf("+refs/heads/%s:%s", pr.HeadRefName, headRef)
+		}
+		if err := r.Git.Fetch(ctx, o.RepoRoot, "origin", fetchRef); err != nil {
+			return "", "", err
+		}
+		head, err = r.Git.RevParse(ctx, o.RepoRoot, headRef)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	// GitHub's metadata and the ref must agree. When they do not, something
 	// moved between the two calls and the run would review one state while
@@ -816,19 +841,23 @@ func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, b
 	if err != nil {
 		return "", err
 	}
-	headRef := fmt.Sprintf("refs/pull/%d/head", tgt.PR.Number)
-	if tgt.BranchOnly {
-		headRef = "refs/heads/" + tgt.PR.HeadRefName
-	}
-	latestHead, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", headRef)
-	if err != nil {
-		return "", err
-	}
-	// A moved head means the reviewers described code the target no longer
-	// contains. Publishing that would be worse than publishing nothing.
-	if latestHead != reviewedHead {
-		return "", fmt.Errorf("%w: reviewed %s, latest %s (base reviewed %s, latest %s)",
-			ErrHeadDrifted, reviewedHead, latestHead, reviewedBase, latestBase)
+	// A local head is not on the remote and only the caller's worktree can
+	// move it, so there is no remote state to drift from.
+	if !o.LocalHead {
+		headRef := fmt.Sprintf("refs/pull/%d/head", tgt.PR.Number)
+		if tgt.BranchOnly {
+			headRef = "refs/heads/" + tgt.PR.HeadRefName
+		}
+		latestHead, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", headRef)
+		if err != nil {
+			return "", err
+		}
+		// A moved head means the reviewers described code the target no longer
+		// contains. Publishing that would be worse than publishing nothing.
+		if latestHead != reviewedHead {
+			return "", fmt.Errorf("%w: reviewed %s, latest %s (base reviewed %s, latest %s)",
+				ErrHeadDrifted, reviewedHead, latestHead, reviewedBase, latestBase)
+		}
 	}
 	// A moved base is survivable: the target head stayed fixed. It goes into
 	// the report as a note.
@@ -1072,6 +1101,9 @@ func (o Options) validate() error {
 	}
 	if o.Repo == "" || o.RepoRoot == "" {
 		return fmt.Errorf("repo and repo root are required")
+	}
+	if o.LocalHead && (o.Branch == "" || o.HeadSHA == "" || o.BaseBranch == "") {
+		return fmt.Errorf("a local head review needs a branch, a head SHA and a base branch")
 	}
 	return nil
 }

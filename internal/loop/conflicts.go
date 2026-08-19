@@ -42,7 +42,7 @@ func (r *run) ensureMergeable() error {
 	}
 	r.conflictFixes++
 	tag := fmt.Sprintf("conflict-fix-%d", r.conflictFixes)
-	if err := r.codexCall(tag, conflictFixPrompt(r.pr.Number, base, r.branch, r.target.BranchOnly)); err != nil {
+	if err := r.codexCall(tag, conflictFixPrompt(r.pr.Number, base, r.branch, r.target.BranchOnly, r.o.Offline)); err != nil {
 		return err
 	}
 	if err := r.questionGate(tag); err != nil {
@@ -72,6 +72,14 @@ func (r *run) ensureMergeable() error {
 
 	label := fmt.Sprintf("Merge conflict fix %d", r.conflictFixes)
 	r.recordRound(label, preSHA)
+	if r.o.Offline {
+		// The merge commit stays local until the run's single final push.
+		r.queueFixComment(tag, label, preSHA)
+		if r.o.DivergenceScan {
+			r.traceCIFix(preSHA, afterSHA, tag)
+		}
+		return nil
+	}
 	if err := r.pushBranch(); err != nil {
 		return err
 	}

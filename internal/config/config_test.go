@@ -342,3 +342,44 @@ FIX_EFFORT="ultra"
 		t.Errorf("FixEffort = %q, want the codex level kept", cfg.FixEffort)
 	}
 }
+
+// LOOP_MODE gates whether babysit pushes once at the end (offline, the
+// default) or after every round. An unknown value keeps the default rather
+// than failing behind the launchd agent, matching AGENT_ACTION.
+func TestLoopModeParsesAndSurvivesARewrite(t *testing.T) {
+	if got := Default().LoopMode; got != LoopOffline {
+		t.Fatalf("default LoopMode = %q, want %q", got, LoopOffline)
+	}
+	path := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(path, []byte("LOOP_MODE=\"online\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LoopMode != LoopOnline {
+		t.Fatalf("LoopMode = %q, want %q", cfg.LoopMode, LoopOnline)
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.LoopMode != LoopOnline {
+		t.Fatalf("LoopMode after rewrite = %q, want %q", again.LoopMode, LoopOnline)
+	}
+
+	if err := os.WriteFile(path, []byte("LOOP_MODE=\"sideways\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LoopMode != LoopOffline {
+		t.Fatalf("an unknown LOOP_MODE changed the default: %q", cfg.LoopMode)
+	}
+}
