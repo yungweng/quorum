@@ -54,10 +54,10 @@ func (r *run) ensureTestsGreen() error {
 		r.enter(PhaseTests)
 		r.rep.Step("Tests: " + r.o.TestCmd)
 		err := r.runTestCmd(logPath)
+		if cleanErr := r.requireCleanWorktree(fmt.Sprintf("tests-%d", r.testRuns)); cleanErr != nil {
+			return cleanErr
+		}
 		if err == nil {
-			if err := r.requireCleanWorktree(fmt.Sprintf("tests-%d", r.testRuns)); err != nil {
-				return err
-			}
 			r.rep.Info("tests green")
 			return nil
 		}

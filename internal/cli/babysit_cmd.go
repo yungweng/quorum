@@ -162,10 +162,13 @@ func (a *app) cmdBabysit(argv []string) int {
 	if args.boolean("offline") {
 		o.Offline = true
 	}
-	if o.TestCmd, err = config.RepoTestCmd(a.p.TestCmdDir, o.Repo); err != nil {
-		return a.die("reading the test command for %s: %v", o.Repo, err)
+	if args.has("test-cmd") {
+		o.TestCmd = args.str("", "test-cmd")
+	} else if o.Offline {
+		if o.TestCmd, err = config.RepoTestCmd(a.p.TestCmdDir, o.Repo); err != nil {
+			return a.die("reading the test command for %s: %v", o.Repo, err)
+		}
 	}
-	o.TestCmd = args.str(o.TestCmd, "test-cmd")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

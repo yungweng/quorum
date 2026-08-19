@@ -174,6 +174,24 @@ func TestEnsureTestsGreenRejectsWorktreeChanges(t *testing.T) {
 	}
 }
 
+func TestEnsureTestsGreenRejectsChangesFromAFailedTest(t *testing.T) {
+	dir := t.TempDir()
+	gitBin := filepath.Join(dir, "git")
+	if err := os.WriteFile(gitBin, []byte("#!/bin/sh\nprintf ' M generated.txt\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		ctx: context.Background(), rep: NopReporter{}, logDir: dir,
+		env: envexec.Env{Worktree: dir},
+		p:   &Pipeline{Git: git.New(gitBin)},
+		o:   Options{TestCmd: "false", MaxCIFixes: 1},
+	}
+	err := r.ensureTestsGreen()
+	if err == nil || !strings.Contains(err.Error(), "worktree still has uncommitted changes") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestFinalOfflineReviewCommentSkipsAHeadMovedBySuggestions(t *testing.T) {
 	r := &run{
 		o:       Options{Post: true},

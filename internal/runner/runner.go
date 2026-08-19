@@ -397,9 +397,13 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		return review.Findings{}, "", "", "", false, err
 	}
 	defer logFile.Close()
-	testCmd, err := config.RepoTestCmd(r.P.TestCmdDir, repo)
-	if err != nil {
-		return review.Findings{}, "", "", "", false, fmt.Errorf("reading the test command for %s: %w", repo, err)
+	testCmd := ""
+	if r.Cfg.LoopMode != config.LoopOnline {
+		var err error
+		testCmd, err = config.RepoTestCmd(r.P.TestCmdDir, repo)
+		if err != nil {
+			return review.Findings{}, "", "", "", false, fmt.Errorf("reading the test command for %s: %w", repo, err)
+		}
 	}
 
 	rev := &review.Runner{GH: r.GH, Git: r.Git, Rep: review.NopReporter{}}
