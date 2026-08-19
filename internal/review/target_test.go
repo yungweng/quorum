@@ -198,6 +198,25 @@ func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
 	}
 }
 
+func TestResolveLocalHeadKeepsProvidedPRMetadata(t *testing.T) {
+	pr := gh.FullPR{Number: 42, Title: "Keep report context", URL: "https://example.invalid/pr/42"}
+	pr.Author.Login = "example-user"
+	o := Options{
+		Repo: "acme/api", RepoRoot: t.TempDir(), LocalHead: true, LocalPR: &pr,
+		Branch: "feature/crumb-tray", HeadSHA: "abc123", BaseBranch: "main",
+	}.withDefaults()
+	tgt, _, err := (&Runner{}).resolveRunTarget(context.Background(), &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.BranchOnly || tgt.PR.Number != 42 || tgt.PR.Title != pr.Title || tgt.PR.URL != pr.URL || tgt.PR.Author.Login != pr.Author.Login {
+		t.Fatalf("local target = %+v", tgt)
+	}
+	if tgt.PR.HeadRefName != o.Branch || tgt.PR.HeadRefOid != o.HeadSHA || tgt.PR.BaseRefName != o.BaseBranch {
+		t.Fatalf("local target did not pin the supplied refs: %+v", tgt.PR)
+	}
+}
+
 // LocalHead without the branch, sha and base is a programming error in the
 // caller, and reviewing origin's older head instead would be silent and wrong.
 func TestValidateRequiresTheLocalHeadFields(t *testing.T) {

@@ -59,7 +59,15 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 	if o.LocalHead {
 		// The head is unpushed, so it cannot be resolved from origin and cannot
 		// drift: only the caller's worktree can move it.
-		tgt, err = target.ResolvePinned(ctx, r.Git, o.RepoRoot, o.Branch, o.HeadSHA, o.BaseBranch)
+		if o.LocalPR != nil {
+			pr := *o.LocalPR
+			pr.HeadRefName = o.Branch
+			pr.HeadRefOid = o.HeadSHA
+			pr.BaseRefName = o.BaseBranch
+			tgt = target.Target{PR: pr}
+		} else {
+			tgt, err = target.ResolvePinned(ctx, r.Git, o.RepoRoot, o.Branch, o.HeadSHA, o.BaseBranch)
+		}
 		if err != nil {
 			return target.Target{}, runPaths{}, err
 		}

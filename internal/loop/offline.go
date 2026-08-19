@@ -31,6 +31,14 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 	if err := r.ensureTestsGreen(); err != nil {
 		return false, err
 	}
+	current, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+	if err != nil {
+		return false, err
+	}
+	if current != findings.HeadSHA {
+		r.rep.Info("local test fixes moved the head past the clean review; reviewing the repaired head")
+		return false, nil
+	}
 
 	r.rep.Step("Push")
 	if err := r.pushBranch(); err != nil {

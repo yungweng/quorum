@@ -106,7 +106,10 @@ type Options struct {
 	// skips the remote head fetch and head-drift checks: the caller owns the
 	// worktree that head lives in, so nothing can move it.
 	LocalHead bool
-	RepoRoot  string // the checkout the worktree is created from
+	// LocalPR preserves PR metadata when LocalHead is set by a fix loop. The
+	// head itself is local, but the report should still describe its PR.
+	LocalPR  *gh.FullPR
+	RepoRoot string // the checkout the worktree is created from
 
 	Runs          int
 	Concurrency   int    // 0 means all at once
@@ -223,6 +226,9 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		rep.Warn(fmt.Sprintf("PR base is %q, but reviewing against %q", pr.BaseRefName, baseBranch))
 	}
 	baseRef := "origin/" + baseBranch
+	if o.LocalHead {
+		o.Post = false
+	}
 	if tgt.BranchOnly {
 		if o.LocalHead {
 			rep.Info(fmt.Sprintf(
