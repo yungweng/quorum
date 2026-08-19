@@ -75,6 +75,9 @@ func (r *run) ensureMergeable() error {
 	if r.o.Offline {
 		// The merge commit stays local until the run's single final push.
 		r.queueFixComment(tag, label, preSHA)
+		if err := r.ensureTestsGreen(); err != nil {
+			return err
+		}
 		if r.o.DivergenceScan {
 			r.traceCIFix(preSHA, afterSHA, tag)
 		}

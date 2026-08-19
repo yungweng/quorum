@@ -3,14 +3,15 @@ package loop
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"os"
-	"path/filepath"
-
 	"github.com/yungweng/quorum/internal/envexec"
+	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/review"
 )
 
 // The offline loop's whole point is that nothing reaches origin before the
@@ -145,5 +146,53 @@ esac
 	got, err := resolveRepoTestCmd(context.Background(), git.New(bin), t.TempDir(), "main")
 	if err != nil || got != "" {
 		t.Fatalf("resolveRepoTestCmd = %q, %v; want empty and no error", got, err)
+	}
+}
+
+func TestFinalOfflineReviewCommentSkipsAHeadMovedBySuggestions(t *testing.T) {
+	r := &run{
+		o:       Options{Post: true},
+		rep:     NopReporter{},
+		headSHA: "suggestion-head",
+	}
+	res := &Result{}
+	if err := r.postFinalReviewComment(res, 1, review.Findings{
+		HeadSHA:     "reviewed-head",
+		CommentFile: "review.md",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res.LastFindings.Posted {
+		t.Fatal("stale review comment was marked posted")
+	}
+}
+
+func TestFinalOfflineReviewCommentRejectsHeadDrift(t *testing.T) {
+	dir := t.TempDir()
+	commented := filepath.Join(dir, "commented")
+	bin := filepath.Join(dir, "gh")
+	script := "#!/bin/sh\n" +
+		"if test \"$1\" = pr && test \"$2\" = view; then printf foreign-head; exit 0; fi\n" +
+		"if test \"$1\" = pr && test \"$2\" = comment; then touch '" + commented + "'; fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p:       &Pipeline{GH: gh.New(bin)},
+		o:       Options{RepoRoot: dir, Post: true},
+		ctx:     context.Background(),
+		rep:     NopReporter{},
+		pr:      gh.FullPR{Number: 42},
+		headSHA: "pushed-head",
+	}
+	err := r.postFinalReviewComment(&Result{}, 1, review.Findings{
+		HeadSHA:     "pushed-head",
+		CommentFile: "review.md",
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to post") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(commented); !os.IsNotExist(err) {
+		t.Fatalf("head-drifted review reached the comment command: %v", err)
 	}
 }

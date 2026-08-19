@@ -28,13 +28,20 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			return false, err
 		}
 	}
+	if err := r.ensureTestsGreen(); err != nil {
+		return false, err
+	}
 
 	r.rep.Step("Push")
 	if err := r.pushBranch(); err != nil {
 		return false, err
 	}
-	r.flushFixComments()
-	r.postFinalReviewComment(res, round, findings)
+	if err := r.flushFixComments(); err != nil {
+		return false, err
+	}
+	if err := r.postFinalReviewComment(res, round, findings); err != nil {
+		return false, err
+	}
 
 	if !r.target.BranchOnly {
 		prePushSHA := r.headSHA
@@ -71,33 +78,56 @@ func (r *run) queueFixComment(tag, label, preSHA string) {
 }
 
 // flushFixComments posts the queued offline rounds as one comment. The queue
-// empties even when posting fails or is skipped: the rounds it held are
-// published (or deliberately unpublished) either way, and a later flush must
-// not repost them.
-func (r *run) flushFixComments() {
+// empties before posting so a later flush cannot duplicate a comment after a
+// partial GitHub failure; the caller receives that failure and stops the run.
+func (r *run) flushFixComments() error {
 	parts := r.pendingFixComments
 	r.pendingFixComments = nil
 	if len(parts) == 0 || r.target.BranchOnly || !r.o.Post {
-		return
+		return nil
 	}
-	r.postPRComment("fix-log comment", strings.Join(parts, "\n\n"), "")
+	if err := r.requirePublishedHead(r.headSHA); err != nil {
+		return fmt.Errorf("checking the pull request head before posting offline fix logs: %w", err)
+	}
+	if _, posted := r.postPRComment("fix-log comment", strings.Join(parts, "\n\n"), ""); !posted {
+		return fmt.Errorf("could not post offline fix logs to PR #%d", r.pr.Number)
+	}
+	return nil
 }
 
 // postFinalReviewComment publishes the clean review's comment once its head is
 // public. Offline rounds review unpushed commits, so review.Runner could not
 // post at review time the way an online round does; the push barrier that just
 // completed is what guarantees GitHub now has the reviewed commit.
-func (r *run) postFinalReviewComment(res *Result, round int, findings review.Findings) {
+func (r *run) postFinalReviewComment(res *Result, round int, findings review.Findings) error {
 	if r.target.BranchOnly || !r.o.Post || findings.CommentFile == "" {
-		return
+		return nil
+	}
+	if findings.HeadSHA != r.headSHA {
+		r.rep.Info("suggestion changes moved the head past the clean review; skipping its stale comment")
+		return nil
+	}
+	if err := r.requirePublishedHead(findings.HeadSHA); err != nil {
+		return fmt.Errorf("checking the pull request head before posting review round %d's comment: %w", round, err)
 	}
 	url, err := r.p.GH.Comment(r.ctx, r.o.RepoRoot, r.pr.Number, findings.CommentFile)
 	if err != nil {
-		r.rep.Warn(fmt.Sprintf("could not post review round %d's comment to PR #%d: %v", round, r.pr.Number, err))
-		return
+		return fmt.Errorf("posting review round %d's comment to PR #%d: %w", round, r.pr.Number, err)
 	}
 	res.LastFindings.Posted = true
 	if url != "" {
 		res.LastFindings.CommentURL = &url
 	}
+	return nil
+}
+
+func (r *run) requirePublishedHead(expected string) error {
+	current, err := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return fmt.Errorf("the pushed head is %s but GitHub reports %s; refusing to post", expected, current)
+	}
+	return nil
 }

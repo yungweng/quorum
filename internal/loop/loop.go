@@ -665,7 +665,9 @@ func (r *run) execute() (*Result, error) {
 					if err := r.pushBranch(); err != nil {
 						return res, err
 					}
-					r.flushFixComments()
+					if err := r.flushFixComments(); err != nil {
+						return res, err
+					}
 				}
 				commentURL, commentPosted, err := r.postDisputeComment(
 					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
