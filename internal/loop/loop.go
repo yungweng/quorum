@@ -752,6 +752,11 @@ func (r *run) execute() (*Result, error) {
 			if err := r.ensureTestsGreen(); err != nil {
 				return res, err
 			}
+			// Test repairs can move the local head after the first check above.
+			// Refresh the base before starting a review of those new commits.
+			if err := r.ensureMergeable(); err != nil {
+				return res, err
+			}
 		}
 
 		// Overlap the next review with this round's CI wait.
