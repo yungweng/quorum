@@ -53,6 +53,14 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			return false, nil
 		}
 	}
+	conflictFixes := r.conflictFixes
+	if err := r.ensureMergeable(); err != nil {
+		return false, err
+	}
+	if r.conflictFixes != conflictFixes {
+		r.rep.Info("merge conflict resolution moved the head past the clean review; reviewing the resolved head")
+		return false, nil
+	}
 
 	r.rep.Step("Push")
 	if err := r.pushBranch(); err != nil {
