@@ -675,8 +675,16 @@ func (r *run) execute() (*Result, error) {
 					return res, err
 				}
 				if r.o.Offline && !r.target.BranchOnly {
+					preCISHA := r.headSHA
 					if err := r.ensureCIGreen(); err != nil {
 						return res, err
+					}
+					if r.headSHA != preCISHA {
+						r.rep.Info("CI repairs moved the head past the disputed review; reviewing the repaired head")
+						if iteration < r.o.MaxIter {
+							r.startReview(iteration + 1)
+						}
+						continue
 					}
 				}
 				res.Converged = true

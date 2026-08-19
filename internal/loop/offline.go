@@ -15,6 +15,11 @@ import (
 // repairs moved the head, the caller sends the run through another review
 // round instead of converging on commits no review has seen.
 func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, comment string) (bool, error) {
+	// A prior terminal suggestion changed the head. Reaching finalization with
+	// a clean review now proves that changed head is safe for auto-merge.
+	if res.SuggestionCommits {
+		res.SuggestionCommits = false
+	}
 	if suggestionRoundDue(r.o, findings) && !r.suggestionDone {
 		// The guard is per run, not per convergence: a CI repair after the
 		// push can bring the run back here, and the suggestion triage stays
