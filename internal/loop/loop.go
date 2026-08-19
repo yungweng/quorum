@@ -658,11 +658,23 @@ func (r *run) execute() (*Result, error) {
 					r.traceFix(iteration, preFixSHA, afterSHA, tag)
 				}
 				// An offline run may hold unpushed commits from earlier rounds.
-				// They go out before the rebuttal so the comment describes a
-				// head GitHub actually has, and the single CI run follows after
-				// the post: a CI repair would move the head past the reviewed
-				// commit and the rebuttal check would then refuse forever.
+				// Its local gate must pass before those commits or a branch-only
+				// disputed head is accepted without its configured test command.
 				if r.o.Offline {
+					if err := r.ensureTestsGreen(); err != nil {
+						return res, err
+					}
+					afterTestsSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+					if err != nil {
+						return res, err
+					}
+					if afterTestsSHA != afterSHA {
+						r.rep.Info("local test fixes moved the head past the disputed review; reviewing the repaired head")
+						if iteration < r.o.MaxIter {
+							r.startReview(iteration + 1)
+						}
+						continue
+					}
 					if err := r.pushBranch(); err != nil {
 						return res, err
 					}
