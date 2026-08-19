@@ -164,8 +164,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 	if args.has("test-cmd") {
 		o.TestCmd = args.str("", "test-cmd")
+		o.TestCmdSet = true
 	} else if o.Offline {
-		if o.TestCmd, err = config.RepoTestCmd(a.p.TestCmdDir, o.Repo); err != nil {
+		if o.TestCmd, o.TestCmdSet, err = config.RepoTestCmd(a.p.TestCmdDir, o.Repo); err != nil {
 			return a.die("reading the test command for %s: %v", o.Repo, err)
 		}
 	}

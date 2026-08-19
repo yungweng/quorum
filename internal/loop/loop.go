@@ -122,7 +122,8 @@ type Options struct {
 	// the worktree after every offline round that committed something. Empty
 	// disables the deterministic gate; the session prompts still demand that
 	// affected checks are run.
-	TestCmd string
+	TestCmd    string
+	TestCmdSet bool // true when an explicit or user-local empty command disables fallback
 	// ResolveConflicts merges origin/<base> through the fix session whenever
 	// the branch conflicts with its base, before any review round.
 	ResolveConflicts bool
@@ -489,7 +490,7 @@ func (r *run) prepare() error {
 	// The repository's own gate is the fallback: an explicit --test-cmd or the
 	// user-local per-repo file stay personal overrides.
 	testCmdNote := ""
-	if r.o.Offline && r.o.TestCmd == "" {
+	if r.o.Offline && !r.o.TestCmdSet && r.o.TestCmd == "" {
 		cmd, err := resolveRepoTestCmd(r.ctx, r.p.Git, r.o.RepoRoot, pr.BaseRefName)
 		if err != nil {
 			return err

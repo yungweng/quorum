@@ -398,9 +398,10 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 	}
 	defer logFile.Close()
 	testCmd := ""
+	testCmdSet := false
 	if r.Cfg.LoopMode != config.LoopOnline {
 		var err error
-		testCmd, err = config.RepoTestCmd(r.P.TestCmdDir, repo)
+		testCmd, testCmdSet, err = config.RepoTestCmd(r.P.TestCmdDir, repo)
 		if err != nil {
 			return review.Findings{}, "", "", "", false, fmt.Errorf("reading the test command for %s: %w", repo, err)
 		}
@@ -442,6 +443,7 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		FixSuggestions:   r.Cfg.FixSuggestions,
 		Offline:          r.Cfg.LoopMode != config.LoopOnline,
 		TestCmd:          testCmd,
+		TestCmdSet:       testCmdSet,
 		ResumeRun:        resumeDir,
 		Bypass:           !r.Cfg.Sandboxed,
 		Interactive:      false,
