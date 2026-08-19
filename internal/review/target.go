@@ -10,20 +10,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/target"
 )
 
-const runTargetSchema = 1
+const runTargetSchema = 2
 
 // runTarget preserves the target contract that produced a run's reviewer
 // outputs. A resume must aggregate and publish under that same contract.
 type runTarget struct {
-	Schema     int    `json:"schema"`
-	Repo       string `json:"repo"`
-	Number     int    `json:"number,omitempty"`
-	Branch     string `json:"branch"`
-	BaseBranch string `json:"base_branch"`
-	BranchOnly bool   `json:"branch_only"`
+	Schema     int        `json:"schema"`
+	Repo       string     `json:"repo"`
+	Number     int        `json:"number,omitempty"`
+	Branch     string     `json:"branch"`
+	BaseBranch string     `json:"base_branch"`
+	BranchOnly bool       `json:"branch_only"`
+	PR         *gh.FullPR `json:"pr,omitempty"`
 	// LocalHead pins the exact unpushed commit a local-head run reviewed. A
 	// resume must review that same commit again rather than re-resolving the
 	// branch from origin, which never had it.
@@ -117,6 +119,10 @@ func newRunTarget(o Options, tgt target.Target, baseBranch string) runTarget {
 		BaseBranch: baseBranch,
 		BranchOnly: tgt.BranchOnly,
 	}
+	if !tgt.BranchOnly {
+		pr := tgt.PR
+		meta.PR = &pr
+	}
 	if o.LocalHead {
 		meta.LocalHead = o.HeadSHA
 	}
@@ -151,6 +157,10 @@ func applyRunTarget(o *Options, meta runTarget) error {
 	o.Number = meta.Number
 	o.Branch = meta.Branch
 	o.BaseBranch = meta.BaseBranch
+	if meta.PR != nil {
+		pr := *meta.PR
+		o.LocalPR = &pr
+	}
 	return nil
 }
 
@@ -163,6 +173,12 @@ func (m runTarget) validate() error {
 	}
 	if m.BranchOnly == (m.Number > 0) {
 		return fmt.Errorf("resume target metadata has inconsistent target kind")
+	}
+	if m.Number > 0 && (m.PR == nil || m.PR.Number != m.Number) {
+		return fmt.Errorf("resume target metadata is missing PR metadata")
+	}
+	if m.Number == 0 && m.PR != nil {
+		return fmt.Errorf("resume target metadata has PR metadata for a branch target")
 	}
 	return nil
 }

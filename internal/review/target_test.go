@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -121,12 +122,14 @@ func TestLegacyResumeOnlyAcceptsItsGeneratedPRName(t *testing.T) {
 
 func TestRunTargetRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "target.json")
+	pr := gh.FullPR{Number: 42}
 	want := runTarget{
 		Schema:     runTargetSchema,
 		Repo:       "acme/api",
 		Number:     42,
 		Branch:     "feature/crumb-tray",
 		BaseBranch: "main",
+		PR:         &pr,
 	}
 	if err := writeRunTarget(path, want); err != nil {
 		t.Fatal(err)
@@ -135,7 +138,7 @@ func TestRunTargetRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("metadata = %+v, want %+v", got, want)
 	}
 	data, err := os.ReadFile(path)
@@ -191,14 +194,23 @@ func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
 		t.Fatal("an online run's directory satisfied a local-head resume")
 	}
 
+	pr := gh.FullPR{Number: 42, Title: "Keep report context", URL: "https://example.invalid/pr/42"}
+	pr.Author.Login = "example-user"
 	prMeta := runTarget{Schema: runTargetSchema, Repo: "acme/api", Number: 42,
-		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123"}
+		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123", PR: &pr}
 	if err := prMeta.validate(); err != nil {
 		t.Fatalf("a local PR head did not validate: %v", err)
 	}
-	prResume := Options{Repo: "acme/api", Number: 42, LocalHead: true}
+	prResume := Options{Repo: "acme/api", RepoRoot: t.TempDir(), Number: 42, LocalHead: true}
 	if err := applyRunTarget(&prResume, prMeta); err != nil {
 		t.Fatalf("a local PR head did not resume: %v", err)
+	}
+	tgt, _, err := (&Runner{}).resolveRunTarget(context.Background(), &prResume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.BranchOnly || tgt.PR.Number != pr.Number || tgt.PR.Title != pr.Title || tgt.PR.URL != pr.URL || tgt.PR.Author.Login != pr.Author.Login {
+		t.Fatalf("resume lost PR metadata: %+v", tgt)
 	}
 }
 
