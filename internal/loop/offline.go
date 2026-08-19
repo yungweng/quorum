@@ -15,6 +15,7 @@ import (
 // repairs moved the head, the caller sends the run through another review
 // round instead of converging on commits no review has seen.
 func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, comment string) (bool, error) {
+	terminalSuggestion := false
 	// A prior terminal suggestion changed the head. Reaching finalization with
 	// a clean review now proves that changed head is safe for auto-merge.
 	if res.SuggestionCommits {
@@ -25,24 +26,32 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 		// push can bring the run back here, and the suggestion triage stays
 		// strictly terminal.
 		r.suggestionDone = true
+		testFixes := r.testFixTotal
 		pushed, err := r.suggestionRound(round, findings, comment, findings.HeadSHA)
 		if pushed {
 			res.SuggestionCommits = true
+			terminalSuggestion = r.testFixTotal == testFixes
 		}
 		if err != nil {
 			return false, err
 		}
 	}
-	if err := r.ensureTestsGreen(); err != nil {
-		return false, err
+	if !terminalSuggestion {
+		if err := r.ensureTestsGreen(); err != nil {
+			return false, err
+		}
 	}
 	current, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 	if err != nil {
 		return false, err
 	}
 	if current != findings.HeadSHA {
-		r.rep.Info("local test fixes moved the head past the clean review; reviewing the repaired head")
-		return false, nil
+		if terminalSuggestion {
+			r.rep.Info("terminal suggestion changes passed the local test gate")
+		} else {
+			r.rep.Info("local test fixes moved the head past the clean review; reviewing the repaired head")
+			return false, nil
+		}
 	}
 
 	r.rep.Step("Push")
