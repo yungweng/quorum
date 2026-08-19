@@ -212,6 +212,20 @@ func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
 	if tgt.BranchOnly || tgt.PR.Number != pr.Number || tgt.PR.Title != pr.Title || tgt.PR.URL != pr.URL || tgt.PR.Author.Login != pr.Author.Login {
 		t.Fatalf("resume lost PR metadata: %+v", tgt)
 	}
+
+	legacyPRMeta := runTarget{Schema: legacyRunTargetSchema, Repo: "acme/api", Number: 42,
+		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123"}
+	legacyResume := Options{Repo: "acme/api", RepoRoot: t.TempDir(), Number: 42, LocalHead: true}
+	if err := applyRunTarget(&legacyResume, legacyPRMeta); err != nil {
+		t.Fatalf("a schema-1 local PR head did not resume: %v", err)
+	}
+	tgt, _, err = (&Runner{}).resolveRunTarget(context.Background(), &legacyResume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.BranchOnly || tgt.PR.Number != legacyPRMeta.Number {
+		t.Fatalf("schema-1 resume lost PR identity: %+v", tgt)
+	}
 }
 
 func TestResolveLocalHeadKeepsProvidedPRMetadata(t *testing.T) {

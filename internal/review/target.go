@@ -14,7 +14,10 @@ import (
 	"github.com/yungweng/quorum/internal/target"
 )
 
-const runTargetSchema = 2
+const (
+	legacyRunTargetSchema = 1
+	runTargetSchema       = 2
+)
 
 // runTarget preserves the target contract that produced a run's reviewer
 // outputs. A resume must aggregate and publish under that same contract.
@@ -160,13 +163,17 @@ func applyRunTarget(o *Options, meta runTarget) error {
 	if meta.PR != nil {
 		pr := *meta.PR
 		o.LocalPR = &pr
+	} else if meta.LocalHead != "" && meta.Number > 0 {
+		// Schema 1 did not retain the full PR. Its identity fields still let a
+		// local-head resume reconstruct the PR target without consulting origin.
+		o.LocalPR = &gh.FullPR{Number: meta.Number}
 	}
 	return nil
 }
 
 func (m runTarget) validate() error {
-	if m.Schema != runTargetSchema {
-		return fmt.Errorf("resume target metadata has schema %d, want %d", m.Schema, runTargetSchema)
+	if m.Schema != legacyRunTargetSchema && m.Schema != runTargetSchema {
+		return fmt.Errorf("resume target metadata has schema %d, want %d or %d", m.Schema, legacyRunTargetSchema, runTargetSchema)
 	}
 	if m.Repo == "" || m.Branch == "" || m.BaseBranch == "" {
 		return fmt.Errorf("resume target metadata is incomplete")
@@ -174,7 +181,7 @@ func (m runTarget) validate() error {
 	if m.BranchOnly == (m.Number > 0) {
 		return fmt.Errorf("resume target metadata has inconsistent target kind")
 	}
-	if m.Number > 0 && (m.PR == nil || m.PR.Number != m.Number) {
+	if m.Schema == runTargetSchema && m.Number > 0 && (m.PR == nil || m.PR.Number != m.Number) {
 		return fmt.Errorf("resume target metadata is missing PR metadata")
 	}
 	if m.Number == 0 && m.PR != nil {
