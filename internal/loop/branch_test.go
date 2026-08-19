@@ -74,6 +74,46 @@ func TestReviewPostingHonorsRunOptionAndBranchTarget(t *testing.T) {
 	}
 }
 
+func TestOfflineReviewKeepsPRMetadataWhilePinningTheLocalHead(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf local-head\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p:      &Pipeline{Git: git.New(bin)},
+		o:      Options{Offline: true, Post: true},
+		ctx:    context.Background(),
+		branch: "feature/crumb-tray",
+		pr:     gh.FullPR{Number: 42, Title: "Keep report context", URL: "https://example.invalid/pr/42", BaseRefName: "main"},
+	}
+	r.pr.Author.Login = "example-user"
+	o := r.reviewOptions()
+	if !o.LocalHead || o.Post || o.Number != 42 || o.LocalPR == nil {
+		t.Fatalf("offline review options = %+v", o)
+	}
+	if o.LocalPR.Title != r.pr.Title || o.LocalPR.URL != r.pr.URL || o.LocalPR.Author.Login != r.pr.Author.Login {
+		t.Fatalf("PR metadata was lost: %+v", o.LocalPR)
+	}
+}
+
+func TestOfflineBranchReviewDoesNotSupplyPRMetadata(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf local-head\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p:      &Pipeline{Git: git.New(bin)},
+		o:      Options{Offline: true},
+		ctx:    context.Background(),
+		branch: "feature/crumb-tray",
+		target: target.Target{BranchOnly: true},
+		pr:     gh.FullPR{BaseRefName: "main"},
+	}
+	if o := r.reviewOptions(); o.LocalPR != nil || o.Number != 0 {
+		t.Fatalf("offline branch review options = %+v", o)
+	}
+}
+
 func TestBranchDirenvRequiresAnExplicitOverrideForTargetChanges(t *testing.T) {
 	for _, allow := range []bool{false, true} {
 		t.Run(map[bool]string{false: "refused", true: "allowed"}[allow], func(t *testing.T) {

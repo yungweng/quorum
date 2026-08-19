@@ -91,6 +91,26 @@ func (g G) LsRemote(ctx context.Context, dir, remote, ref string) (string, error
 	return sha, nil
 }
 
+// ShowFile returns a tracked file's content at rev. ok is false when the path
+// does not exist there; only a real read failure is an error.
+func (g G) ShowFile(ctx context.Context, dir, rev, path string) (string, bool, error) {
+	if _, err := g.run(ctx, dir, "rev-parse", "-q", "--verify", rev+"^{tree}"); err != nil {
+		return "", false, err
+	}
+	entry, err := g.run(ctx, dir, "ls-tree", "--name-only", rev, "--", path)
+	if err != nil {
+		return "", false, err
+	}
+	if entry == "" {
+		return "", false, nil
+	}
+	out, err := g.run(ctx, dir, "show", rev+":"+path)
+	if err != nil {
+		return "", false, err
+	}
+	return out, true, nil
+}
+
 // WorktreeAdd creates a detached worktree at path checked out at sha.
 func (g G) WorktreeAdd(ctx context.Context, repoRoot, path, sha string) error {
 	_, err := g.run(ctx, repoRoot, "worktree", "add", "--quiet", "--detach", path, sha)

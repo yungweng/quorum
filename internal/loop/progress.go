@@ -25,6 +25,7 @@ const (
 	PhaseReview      = "review"
 	PhaseFix         = "fix"
 	PhaseCIFix       = "ci-fix"
+	PhaseTests       = "tests"
 	PhaseConflictFix = "conflict-fix"
 	PhaseDivergence  = "divergence"
 	PhaseDescription = "description"

@@ -29,13 +29,14 @@ var babysitBoolFlags = map[string]bool{
 	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
 	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true, "divergence-scan": true,
 	"draft": true, "local": true, "no-resolve-conflicts": true, "no-fix-suggestions": true,
+	"offline": true, "online": true,
 	"h": true, "help": true,
 }
 
 var babysitValueFlags = map[string]bool{
 	"engine": true, "model": true, "effort": true, "reviewers": true,
 	"review-engine": true, "review-model": true, "review-effort": true,
-	"max-iter": true, "max-ci-fixes": true, "fix-timeout": true,
+	"max-iter": true, "max-ci-fixes": true, "fix-timeout": true, "test-cmd": true,
 }
 
 func (a *app) cmdBabysit(argv []string) int {
@@ -76,6 +77,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 	if args.boolean("local") && number > 0 {
 		return a.die("--local works on the current branch; do not pass a PR")
+	}
+	if args.boolean("offline") && args.boolean("online") {
+		return a.die("--offline and --online exclude each other")
 	}
 
 	o := loop.Options{
@@ -150,6 +154,21 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 	if o.Rules, err = config.RepoRules(a.p.RulesDir, o.Repo); err != nil {
 		return a.die("reading the review rules for %s: %v", o.Repo, err)
+	}
+	o.Offline = a.cfg.LoopMode != config.LoopOnline
+	if args.boolean("online") {
+		o.Offline = false
+	}
+	if args.boolean("offline") {
+		o.Offline = true
+	}
+	if args.has("test-cmd") {
+		o.TestCmd = args.str("", "test-cmd")
+		o.TestCmdSet = true
+	} else if o.Offline {
+		if o.TestCmd, o.TestCmdSet, err = config.RepoTestCmd(a.p.TestCmdDir, o.Repo); err != nil {
+			return a.die("reading the test command for %s: %v", o.Repo, err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -307,6 +326,10 @@ func (a *app) babysitExit(err error) int {
 		return exitGateAborted
 	case errors.Is(err, loop.ErrCIRed):
 		return exitCIRed
+	case errors.Is(err, loop.ErrTestsRed):
+		// The local gate is CI's offline counterpart, so scripts that branch on
+		// exit 3 keep working.
+		return exitCIRed
 	case errors.Is(err, loop.ErrNotConverged):
 		return exitNotConverged
 	case errors.Is(err, loop.ErrNoProgress):
@@ -332,6 +355,16 @@ when one exists. Otherwise it works on the pushed branch and skips PR CI and PR
 comments. After a posted PR run converges, a fresh read-only pass writes a local
 PR-description candidate for the final state. Extra positional text becomes
 context for the fix session.
+
+By default the loop runs offline (LOOP_MODE=offline): reviews and fix rounds
+iterate on local commits, the per-repo test command guards each round, and only
+a converged run pushes - once - which triggers a single CI run. When CI repairs
+move the head after that push, one more review round checks the repaired head.
+LOOP_MODE=online or --online restores the old behaviour: push and wait for CI
+after every fix round. The test command is resolved in this order: --test-cmd,
+the user-local ~/.config/quorum/testcmd/<owner>/<repo>, then the repository's
+own .quorum/testcmd. The repo file is read from the base branch, never from
+the change under review, so a change cannot weaken or hijack its own gate.
 
 Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. When the
 branch conflicts with its base, the base is merged and the conflicts resolved
@@ -362,6 +395,11 @@ Options:
   --max-iter N           Max review->fix rounds. Default: %d
   --max-ci-fixes N       Max PR CI fix attempts per green-CI phase. Default: %d
   --fix-timeout DUR      Kill a fix step that runs longer. Default: %s
+  --offline              Iterate locally, push once at the end (standing default: LOOP_MODE=offline)
+  --online               Push and wait for CI after every fix round (LOOP_MODE=online)
+  --test-cmd CMD         Shell command the offline loop runs as its local test gate.
+                         Default: ~/.config/quorum/testcmd/<owner>/<repo>, else the
+                         repo's .quorum/testcmd on the base branch, else none
   --divergence-scan      Analyze the round history after --max-iter, then stop
   --draft                Work on a draft PR (standing default: BABYSIT_DRAFTS=1)
   --local                Ignore any open PR: review and fix the pushed branch,
@@ -379,7 +417,7 @@ Options:
 
 Exit codes:
   2  aborted at a gate
-  3  CI still red after --max-ci-fixes attempts
+  3  CI or the local test command still red after --max-ci-fixes attempts
   4  review not converged after --max-iter rounds
   5  a fix round produced no changes although findings remain
   6  the review/fix history contains incompatible decisions
@@ -459,6 +497,19 @@ func (l *loopTermReporter) Header(h loop.Header) {
 		mode = "interactive" + o.Dim("  gates ask in the terminal")
 	}
 	o.Row("mode", mode)
+	if h.Offline {
+		o.Row("loop", "offline"+o.Dim("  iterate locally, one push and CI run at the end"))
+		gate := o.Dim("none configured  ·  --test-cmd, ~/.config/quorum/testcmd/<owner>/<repo>, or " + loop.RepoTestCmdPath + " on the base branch")
+		if h.TestCmd != "" {
+			gate = h.TestCmd
+			if h.TestCmdNote != "" {
+				gate += o.Dim("  ·  " + h.TestCmdNote)
+			}
+		}
+		o.Row("test gate", gate)
+	} else {
+		o.Row("loop", "online"+o.Dim("  push and wait for CI every round"))
+	}
 	limits := fmt.Sprintf("%d review rounds", h.MaxIter)
 	if !h.BranchOnly {
 		limits += fmt.Sprintf(", %d CI fixes", h.MaxCIFixes)

@@ -139,3 +139,54 @@ touch .direnv-allowed
 		t.Fatal("direnv ran after the changed-file check failed")
 	}
 }
+
+// A local head exists only in the caller's object database: there is nothing
+// to fetch and no remote for it to drift from. The fake git fails on any
+// unexpected call, so this also proves the head fetch and the head ls-remote
+// are really gone; only the base is fetched and drift-checked.
+func TestLocalHeadCheckoutSkipsTheHeadFetchAndHeadDrift(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+case "$*" in
+  "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
+  "rev-parse origin/main") echo "base-sha" ;;
+  "rev-parse local-sha^{commit}") echo "local-sha" ;;
+  worktree\ add\ --quiet\ --detach\ *) ;;
+  "ls-remote origin refs/heads/main") printf 'moved-base\trefs/heads/main\n' ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Git: git.New(bin)}
+	tgt := target.Target{
+		BranchOnly: true,
+		PR: gh.FullPR{
+			HeadRefName: "feature/crumb-tray",
+			HeadRefOid:  "local-sha",
+			BaseRefName: "main",
+			BaseRefOid:  "base-sha",
+		},
+	}
+	o := Options{RepoRoot: t.TempDir(), LocalHead: true,
+		Branch: "feature/crumb-tray", HeadSHA: "local-sha", BaseBranch: "main"}
+	run := runPaths{worktree: filepath.Join(t.TempDir(), "worktree")}
+
+	base, head, err := r.checkout(context.Background(), o, run, tgt, "main", "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != "base-sha" || head != "local-sha" {
+		t.Fatalf("reviewed base/head = %s/%s", base, head)
+	}
+
+	note, err := r.checkDrift(context.Background(), o, tgt, "main", "base-sha", "local-sha")
+	if err != nil {
+		t.Fatalf("checkDrift: %v", err)
+	}
+	if !strings.Contains(note, "Base branch moved") {
+		t.Fatalf("a moved base did not surface as a note: %q", note)
+	}
+}

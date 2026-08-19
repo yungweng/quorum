@@ -187,6 +187,22 @@ func (a *app) settingGroups() []settingGroup {
 				}
 				return nil
 			}},
+
+			{"loop mode", func(c config.Config) string {
+				if c.LoopMode == config.LoopOnline {
+					return "online: push and wait for CI after every fix round"
+				}
+				return "offline: iterate locally, one push and CI run at the end"
+			}, func(a *app, in *bufio.Reader, c *config.Config) error {
+				return a.pick(in, "How should babysit iterate?", c, []option{
+					{"offline", "review and fix local commits; one push and one CI run at the end",
+						func(c *config.Config) { c.LoopMode = config.LoopOffline },
+						func(c config.Config) bool { return c.LoopMode != config.LoopOnline }},
+					{"online", "push and wait for CI after every fix round",
+						func(c *config.Config) { c.LoopMode = config.LoopOnline },
+						func(c config.Config) bool { return c.LoopMode == config.LoopOnline }},
+				}, nil)
+			}},
 		}},
 	}
 }

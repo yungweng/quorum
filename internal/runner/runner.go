@@ -397,6 +397,15 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		return review.Findings{}, "", "", "", false, err
 	}
 	defer logFile.Close()
+	testCmd := ""
+	testCmdSet := false
+	if r.Cfg.LoopMode != config.LoopOnline {
+		var err error
+		testCmd, testCmdSet, err = config.RepoTestCmd(r.P.TestCmdDir, repo)
+		if err != nil {
+			return review.Findings{}, "", "", "", false, fmt.Errorf("reading the test command for %s: %w", repo, err)
+		}
+	}
 
 	rev := &review.Runner{GH: r.GH, Git: r.Git, Rep: review.NopReporter{}}
 	pipe := &loop.Pipeline{
@@ -432,6 +441,9 @@ func (r *Runner) babysit(ctx context.Context, clone, repo string, number int, re
 		AllowDraft:       !r.Cfg.SkipDrafts,
 		ResolveConflicts: r.Cfg.ResolveConflicts,
 		FixSuggestions:   r.Cfg.FixSuggestions,
+		Offline:          r.Cfg.LoopMode != config.LoopOnline,
+		TestCmd:          testCmd,
+		TestCmdSet:       testCmdSet,
 		ResumeRun:        resumeDir,
 		Bypass:           !r.Cfg.Sandboxed,
 		Interactive:      false,

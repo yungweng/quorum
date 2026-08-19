@@ -83,6 +83,12 @@ type Config struct {
 	// review is clean but still lists Suggestions: triage each one, implement
 	// what is worth it, and end without another review.
 	FixSuggestions bool
+	// LoopMode is how babysit iterates. "offline" (the default) keeps every
+	// review-fix round local - reviews of the unpushed worktree head, a local
+	// test command instead of a per-round CI wait - and pushes once at the
+	// end, triggering a single CI run. "online" is the old behaviour: push and
+	// wait for CI after every fix round.
+	LoopMode string
 
 	// AgentAction is what the daemon does with a pull request that asks for a
 	// review: "review" posts one and stops, "babysit" runs the full fix loop.
@@ -118,6 +124,12 @@ type Config struct {
 const (
 	ActionReview  = "review"
 	ActionBabysit = "babysit"
+)
+
+// Babysit loop modes.
+const (
+	LoopOffline = "offline"
+	LoopOnline  = "online"
 )
 
 // The engines reviews and fix sessions can run on. Defined here rather than
@@ -166,6 +178,7 @@ func Default() Config {
 		FixTimeout:       2 * time.Hour,
 		ResolveConflicts: true,
 		FixSuggestions:   true,
+		LoopMode:         LoopOffline,
 
 		AgentAction:      ActionReview,
 		AutoMergeTimeout: 2 * time.Hour,
@@ -386,6 +399,10 @@ func (c *Config) set(key, value string) {
 		c.ResolveConflicts = truthy(value)
 	case "FIX_SUGGESTIONS":
 		c.FixSuggestions = truthy(value)
+	case "LOOP_MODE":
+		if v := strings.TrimSpace(strings.ToLower(value)); v == LoopOffline || v == LoopOnline {
+			c.LoopMode = v
+		}
 	case "AGENT_ACTION":
 		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
 			c.AgentAction = v
@@ -540,7 +557,8 @@ func (c Config) Render() string {
 	w("SANDBOXED=%s\t\t# 1 uses the engine's own sandbox/approval defaults instead of bypassing them\n", bit(c.Sandboxed))
 	w("BABYSIT_DRAFTS=%s\t# 1 lets `quorum babysit` work on draft PRs without --draft\n", bit(c.BabysitDrafts))
 	w("RESOLVE_CONFLICTS=%s\t# merge the base branch and resolve conflicts before reviewing\n", bit(c.ResolveConflicts))
-	w("FIX_SUGGESTIONS=%s\t# after a clean final review, triage and implement leftover Suggestions once\n\n", bit(c.FixSuggestions))
+	w("FIX_SUGGESTIONS=%s\t# after a clean final review, triage and implement leftover Suggestions once\n", bit(c.FixSuggestions))
+	w("LOOP_MODE=%q\t# offline: iterate locally, one push and CI run at the end; online: push and wait for CI every round\n\n", c.LoopMode)
 
 	w("# What the agent does with a pull request that asks for your review:\n")
 	w("# \"review\" posts a review and stops, \"babysit\" runs the full fix loop.\n")

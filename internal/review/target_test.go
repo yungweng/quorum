@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -121,12 +122,14 @@ func TestLegacyResumeOnlyAcceptsItsGeneratedPRName(t *testing.T) {
 
 func TestRunTargetRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "target.json")
+	pr := gh.FullPR{Number: 42}
 	want := runTarget{
 		Schema:     runTargetSchema,
 		Repo:       "acme/api",
 		Number:     42,
 		Branch:     "feature/crumb-tray",
 		BaseBranch: "main",
+		PR:         &pr,
 	}
 	if err := writeRunTarget(path, want); err != nil {
 		t.Fatal(err)
@@ -135,7 +138,7 @@ func TestRunTargetRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("metadata = %+v, want %+v", got, want)
 	}
 	data, err := os.ReadFile(path)
@@ -155,5 +158,104 @@ func targetForTest(number int, branchOnly bool) target.Target {
 			HeadRefName: "feature/crumb-tray",
 			BaseRefName: "main",
 		},
+	}
+}
+
+// A local-head run reviews a commit only the caller's worktree has. The
+// metadata must pin that exact commit so a resume reviews it again instead of
+// re-resolving the branch from origin, which never had it - and an online
+// run's directory must never satisfy a local-head resume.
+func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
+	tgt := targetForTest(0, true)
+	meta := newRunTarget(Options{Repo: "acme/api", LocalHead: true, HeadSHA: "abc123"}, tgt, "main")
+	if meta.LocalHead != "abc123" {
+		t.Fatalf("LocalHead = %q, want the pinned sha", meta.LocalHead)
+	}
+	if err := meta.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	o := Options{Repo: "acme/api", LocalHead: true}
+	if err := applyRunTarget(&o, meta); err != nil {
+		t.Fatalf("applyRunTarget: %v", err)
+	}
+	if !o.LocalHead || o.HeadSHA != "abc123" {
+		t.Fatalf("resume did not restore the local head: %+v", o)
+	}
+
+	other := Options{Repo: "acme/api", LocalHead: true, HeadSHA: "def456"}
+	if err := applyRunTarget(&other, meta); err == nil {
+		t.Fatal("a different pinned sha was accepted")
+	}
+
+	online := newRunTarget(Options{Repo: "acme/api"}, tgt, "main")
+	fromOnline := Options{Repo: "acme/api", LocalHead: true}
+	if err := applyRunTarget(&fromOnline, online); err == nil {
+		t.Fatal("an online run's directory satisfied a local-head resume")
+	}
+
+	pr := gh.FullPR{Number: 42, Title: "Keep report context", URL: "https://example.invalid/pr/42"}
+	pr.Author.Login = "example-user"
+	prMeta := runTarget{Schema: runTargetSchema, Repo: "acme/api", Number: 42,
+		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123", PR: &pr}
+	if err := prMeta.validate(); err != nil {
+		t.Fatalf("a local PR head did not validate: %v", err)
+	}
+	prResume := Options{Repo: "acme/api", RepoRoot: t.TempDir(), Number: 42, LocalHead: true}
+	if err := applyRunTarget(&prResume, prMeta); err != nil {
+		t.Fatalf("a local PR head did not resume: %v", err)
+	}
+	tgt, _, err := (&Runner{}).resolveRunTarget(context.Background(), &prResume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.BranchOnly || tgt.PR.Number != pr.Number || tgt.PR.Title != pr.Title || tgt.PR.URL != pr.URL || tgt.PR.Author.Login != pr.Author.Login {
+		t.Fatalf("resume lost PR metadata: %+v", tgt)
+	}
+
+	legacyPRMeta := runTarget{Schema: legacyRunTargetSchema, Repo: "acme/api", Number: 42,
+		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123"}
+	legacyResume := Options{Repo: "acme/api", RepoRoot: t.TempDir(), Number: 42, LocalHead: true}
+	if err := applyRunTarget(&legacyResume, legacyPRMeta); err != nil {
+		t.Fatalf("a schema-1 local PR head did not resume: %v", err)
+	}
+	tgt, _, err = (&Runner{}).resolveRunTarget(context.Background(), &legacyResume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.BranchOnly || tgt.PR.Number != legacyPRMeta.Number {
+		t.Fatalf("schema-1 resume lost PR identity: %+v", tgt)
+	}
+}
+
+func TestResolveLocalHeadKeepsProvidedPRMetadata(t *testing.T) {
+	pr := gh.FullPR{Number: 42, Title: "Keep report context", URL: "https://example.invalid/pr/42"}
+	pr.Author.Login = "example-user"
+	o := Options{
+		Repo: "acme/api", RepoRoot: t.TempDir(), LocalHead: true, LocalPR: &pr,
+		Branch: "feature/crumb-tray", HeadSHA: "abc123", BaseBranch: "main",
+	}.withDefaults()
+	tgt, _, err := (&Runner{}).resolveRunTarget(context.Background(), &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.BranchOnly || tgt.PR.Number != 42 || tgt.PR.Title != pr.Title || tgt.PR.URL != pr.URL || tgt.PR.Author.Login != pr.Author.Login {
+		t.Fatalf("local target = %+v", tgt)
+	}
+	if tgt.PR.HeadRefName != o.Branch || tgt.PR.HeadRefOid != o.HeadSHA || tgt.PR.BaseRefName != o.BaseBranch {
+		t.Fatalf("local target did not pin the supplied refs: %+v", tgt.PR)
+	}
+}
+
+// LocalHead without the branch, sha and base is a programming error in the
+// caller, and reviewing origin's older head instead would be silent and wrong.
+func TestValidateRequiresTheLocalHeadFields(t *testing.T) {
+	o := Options{Repo: "acme/api", RepoRoot: "/tmp/x", LocalHead: true}.withDefaults()
+	if err := o.validate(); err == nil {
+		t.Fatal("an incomplete local-head target validated")
+	}
+	o.Branch, o.HeadSHA, o.BaseBranch = "feature/crumb-tray", "abc123", "main"
+	if err := o.validate(); err != nil {
+		t.Fatalf("a complete local-head target failed: %v", err)
 	}
 }

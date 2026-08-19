@@ -37,3 +37,33 @@ func TestRepoRulesRefusesPathTraversal(t *testing.T) {
 		t.Fatalf("RepoRules = %q, %v; want empty and no error", got, err)
 	}
 }
+
+func TestRepoTestCmdReadsTheOwnerRepoFile(t *testing.T) {
+	dir := t.TempDir()
+	if got, set, err := RepoTestCmd(dir, "acme/api"); err != nil || set || got != "" {
+		t.Fatalf("RepoTestCmd = %q, %v, %v; want empty, false, and no error for a missing file", got, set, err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "acme"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "acme", "api")
+	if err := os.WriteFile(path, []byte("make check\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, set, err := RepoTestCmd(dir, "acme/api")
+	if err != nil || !set {
+		t.Fatal(err)
+	}
+	if got != "make check" {
+		t.Errorf("RepoTestCmd = %q, want %q", got, "make check")
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, set, err := RepoTestCmd(dir, "acme/api"); err != nil || !set || got != "" {
+		t.Fatalf("RepoTestCmd empty override = %q, %v, %v; want empty, true, nil", got, set, err)
+	}
+	if got, set, err := RepoTestCmd(dir, "../outside/escape"); err != nil || set || got != "" {
+		t.Fatalf("RepoTestCmd = %q, %v, %v; want traversal refused silently", got, set, err)
+	}
+}

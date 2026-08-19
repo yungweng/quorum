@@ -51,6 +51,34 @@ runs repository checks in each fix step, confirms pushes on `origin`, and skips
 PR CI and PR comments. `--local` forces that branch mode even when an open PR
 exists, so a run can stay off the PR entirely.
 
+By default the loop runs offline (`LOOP_MODE=offline`): every review-fix round
+works on local commits in the run's worktree, reviews check the unpushed head,
+and the per-repo test command guards each round instead of a CI wait. Only a
+converged run pushes - once - which triggers a single CI run; that is what
+keeps a babysit run from billing one GitHub Actions run per fix round. During
+the offline rounds nothing is posted to the PR; after the final push quorum
+posts one consolidated fix-log comment covering all rounds plus the final
+review's comment. When CI repairs move the head after that push, one more
+review round checks the repaired head before the run converges. If someone
+else pushes to the branch while the loop iterates locally, the final push
+fails as non-fast-forward and the run stops instead of overwriting their work.
+`LOOP_MODE=online` or `--online` restores the old behaviour: push and wait for
+CI after every fix round.
+
+The test command is resolved in this order: `--test-cmd`, the user-local
+`~/.config/quorum/testcmd/<owner>/<repo>` (a personal override), then the
+repository's own tracked `.quorum/testcmd`, so a team shares one gate by
+committing that file. The repo file is deliberately read from the base branch
+(`origin/<base>`), never from the change under review: the command runs
+unsandboxed on this machine, and reading it out of the diff would let the
+change under babysit weaken or hijack its own gate - the same reasoning as the
+`.envrc` stop. A change that edits `.quorum/testcmd` therefore still runs
+against the old gate; the new one applies once it is merged. The command runs
+through direnv in the worktree; a red run feeds the output back into the fix
+session, up to `--max-ci-fixes` attempts. Without any configured command the
+fix sessions are still told to run the affected checks themselves, but nothing
+verifies it.
+
 Draft PRs are refused unless the run says `--draft` or the config says
 `BABYSIT_DRAFTS=1`. When the branch conflicts with its base branch, the base is
 merged and the conflicts resolved through the fix session before the first
@@ -86,8 +114,11 @@ generation.
 | `--review-model MODEL` | Model for the review rounds | engine default: `gpt-5.6-luna` (codex), `sonnet` (claude), `grok-4.5` (grok) |
 | `--review-effort LEVEL` | Effort for the review rounds | `max` (codex), the engine's own (claude, grok) |
 | `--max-iter N` | Review to fix rounds before giving up | 12 |
-| `--max-ci-fixes N` | PR CI fix attempts per green-CI phase | 3 |
-| `--fix-timeout DUR` | Kill a fix step that runs longer | 2h |
+| `--max-ci-fixes N` | CI or local test fix attempts per green phase | 3 |
+| `--fix-timeout DUR` | Kill a fix step or test run that runs longer | 2h |
+| `--offline` | Iterate locally, push once at the end | on, `LOOP_MODE=offline` |
+| `--online` | Push and wait for CI after every fix round | off, `LOOP_MODE=online` |
+| `--test-cmd CMD` | Shell command the offline loop runs as its test gate | `~/.config/quorum/testcmd/<owner>/<repo>`, else `.quorum/testcmd` on the base branch, else none |
 | `--divergence-scan` | Analyze all rounds after the limit, write a report, then stop | off |
 | `--draft` | Work on a draft PR | off, or `BABYSIT_DRAFTS=1` |
 | `--local` | Ignore any open PR and work on the pushed branch only | off |
@@ -250,7 +281,7 @@ from the tools they replace.
 0  review clean (and CI green for a PR), or remaining findings disputed and accepted
 1  any other failure
 2  aborted at a gate
-3  CI still red after --max-ci-fixes attempts
+3  CI or the local test command still red after --max-ci-fixes attempts
 4  not converged after --max-iter rounds
 5  a fix round produced no changes although findings remain
 6  the review/fix history contains incompatible decisions
@@ -310,6 +341,7 @@ SANDBOXED=0
 BABYSIT_DRAFTS=0         # 1 lets quorum babysit work on draft PRs without --draft
 RESOLVE_CONFLICTS=1      # merge the base branch and resolve conflicts before reviewing
 FIX_SUGGESTIONS=1        # after a clean final review, triage and implement leftover Suggestions once
+LOOP_MODE="offline"      # offline: iterate locally, one push and CI run at the end; online: push and CI wait every round
 
 AGENT_ACTION="review"    # or "babysit"
 AUTO_MERGE=0             # one switch for agent, review and babysit runs

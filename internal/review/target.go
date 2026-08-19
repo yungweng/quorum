@@ -10,20 +10,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/target"
 )
 
-const runTargetSchema = 1
+const (
+	legacyRunTargetSchema = 1
+	runTargetSchema       = 2
+)
 
 // runTarget preserves the target contract that produced a run's reviewer
 // outputs. A resume must aggregate and publish under that same contract.
 type runTarget struct {
-	Schema     int    `json:"schema"`
-	Repo       string `json:"repo"`
-	Number     int    `json:"number,omitempty"`
-	Branch     string `json:"branch"`
-	BaseBranch string `json:"base_branch"`
-	BranchOnly bool   `json:"branch_only"`
+	Schema     int        `json:"schema"`
+	Repo       string     `json:"repo"`
+	Number     int        `json:"number,omitempty"`
+	Branch     string     `json:"branch"`
+	BaseBranch string     `json:"base_branch"`
+	BranchOnly bool       `json:"branch_only"`
+	PR         *gh.FullPR `json:"pr,omitempty"`
+	// LocalHead pins the exact unpushed commit a local-head run reviewed. A
+	// resume must review that same commit again rather than re-resolving the
+	// branch from origin, which never had it.
+	LocalHead string `json:"local_head,omitempty"`
 }
 
 func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Target, runPaths, error) {
@@ -50,19 +59,38 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 		}
 	}
 
-	tgt, err := target.Resolve(ctx, r.GH, r.Git, o.RepoRoot, o.Number, o.Branch, o.BaseBranch)
-	if err != nil {
-		return target.Target{}, runPaths{}, err
-	}
-	if o.HeadSHA != "" {
-		if !tgt.BranchOnly {
-			return target.Target{}, runPaths{}, fmt.Errorf("a pinned head SHA requires a branch-only target")
+	var tgt target.Target
+	var err error
+	if o.LocalHead {
+		// The head is unpushed, so it cannot be resolved from origin and cannot
+		// drift: only the caller's worktree can move it.
+		if o.LocalPR != nil {
+			pr := *o.LocalPR
+			pr.HeadRefName = o.Branch
+			pr.HeadRefOid = o.HeadSHA
+			pr.BaseRefName = o.BaseBranch
+			tgt = target.Target{PR: pr}
+		} else {
+			tgt, err = target.ResolvePinned(ctx, r.Git, o.RepoRoot, o.Branch, o.HeadSHA, o.BaseBranch)
 		}
-		if tgt.PR.HeadRefOid != o.HeadSHA {
-			return target.Target{}, runPaths{}, fmt.Errorf(
-				"%w: pipeline worktree is %s, origin/%s is %s",
-				ErrHeadDrifted, o.HeadSHA, tgt.PR.HeadRefName, tgt.PR.HeadRefOid,
-			)
+		if err != nil {
+			return target.Target{}, runPaths{}, err
+		}
+	} else {
+		tgt, err = target.Resolve(ctx, r.GH, r.Git, o.RepoRoot, o.Number, o.Branch, o.BaseBranch)
+		if err != nil {
+			return target.Target{}, runPaths{}, err
+		}
+		if o.HeadSHA != "" {
+			if !tgt.BranchOnly {
+				return target.Target{}, runPaths{}, fmt.Errorf("a pinned head SHA requires a branch-only target")
+			}
+			if tgt.PR.HeadRefOid != o.HeadSHA {
+				return target.Target{}, runPaths{}, fmt.Errorf(
+					"%w: pipeline worktree is %s, origin/%s is %s",
+					ErrHeadDrifted, o.HeadSHA, tgt.PR.HeadRefName, tgt.PR.HeadRefOid,
+				)
+			}
 		}
 	}
 	if o.ResumeRun == "" {
@@ -86,7 +114,7 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 }
 
 func newRunTarget(o Options, tgt target.Target, baseBranch string) runTarget {
-	return runTarget{
+	meta := runTarget{
 		Schema:     runTargetSchema,
 		Repo:       o.Repo,
 		Number:     tgt.PR.Number,
@@ -94,6 +122,14 @@ func newRunTarget(o Options, tgt target.Target, baseBranch string) runTarget {
 		BaseBranch: baseBranch,
 		BranchOnly: tgt.BranchOnly,
 	}
+	if !tgt.BranchOnly {
+		pr := tgt.PR
+		meta.PR = &pr
+	}
+	if o.LocalHead {
+		meta.LocalHead = o.HeadSHA
+	}
+	return meta
 }
 
 func applyRunTarget(o *Options, meta runTarget) error {
@@ -112,21 +148,44 @@ func applyRunTarget(o *Options, meta runTarget) error {
 	if o.BaseBranch != "" && o.BaseBranch != meta.BaseBranch {
 		return fmt.Errorf("resume run uses base %s, not %s", meta.BaseBranch, o.BaseBranch)
 	}
+	if meta.LocalHead != "" {
+		if o.HeadSHA != "" && o.HeadSHA != meta.LocalHead {
+			return fmt.Errorf("resume run reviewed local head %s, not %s", meta.LocalHead, o.HeadSHA)
+		}
+		o.LocalHead = true
+		o.HeadSHA = meta.LocalHead
+	} else if o.LocalHead {
+		return fmt.Errorf("resume run did not review a local head")
+	}
 	o.Number = meta.Number
 	o.Branch = meta.Branch
 	o.BaseBranch = meta.BaseBranch
+	if meta.PR != nil {
+		pr := *meta.PR
+		o.LocalPR = &pr
+	} else if meta.LocalHead != "" && meta.Number > 0 {
+		// Schema 1 did not retain the full PR. Its identity fields still let a
+		// local-head resume reconstruct the PR target without consulting origin.
+		o.LocalPR = &gh.FullPR{Number: meta.Number}
+	}
 	return nil
 }
 
 func (m runTarget) validate() error {
-	if m.Schema != runTargetSchema {
-		return fmt.Errorf("resume target metadata has schema %d, want %d", m.Schema, runTargetSchema)
+	if m.Schema != legacyRunTargetSchema && m.Schema != runTargetSchema {
+		return fmt.Errorf("resume target metadata has schema %d, want %d or %d", m.Schema, legacyRunTargetSchema, runTargetSchema)
 	}
 	if m.Repo == "" || m.Branch == "" || m.BaseBranch == "" {
 		return fmt.Errorf("resume target metadata is incomplete")
 	}
 	if m.BranchOnly == (m.Number > 0) {
 		return fmt.Errorf("resume target metadata has inconsistent target kind")
+	}
+	if m.Schema == runTargetSchema && m.Number > 0 && (m.PR == nil || m.PR.Number != m.Number) {
+		return fmt.Errorf("resume target metadata is missing PR metadata")
+	}
+	if m.Number == 0 && m.PR != nil {
+		return fmt.Errorf("resume target metadata has PR metadata for a branch target")
 	}
 	return nil
 }

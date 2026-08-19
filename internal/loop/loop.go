@@ -50,6 +50,10 @@ var (
 	// ErrConflicts is exit 7: the branch conflicts with its base and the
 	// resolution session did not produce a conflict-free merge.
 	ErrConflicts = errors.New("merge conflicts with the base branch remain")
+	// ErrTestsRed is the offline loop's local counterpart of ErrCIRed and maps
+	// onto the same exit code: the configured test command stayed red after the
+	// allowed fix attempts.
+	ErrTestsRed = errors.New("the test command still fails after the allowed fix attempts")
 )
 
 // Defaults for a run.
@@ -108,6 +112,18 @@ type Options struct {
 	// Local ignores any open pull request and runs branch-only on the current
 	// pushed branch: no PR comments, no PR CI wait, no auto-merge.
 	Local bool
+	// Offline keeps every review-fix iteration local: reviews run against the
+	// worktree's unpushed head, fix rounds commit without pushing, and the
+	// configured TestCmd replaces the per-round CI wait. Only a converged run
+	// pushes - once - and triggers a single CI run. This is what keeps a
+	// babysit run from billing one GitHub Actions run per fix round.
+	Offline bool
+	// TestCmd is the repository's local test command, run through the shell in
+	// the worktree after every offline round that committed something. Empty
+	// disables the deterministic gate; the session prompts still demand that
+	// affected checks are run.
+	TestCmd    string
+	TestCmdSet bool // true when an explicit or user-local empty command disables fallback
 	// ResolveConflicts merges origin/<base> through the fix session whenever
 	// the branch conflicts with its base, before any review round.
 	ResolveConflicts bool
@@ -280,10 +296,20 @@ type run struct {
 
 	roundLog        []RoundEntry
 	ciFixTotal      int
+	testFixTotal    int
+	testRuns        int
 	conflictFixes   int
 	disputeAccepted bool
 	disputeText     string
 	divergenceTrace DivergenceTrace
+
+	// suggestionDone keeps the terminal suggestion round terminal in offline
+	// mode, where a CI repair after the push can send the run through another
+	// review round: the suggestion triage still runs at most once per run.
+	suggestionDone bool
+	// pendingFixComments are the offline rounds' PR COMMENT blocks, held back
+	// until the final push makes the commits they describe public.
+	pendingFixComments []string
 
 	// prog is what this run publishes about itself for a watcher to read. It
 	// is the run's own copy; publish writes it out.
@@ -448,7 +474,7 @@ func (r *run) prepare() error {
 		return err
 	}
 	r.fixer = fixer
-	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly, r.o.Rules)
+	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly, r.o.Offline, r.o.Rules)
 	if tgt.BranchOnly {
 		r.prCtx = branchContext(r.branch, pr.BaseRefName, r.o.Context)
 	} else {
@@ -461,13 +487,28 @@ func (r *run) prepare() error {
 		}
 	}
 
+	// The repository's own gate is the fallback: an explicit --test-cmd or the
+	// user-local per-repo file stay personal overrides.
+	testCmdNote := ""
+	if r.o.Offline && !r.o.TestCmdSet && r.o.TestCmd == "" {
+		cmd, err := resolveRepoTestCmd(r.ctx, r.p.Git, r.o.RepoRoot, pr.BaseRefName)
+		if err != nil {
+			return err
+		}
+		if cmd != "" {
+			r.o.TestCmd = cmd
+			testCmdNote = fmt.Sprintf("%s @ %s", RepoTestCmdPath, pr.BaseRefName)
+		}
+	}
+
 	r.rep.Header(Header{
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Draft: pr.IsDraft, Local: r.o.Local,
 		Engine: r.o.Engine, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 		ReviewEngine: r.o.ReviewEngine, ReviewModel: reviewModel, ReviewEffort: reviewEffort,
-		Interactive: r.o.Interactive, MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
+		Interactive: r.o.Interactive, Offline: r.o.Offline, TestCmd: r.o.TestCmd, TestCmdNote: testCmdNote,
+		MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		DivergenceScan: r.o.DivergenceScan,
 		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
 	})
@@ -512,7 +553,9 @@ func (r *run) execute() (*Result, error) {
 		resume = ""
 	}
 	r.startReviewWith(1, resume)
-	if !r.target.BranchOnly {
+	// Offline runs skip the initial CI wait: the local test gate guards each
+	// round and the single CI run after the final push guards the result.
+	if !r.target.BranchOnly && !r.o.Offline {
 		r.rep.Step("CI")
 		r.enter(PhaseCI)
 		// The first review only needs the pushed head, so it starts now and runs
@@ -554,6 +597,23 @@ func (r *run) execute() (*Result, error) {
 		r.prog.Critical = findings.Critical
 		r.publish()
 		if findings.Blocking() == 0 {
+			if r.o.Offline {
+				settled, err := r.finalizeOffline(res, iteration, findings, comment)
+				if err != nil {
+					return res, err
+				}
+				if settled {
+					res.Converged = true
+					break
+				}
+				// CI repairs moved the head past the reviewed commit, so the
+				// clean review no longer describes what is on the branch. The
+				// next round reviews the repaired head.
+				if iteration < r.o.MaxIter {
+					r.startReview(iteration + 1)
+				}
+				continue
+			}
 			res.Converged = true
 			if suggestionRoundDue(r.o, findings) {
 				pushed, err := r.suggestionRound(iteration, findings, comment, currentSHA)
@@ -570,7 +630,7 @@ func (r *run) execute() (*Result, error) {
 		preFixSHA := currentSHA
 		tag := fmt.Sprintf("fix-round-%d", iteration)
 
-		if err := r.codexCall(tag, fixRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, comment)); err != nil {
+		if err := r.codexCall(tag, fixRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, r.o.Offline, comment)); err != nil {
 			return res, err
 		}
 		if err := r.questionGate(tag); err != nil {
@@ -597,6 +657,55 @@ func (r *run) execute() (*Result, error) {
 				if r.o.DivergenceScan {
 					r.traceFix(iteration, preFixSHA, afterSHA, tag)
 				}
+				// An offline run may hold unpushed commits from earlier rounds.
+				// Its local gate must pass before those commits or a branch-only
+				// disputed head is accepted without its configured test command.
+				if r.o.Offline {
+					if err := r.ensureTestsGreen(); err != nil {
+						return res, err
+					}
+					afterTestsSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+					if err != nil {
+						return res, err
+					}
+					if afterTestsSHA != afterSHA {
+						r.rep.Info("local test fixes moved the head past the disputed review; reviewing the repaired head")
+						if iteration < r.o.MaxIter {
+							r.startReview(iteration + 1)
+						}
+						continue
+					}
+					conflictFixes := r.conflictFixes
+					if err := r.ensureMergeable(); err != nil {
+						return res, err
+					}
+					if r.conflictFixes != conflictFixes {
+						r.rep.Info("merge conflict resolution moved the head past the disputed review; reviewing the resolved head")
+						if iteration < r.o.MaxIter {
+							r.startReview(iteration + 1)
+						}
+						continue
+					}
+					if err := r.pushBranch(); err != nil {
+						return res, err
+					}
+					if err := r.flushFixComments(); err != nil {
+						return res, err
+					}
+				}
+				if r.o.Offline && !r.target.BranchOnly {
+					preCISHA := r.headSHA
+					if err := r.ensureCIGreen(); err != nil {
+						return res, err
+					}
+					if r.headSHA != preCISHA {
+						r.rep.Info("CI repairs moved the head past the disputed review; reviewing the repaired head")
+						if iteration < r.o.MaxIter {
+							r.startReview(iteration + 1)
+						}
+						continue
+					}
+				}
 				commentURL, commentPosted, err := r.postDisputeComment(
 					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
 				if err != nil {
@@ -620,12 +729,18 @@ func (r *run) execute() (*Result, error) {
 		}
 
 		r.recordRound(fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
-		if err := r.pushBranch(); err != nil {
-			return res, err
-		}
-		if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
-			fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA); err != nil {
-			return res, err
+		if r.o.Offline {
+			// The commits stay local: the comment is queued for the final
+			// push, and the test gate replaces this round's CI wait.
+			r.queueFixComment(tag, fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
+		} else {
+			if err := r.pushBranch(); err != nil {
+				return res, err
+			}
+			if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
+				fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA); err != nil {
+				return res, err
+			}
 		}
 
 		// The base may have moved during the round. Re-checking here, while no
@@ -633,12 +748,22 @@ func (r *run) execute() (*Result, error) {
 		if err := r.ensureMergeable(); err != nil {
 			return res, err
 		}
+		if r.o.Offline {
+			if err := r.ensureTestsGreen(); err != nil {
+				return res, err
+			}
+			// Test repairs can move the local head after the first check above.
+			// Refresh the base before starting a review of those new commits.
+			if err := r.ensureMergeable(); err != nil {
+				return res, err
+			}
+		}
 
 		// Overlap the next review with this round's CI wait.
 		if iteration < r.o.MaxIter {
 			r.startReview(iteration + 1)
 		}
-		if !r.target.BranchOnly {
+		if !r.target.BranchOnly && !r.o.Offline {
 			if err := r.ensureCIGreen(); err != nil {
 				r.killReview()
 				return res, err
@@ -683,7 +808,7 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 	r.rep.Step("Suggestion round")
 	r.enter(PhaseFix)
 	tag := "suggestion-round"
-	if err := r.codexCall(tag, suggestionRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, comment)); err != nil {
+	if err := r.codexCall(tag, suggestionRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, r.o.Offline, comment)); err != nil {
 		return false, err
 	}
 	if err := r.questionGate(tag); err != nil {
@@ -701,6 +826,15 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 		return false, nil
 	}
 	r.recordRound("Suggestion round", preSHA)
+	if r.o.Offline {
+		// The push and the single CI wait follow in finalizeOffline; the test
+		// gate is all that checks these commits, because no review does.
+		r.queueFixComment(tag, "Suggestion round", preSHA)
+		if err := r.ensureTestsGreen(); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
 	if err := r.pushBranch(); err != nil {
 		return true, err
 	}
@@ -1162,6 +1296,8 @@ func stepLabel(tag string) string {
 		return "Fix round " + strings.TrimPrefix(tag, "fix-round-")
 	case strings.HasPrefix(tag, "ci-fix-"):
 		return "CI fix " + strings.TrimPrefix(tag, "ci-fix-")
+	case strings.HasPrefix(tag, "test-fix-"):
+		return "Test fix " + strings.TrimPrefix(tag, "test-fix-")
 	case strings.HasPrefix(tag, "suggestion-round"):
 		return "Suggestion round" + strings.TrimPrefix(tag, "suggestion-round")
 	default:

@@ -10,23 +10,28 @@ import (
 
 // Header is what a pipeline run announces about itself before it starts.
 type Header struct {
-	Repo           string
-	Number         int
-	Title          string
-	URL            string
-	Branch         string
-	Base           string
-	BranchOnly     bool
-	Draft          bool
-	Local          bool
-	Engine         string
-	Model          string
-	Effort         string
-	ReviewEngine   string
-	ReviewModel    string
-	ReviewEffort   string
-	Bypass         bool
-	Interactive    bool
+	Repo         string
+	Number       int
+	Title        string
+	URL          string
+	Branch       string
+	Base         string
+	BranchOnly   bool
+	Draft        bool
+	Local        bool
+	Engine       string
+	Model        string
+	Effort       string
+	ReviewEngine string
+	ReviewModel  string
+	ReviewEffort string
+	Bypass       bool
+	Interactive  bool
+	Offline      bool
+	TestCmd      string
+	// TestCmdNote names where a repo-provided test command came from, e.g.
+	// ".quorum/testcmd @ main". Empty for a flag or user-local command.
+	TestCmdNote    string
 	MaxIter        int
 	MaxCIFixes     int
 	DivergenceScan bool

@@ -36,8 +36,8 @@ func TestSuggestionRoundDue(t *testing.T) {
 // commits would invent them.
 func TestSuggestionRoundPromptDemandsTriageAndAllowsNoChange(t *testing.T) {
 	for name, prompt := range map[string]string{
-		"pr":     suggestionRoundPrompt(12, "", false, "## Summary\n\nfine"),
-		"branch": suggestionRoundPrompt(0, "feature/crumb-tray", true, "## Summary\n\nfine"),
+		"pr":     suggestionRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
+		"branch": suggestionRoundPrompt(0, "feature/crumb-tray", true, false, "## Summary\n\nfine"),
 	} {
 		for _, want := range []string{
 			"first decide whether it is worth implementing",
@@ -53,7 +53,7 @@ func TestSuggestionRoundPromptDemandsTriageAndAllowsNoChange(t *testing.T) {
 }
 
 func TestSuggestionRoundBranchPromptDoesNotInventAPROrCIWatcher(t *testing.T) {
-	got := suggestionRoundPrompt(0, "feature/crumb-tray", true, "## Summary\n\nfine")
+	got := suggestionRoundPrompt(0, "feature/crumb-tray", true, false, "## Summary\n\nfine")
 	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", MarkerComment} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("branch suggestion prompt contains %q", unwanted)

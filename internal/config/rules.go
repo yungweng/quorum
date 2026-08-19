@@ -30,3 +30,25 @@ func RepoRules(dir, repo string) (string, error) {
 	}
 	return strings.TrimSpace(string(b)), nil
 }
+
+// RepoTestCmd reads the user-local test command for repo ("owner/repo") from
+// dir, the test command root (~/.config/quorum/testcmd). The file holds one
+// shell command; the offline babysit loop runs it in the worktree after every
+// fix round. It is the personal override: a missing file falls back to the
+// repository's own tracked .quorum/testcmd, which the pipeline reads from the
+// base branch so the change under review cannot weaken its own gate.
+// set is true when the file exists, including when it explicitly contains no
+// command and therefore disables the fallback gate.
+func RepoTestCmd(dir, repo string) (cmd string, set bool, err error) {
+	if strings.Contains(repo, "..") {
+		return "", false, nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(repo)))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(string(b)), true, nil
+}

@@ -70,6 +70,41 @@ func ResolveLocal(
 	return resolveBranch(ctx, ghc, gitc, repoRoot, branch, baseBranch, true)
 }
 
+// ResolvePinned builds a branch-only target for a head that exists only in the
+// caller's local object database, without requiring the branch to be pushed.
+// The offline fix loop reviews the commits its fix rounds create before any of
+// them reach origin, so the pushed-head requirement the other entry points
+// enforce cannot apply here. The base still comes from origin: the diff under
+// review is against what the branch will land on.
+func ResolvePinned(
+	ctx context.Context,
+	gitc git.G,
+	repoRoot string,
+	branch string,
+	headSHA string,
+	baseBranch string,
+) (Target, error) {
+	if branch == "" || headSHA == "" || baseBranch == "" {
+		return Target{}, fmt.Errorf("a pinned target needs a branch, a head SHA and a base branch")
+	}
+	if branch == baseBranch {
+		return Target{}, fmt.Errorf("branch %s is the base branch; there is no branch diff to review", branch)
+	}
+	baseSHA, err := gitc.LsRemote(ctx, repoRoot, "origin", "refs/heads/"+baseBranch)
+	if err != nil {
+		return Target{}, err
+	}
+	pr := gh.FullPR{
+		Title:       branch,
+		State:       "BRANCH",
+		HeadRefName: branch,
+		HeadRefOid:  headSHA,
+		BaseRefName: baseBranch,
+		BaseRefOid:  baseSHA,
+	}
+	return Target{PR: pr, BranchOnly: true}, nil
+}
+
 // resolveBranch builds the branch-only target both entry points share.
 func resolveBranch(
 	ctx context.Context,
