@@ -97,10 +97,11 @@ func (g G) ShowFile(ctx context.Context, dir, rev, path string) (string, bool, e
 	if _, err := g.run(ctx, dir, "rev-parse", "-q", "--verify", rev+"^{tree}"); err != nil {
 		return "", false, err
 	}
-	if _, err := g.run(ctx, dir, "rev-parse", "-q", "--verify", rev+":"+path); err != nil {
-		if err := ctx.Err(); err != nil {
-			return "", false, err
-		}
+	entry, err := g.run(ctx, dir, "ls-tree", "--name-only", rev, "--", path)
+	if err != nil {
+		return "", false, err
+	}
+	if entry == "" {
 		return "", false, nil
 	}
 	out, err := g.run(ctx, dir, "show", rev+":"+path)

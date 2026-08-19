@@ -118,7 +118,7 @@ set -eu
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
   "rev-parse -q --verify origin/main^{tree}") echo "tree-sha" ;;
-  "rev-parse -q --verify origin/main:.quorum/testcmd") echo "blob-sha" ;;
+  "ls-tree --name-only origin/main -- .quorum/testcmd") echo ".quorum/testcmd" ;;
   "show origin/main:.quorum/testcmd") echo "make check" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac
@@ -143,7 +143,7 @@ set -eu
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
   "rev-parse -q --verify origin/main^{tree}") echo "tree-sha" ;;
-  "rev-parse -q --verify origin/main:.quorum/testcmd") exit 1 ;;
+  "ls-tree --name-only origin/main -- .quorum/testcmd") ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac
 `
