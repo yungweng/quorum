@@ -26,11 +26,10 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 		// push can bring the run back here, and the suggestion triage stays
 		// strictly terminal.
 		r.suggestionDone = true
-		testFixes := r.testFixTotal
 		pushed, err := r.suggestionRound(round, findings, comment, findings.HeadSHA)
 		if pushed {
 			res.SuggestionCommits = true
-			terminalSuggestion = r.testFixTotal == testFixes
+			terminalSuggestion = true
 		}
 		if err != nil {
 			return false, err
