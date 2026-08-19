@@ -675,6 +675,17 @@ func (r *run) execute() (*Result, error) {
 						}
 						continue
 					}
+					conflictFixes := r.conflictFixes
+					if err := r.ensureMergeable(); err != nil {
+						return res, err
+					}
+					if r.conflictFixes != conflictFixes {
+						r.rep.Info("merge conflict resolution moved the head past the disputed review; reviewing the resolved head")
+						if iteration < r.o.MaxIter {
+							r.startReview(iteration + 1)
+						}
+						continue
+					}
 					if err := r.pushBranch(); err != nil {
 						return res, err
 					}
