@@ -98,7 +98,9 @@ func (r *run) reviewOptions() review.Options {
 		// loudly instead of silently reviewing origin's older head.
 		head, _ := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 		o.LocalHead = true
-		o.LocalPR = &r.pr
+		if !r.target.BranchOnly {
+			o.LocalPR = &r.pr
+		}
 		o.Branch = r.branch
 		o.HeadSHA = head
 		o.BaseBranch = r.pr.BaseRefName

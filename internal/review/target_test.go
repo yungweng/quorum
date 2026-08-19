@@ -191,10 +191,14 @@ func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
 		t.Fatal("an online run's directory satisfied a local-head resume")
 	}
 
-	bad := runTarget{Schema: runTargetSchema, Repo: "acme/api", Number: 42,
+	prMeta := runTarget{Schema: runTargetSchema, Repo: "acme/api", Number: 42,
 		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123"}
-	if err := bad.validate(); err == nil {
-		t.Fatal("a local head pinned on a PR target validated")
+	if err := prMeta.validate(); err != nil {
+		t.Fatalf("a local PR head did not validate: %v", err)
+	}
+	prResume := Options{Repo: "acme/api", Number: 42, LocalHead: true}
+	if err := applyRunTarget(&prResume, prMeta); err != nil {
+		t.Fatalf("a local PR head did not resume: %v", err)
 	}
 }
 

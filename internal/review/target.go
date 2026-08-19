@@ -164,9 +164,6 @@ func (m runTarget) validate() error {
 	if m.BranchOnly == (m.Number > 0) {
 		return fmt.Errorf("resume target metadata has inconsistent target kind")
 	}
-	if m.LocalHead != "" && !m.BranchOnly {
-		return fmt.Errorf("resume target metadata pins a local head on a pull request target")
-	}
 	return nil
 }
 
