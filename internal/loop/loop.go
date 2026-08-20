@@ -994,6 +994,10 @@ func (r *run) pushBranch() error {
 	if err != nil {
 		return err
 	}
+	remoteBefore, err := r.remoteHead()
+	if err != nil {
+		return err
+	}
 	// Pre-push hooks spam the terminal and can fail spuriously when they race a
 	// push the session already made, so their output only surfaces when the
 	// push failed and the sha never arrived.
@@ -1009,13 +1013,13 @@ func (r *run) pushBranch() error {
 		} else {
 			remote, _ = r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
 		}
+		if pushErr != nil {
+			hookOut, hookErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA, remoteBefore)
+			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out, hookOut: hookOut, local: hookErr != nil}
+		}
 		if remote == pushedSHA {
 			r.headSHA = pushedSHA
 			return nil
-		}
-		if pushErr != nil {
-			hookOut, hookErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA)
-			return &pushRejection{branch: r.branch, sha: pushedSHA, out: hookOut, local: hookErr != nil}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",

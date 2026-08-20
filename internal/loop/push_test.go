@@ -37,10 +37,10 @@ func TestFixablePushRejectionOnlyCoversLocalVerification(t *testing.T) {
 	}
 
 	hook := "pre-push hook\nsrc/app.ts(12,3): error TS2339: Property 'crumb' does not exist"
-	if !fixablePushRejection(&pushRejection{out: hook, local: true}) {
+	if !fixablePushRejection(&pushRejection{hookOut: hook, local: true}) {
 		t.Error("a verification hook rejection must be repairable")
 	}
-	if fixablePushRejection(&pushRejection{out: hook}) {
+	if fixablePushRejection(&pushRejection{hookOut: hook}) {
 		t.Error("unverified output must not be handed to a fix session")
 	}
 }
@@ -53,6 +53,11 @@ func TestTouchesHookConfigCoversTheUsualHookFiles(t *testing.T) {
 		".golangci.yml",
 		".pre-commit-config.yml",
 		".pre-commit-config.yaml",
+		"package.json",
+		"Taskfile.yml",
+		"justfile",
+		"scripts/pre-push.sh",
+		RepoTestCmdPath,
 		".husky/pre-push",
 		"tools/.githooks/pre-push",
 	} {
@@ -125,6 +130,7 @@ set -eu
 if [ -f "` + flag + `" ]; then head=new-sha; else head=old-sha; fi
 case "$1 $2" in
   "rev-parse HEAD") echo "$head" ;;
+  "rev-parse --path-format=absolute") echo "$PWD/.githooks/pre-push" ;;
   "push -q")
     if [ "$head" = "new-sha" ]; then touch "` + pushed + `"; exit 0; fi
     echo "pre-push hook"
@@ -133,6 +139,12 @@ case "$1 $2" in
     exit 1 ;;
   "remote get-url") echo "example.invalid:acme/api.git" ;;
   "hook run")
+	input=""
+	for arg in "$@"; do case "$arg" in --to-stdin=*) input="${arg#--to-stdin=}" ;; esac; done
+	if ! grep -qx "HEAD $head refs/heads/feature/crumb-tray base-sha" "$input"; then
+	  echo "unexpected pre-push input" >&2
+	  exit 1
+	fi
     if [ "$head" = "new-sha" ]; then exit 0; fi
     echo "pre-push hook"
     echo "src/app.ts(12,3): error TS2339: Property 'crumb' does not exist"
@@ -170,6 +182,36 @@ esac
 		env:      envexec.Env{Worktree: dir},
 		fixer:    fixer,
 	}, fixer
+}
+
+func TestPushBranchRejectsAFailedPushEvenWhenTheRemoteMatches(t *testing.T) {
+	dir := t.TempDir()
+	pushed := filepath.Join(dir, "pushed")
+	bin := filepath.Join(dir, "git")
+	script := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "rev-parse HEAD") echo "head-sha" ;;
+  "rev-parse --path-format=absolute") echo "$PWD/.githooks/pre-push" ;;
+  "push -q") touch "` + pushed + `"; echo "transport failed"; exit 1 ;;
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run") exit 0 ;;
+  "ls-remote origin") if [ -f "` + pushed + `" ]; then printf 'head-sha\trefs/heads/feature/crumb-tray\n'; else printf 'base-sha\trefs/heads/feature/crumb-tray\n'; fi ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		p: &Pipeline{Git: git.New(bin)}, o: Options{RepoRoot: dir}, ctx: context.Background(), rep: NopReporter{},
+		target: target.Target{BranchOnly: true}, branch: "feature/crumb-tray", worktree: dir, logDir: dir,
+	}
+	err := r.pushBranch()
+	var rejected *pushRejection
+	if !errors.As(err, &rejected) || !strings.Contains(err.Error(), "transport failed") {
+		t.Fatalf("err = %v, want the original failed push", err)
+	}
 }
 
 // The whole point of the step: a push the repository's verification refused is
@@ -218,6 +260,7 @@ set -eu
 if [ -f "` + pushFixed + `" ]; then head=new-sha; else head=old-sha; fi
 case "$1 $2" in
   "rev-parse HEAD") echo "$head" ;;
+  "rev-parse --path-format=absolute") echo "$PWD/.githooks/pre-push" ;;
   "push -q")
     if [ "$head" = "new-sha" ]; then exit 0; fi
     echo "pre-push hook"

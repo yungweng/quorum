@@ -183,14 +183,14 @@ func (g G) Push(ctx context.Context, dir, remote, branch string) (string, error)
 // PrePush runs the configured pre-push hook against HEAD.  A failed push by
 // itself cannot tell a local hook failure from a remote rejection; this probe
 // can.
-func (g G) PrePush(ctx context.Context, dir, remote, branch, sha string) (string, error) {
+func (g G) PrePush(ctx context.Context, dir, remote, branch, sha, remoteSHA string) (string, error) {
 	input, err := os.CreateTemp("", "quorum-pre-push-*")
 	if err != nil {
 		return "", err
 	}
 	path := input.Name()
 	defer os.Remove(path)
-	if _, err := fmt.Fprintf(input, "refs/heads/%s %s refs/heads/%s %040d\n", branch, sha, branch, 0); err != nil {
+	if _, err := fmt.Fprintf(input, "HEAD %s refs/heads/%s %s\n", sha, branch, remoteSHA); err != nil {
 		input.Close()
 		return "", err
 	}
@@ -202,6 +202,11 @@ func (g G) PrePush(ctx context.Context, dir, remote, branch, sha string) (string
 		return "", err
 	}
 	return g.runCombined(ctx, dir, "hook", "run", "--ignore-missing", "--to-stdin="+filepath.Clean(path), "pre-push", "--", remote, url)
+}
+
+// PrePushPath resolves the configured pre-push hook path.
+func (g G) PrePushPath(ctx context.Context, dir string) (string, error) {
+	return g.run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push")
 }
 
 // MergeConflicts reports whether merging head onto base would conflict,

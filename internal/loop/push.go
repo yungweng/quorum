@@ -20,10 +20,11 @@ const pushLogTailLines = 120
 // was. It carries the command output, which is what a fix session needs: for a
 // repository with pre-push verification that output is the whole complaint.
 type pushRejection struct {
-	branch string
-	sha    string
-	out    string
-	local  bool
+	branch  string
+	sha     string
+	out     string
+	hookOut string
+	local   bool
 }
 
 func (e *pushRejection) Error() string {
@@ -34,7 +35,7 @@ func (e *pushRejection) Error() string {
 // repository's own verification refusing the commits, which is the one push
 // failure a fix session can repair.
 func fixablePushRejection(rejected *pushRejection) bool {
-	return rejected != nil && strings.TrimSpace(rejected.out) != "" && rejected.local
+	return rejected != nil && strings.TrimSpace(rejected.hookOut) != "" && rejected.local
 }
 
 // hookConfigFiles are the files a fix session must not change to get a push
@@ -53,6 +54,13 @@ var hookConfigFiles = map[string]bool{
 	".golangci.yaml":          true,
 	".pre-commit-config.yml":  true,
 	".pre-commit-config.yaml": true,
+	"package.json":            true,
+	"Taskfile.yml":            true,
+	"Taskfile.yaml":           true,
+	"justfile":                true,
+	"Justfile":                true,
+	"pre-push.sh":             true,
+	RepoTestCmdPath:           true,
 }
 
 // hookConfigDirs are the hook directories with the same rule.
@@ -60,6 +68,9 @@ var hookConfigDirs = []string{".husky/", ".githooks/", ".hooks/"}
 
 // touchesHookConfig reports whether one changed path is hook configuration.
 func touchesHookConfig(path string) bool {
+	if path == RepoTestCmdPath {
+		return true
+	}
 	if hookConfigFiles[filepath.Base(path)] {
 		return true
 	}
@@ -67,6 +78,9 @@ func touchesHookConfig(path string) bool {
 		if strings.HasPrefix(path, dir) || strings.Contains(path, "/"+dir) {
 			return true
 		}
+	}
+	if strings.HasSuffix(path, "/pre-push.sh") || strings.HasPrefix(path, "scripts/pre-push") {
+		return true
 	}
 	return false
 }
@@ -181,8 +195,16 @@ func (r *run) requireHookConfigUntouched(preSHA string) error {
 	if err != nil {
 		return err
 	}
+	hookPath, err := r.p.Git.PrePushPath(r.ctx, r.worktree)
+	if err != nil {
+		return err
+	}
+	hookPath, err = filepath.Rel(r.worktree, hookPath)
+	if err != nil {
+		return err
+	}
 	for _, path := range splitLines(changed) {
-		if touchesHookConfig(path) {
+		if path == hookPath || touchesHookConfig(path) {
 			return fmt.Errorf("the push fix changed %s; a rejected push is repaired in the code, not in the hook configuration: %s",
 				path, r.targetReference())
 		}
