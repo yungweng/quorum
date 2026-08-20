@@ -1014,6 +1014,9 @@ func (r *run) pushBranch() error {
 			remote, _ = r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
 		}
 		if pushErr != nil {
+			if remote != remoteBefore {
+				return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
+			}
 			hookOut, hookErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA, remoteBefore)
 			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out, hookOut: hookOut, local: hookErr != nil}
 		}

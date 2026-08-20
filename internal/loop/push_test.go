@@ -51,6 +51,8 @@ func TestTouchesHookConfigCoversTheUsualHookFiles(t *testing.T) {
 		"lefthook-local.yaml",
 		"Makefile",
 		".golangci.yml",
+		".golangci.toml",
+		"lefthook.toml",
 		".pre-commit-config.yml",
 		".pre-commit-config.yaml",
 		"package.json",

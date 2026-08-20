@@ -197,7 +197,7 @@ func (g G) PrePush(ctx context.Context, dir, remote, branch, sha, remoteSHA stri
 	if err := input.Close(); err != nil {
 		return "", err
 	}
-	url, err := g.run(ctx, dir, "remote", "get-url", remote)
+	url, err := g.run(ctx, dir, "remote", "get-url", "--push", remote)
 	if err != nil {
 		return "", err
 	}

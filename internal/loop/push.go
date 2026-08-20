@@ -1,8 +1,10 @@
 package loop
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -47,11 +49,13 @@ var hookConfigFiles = map[string]bool{
 	"lefthook.yaml":           true,
 	"lefthook-local.yml":      true,
 	"lefthook-local.yaml":     true,
+	"lefthook.toml":           true,
 	".lefthook.yml":           true,
 	".lefthook.yaml":          true,
 	"Makefile":                true,
 	".golangci.yml":           true,
 	".golangci.yaml":          true,
+	".golangci.toml":          true,
 	".pre-commit-config.yml":  true,
 	".pre-commit-config.yaml": true,
 	"package.json":            true,
@@ -124,6 +128,10 @@ func (r *run) pushBranchWithFixes() error {
 		if err != nil {
 			return err
 		}
+		hookStamp, err := r.hookStamp()
+		if err != nil {
+			return err
+		}
 		number := r.pushFixTotal + 1
 		tag := fmt.Sprintf("push-fix-%d", number)
 		r.enter(PhaseFix)
@@ -147,6 +155,9 @@ func (r *run) pushBranchWithFixes() error {
 		if err := r.requireHookConfigUntouched(preSHA); err != nil {
 			return err
 		}
+		if err := r.requireHookUnchanged(hookStamp); err != nil {
+			return err
+		}
 		if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
 			return err
 		}
@@ -164,6 +175,9 @@ func (r *run) pushBranchWithFixes() error {
 		if err := r.requireHookConfigUntouched(preSHA); err != nil {
 			return err
 		}
+		if err := r.requireHookUnchanged(hookStamp); err != nil {
+			return err
+		}
 		if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
 			return err
 		}
@@ -172,9 +186,39 @@ func (r *run) pushBranchWithFixes() error {
 
 func (r *run) remoteHead() (string, error) {
 	if r.target.BranchOnly {
-		return r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
+		sha, err := r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
+		if err != nil && strings.Contains(err.Error(), "could not resolve refs/heads/") {
+			return "0000000000000000000000000000000000000000", nil
+		}
+		return sha, err
 	}
 	return r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+}
+
+func (r *run) hookStamp() (string, error) {
+	path, err := r.p.Git.PrePushPath(r.ctx, r.worktree)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return path + ":missing", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s:%x", path, sha256.Sum256(data)), nil
+}
+
+func (r *run) requireHookUnchanged(expected string) error {
+	actual, err := r.hookStamp()
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("the configured pre-push hook changed during a push repair; refusing to accept it: %s", r.targetReference())
+	}
+	return nil
 }
 
 func (r *run) requireRemoteUnchanged(expected string) error {
