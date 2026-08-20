@@ -297,6 +297,7 @@ type run struct {
 	roundLog        []RoundEntry
 	ciFixTotal      int
 	testFixTotal    int
+	pushFixTotal    int
 	testRuns        int
 	conflictFixes   int
 	disputeAccepted bool
@@ -686,7 +687,7 @@ func (r *run) execute() (*Result, error) {
 						}
 						continue
 					}
-					if err := r.pushBranch(); err != nil {
+					if err := r.pushBranchWithFixes(); err != nil {
 						return res, err
 					}
 					if err := r.flushFixComments(); err != nil {
@@ -734,7 +735,7 @@ func (r *run) execute() (*Result, error) {
 			// push, and the test gate replaces this round's CI wait.
 			r.queueFixComment(tag, fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
 		} else {
-			if err := r.pushBranch(); err != nil {
+			if err := r.pushBranchWithFixes(); err != nil {
 				return res, err
 			}
 			if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
@@ -835,7 +836,7 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 		}
 		return true, nil
 	}
-	if err := r.pushBranch(); err != nil {
+	if err := r.pushBranchWithFixes(); err != nil {
 		return true, err
 	}
 	if err := r.postFixComment(tag, "Suggestion round",
@@ -1013,7 +1014,7 @@ func (r *run) pushBranch() error {
 			return nil
 		}
 		if pushErr != nil {
-			return fmt.Errorf("git push failed and origin/%s does not have %s:\n%s", r.branch, pushedSHA, out)
+			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",

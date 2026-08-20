@@ -290,7 +290,7 @@ func (r *run) ensureCIGreen() error {
 		r.ciFixTotal = fixNumber
 		label := fmt.Sprintf("CI fix %d", fixNumber)
 		r.recordRound(label, preSHA)
-		if err := r.pushBranch(); err != nil {
+		if err := r.pushBranchWithFixes(); err != nil {
 			return err
 		}
 		if r.o.DivergenceScan {

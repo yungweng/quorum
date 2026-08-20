@@ -79,6 +79,16 @@ session, up to `--max-ci-fixes` attempts. Without any configured command the
 fix sessions are still told to run the affected checks themselves, but nothing
 verifies it.
 
+When a push is refused before it reaches the remote, which is what happens in
+a repository whose pre-push hooks verify the commits, the hook output goes to
+the fix session and the push is retried, at most twice. This covers the checks
+a local test gate does not run - type checks, unused exports, dead code - and
+which would otherwise end a converged run with nothing pushed. The session
+repairs the code and commits; the pipeline keeps the push, the test gate runs
+again over the repair, and a fix that edits the hook configuration instead of
+satisfying it stops the run. Rejections git describes itself - non-fast-forward,
+credentials, a protected branch, the network - never reach a fix session.
+
 Draft PRs are refused unless the run says `--draft` or the config says
 `BABYSIT_DRAFTS=1`. When the branch conflicts with its base branch, the base is
 merged and the conflicts resolved through the fix session before the first

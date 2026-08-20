@@ -83,7 +83,7 @@ func (r *run) ensureMergeable() error {
 		}
 		return nil
 	}
-	if err := r.pushBranch(); err != nil {
+	if err := r.pushBranchWithFixes(); err != nil {
 		return err
 	}
 	if r.o.DivergenceScan {
