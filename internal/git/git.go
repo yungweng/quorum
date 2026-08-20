@@ -269,6 +269,11 @@ func (g G) ChangedFiles(ctx context.Context, dir, revRange string, pathspecs ...
 	return g.run(ctx, dir, args...)
 }
 
+// ChangedFilesNoRenames reports both sides of a rename as delete and add.
+func (g G) ChangedFilesNoRenames(ctx context.Context, dir, revRange string) (string, error) {
+	return g.run(ctx, dir, "diff", "--no-renames", "--name-only", revRange)
+}
+
 // Diff renders the diff against a revision, limited to pathspecs when given.
 func (g G) Diff(ctx context.Context, dir, rev string, pathspecs ...string) string {
 	args := append([]string{"diff", rev}, appendPathspecs(pathspecs)...)

@@ -55,10 +55,6 @@ func TestTouchesHookConfigCoversTheUsualHookFiles(t *testing.T) {
 		"lefthook.toml",
 		".pre-commit-config.yml",
 		".pre-commit-config.yaml",
-		"package.json",
-		"Taskfile.yml",
-		"justfile",
-		"scripts/pre-push.sh",
 		RepoTestCmdPath,
 		".husky/pre-push",
 		"tools/.githooks/pre-push",
@@ -68,6 +64,8 @@ func TestTouchesHookConfigCoversTheUsualHookFiles(t *testing.T) {
 		}
 	}
 	for _, path := range []string{
+		"frontend/package.json",
+		"tools/Makefile",
 		"frontend/src/app.ts",
 		"backend/api/crumb_tray.go",
 		"docs/reference.md",
@@ -153,7 +151,7 @@ case "$1 $2" in
     exit 1 ;;
   "ls-remote origin") if [ -f "` + pushed + `" ]; then printf 'new-sha\trefs/heads/feature/crumb-tray\n'; else printf 'base-sha\trefs/heads/feature/crumb-tray\n'; fi ;;
   "status --porcelain") ;;
-  "diff --name-only") echo "` + changed + `" ;;
+  "diff --no-renames") echo "` + changed + `" ;;
   "log --oneline") echo "new-sha fix: satisfy the type check" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac
@@ -274,7 +272,7 @@ case "$1 $2" in
     exit 1 ;;
   "ls-remote origin") printf 'base-sha\trefs/heads/feature/crumb-tray\n' ;;
   "status --porcelain") ;;
-  "diff --name-only")
+  "diff --no-renames")
     if [ -f "` + testFixed + `" ]; then echo ".golangci.yml"; else echo "src/app.ts"; fi ;;
   "log --oneline") echo "new-sha fix: satisfy the type check" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;

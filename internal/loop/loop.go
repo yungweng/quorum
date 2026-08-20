@@ -998,6 +998,12 @@ func (r *run) pushBranch() error {
 	if err != nil {
 		return err
 	}
+	prePushOut, prePushErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA, remoteBefore)
+	if prePushErr != nil {
+		logPath := filepath.Join(r.logDir, "push-last.log")
+		os.WriteFile(logPath, []byte(prePushOut), 0o644)
+		return &pushRejection{branch: r.branch, sha: pushedSHA, out: prePushOut, hookOut: prePushOut, local: true}
+	}
 	// Pre-push hooks spam the terminal and can fail spuriously when they race a
 	// push the session already made, so their output only surfaces when the
 	// push failed and the sha never arrived.
@@ -1014,11 +1020,7 @@ func (r *run) pushBranch() error {
 			remote, _ = r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
 		}
 		if pushErr != nil {
-			if remote != remoteBefore {
-				return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
-			}
-			hookOut, hookErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA, remoteBefore)
-			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out, hookOut: hookOut, local: hookErr != nil}
+			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
 		}
 		if remote == pushedSHA {
 			r.headSHA = pushedSHA

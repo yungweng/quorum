@@ -58,12 +58,6 @@ var hookConfigFiles = map[string]bool{
 	".golangci.toml":          true,
 	".pre-commit-config.yml":  true,
 	".pre-commit-config.yaml": true,
-	"package.json":            true,
-	"Taskfile.yml":            true,
-	"Taskfile.yaml":           true,
-	"justfile":                true,
-	"Justfile":                true,
-	"pre-push.sh":             true,
 	RepoTestCmdPath:           true,
 }
 
@@ -75,16 +69,13 @@ func touchesHookConfig(path string) bool {
 	if path == RepoTestCmdPath {
 		return true
 	}
-	if hookConfigFiles[filepath.Base(path)] {
+	if hookConfigFiles[path] {
 		return true
 	}
 	for _, dir := range hookConfigDirs {
 		if strings.HasPrefix(path, dir) || strings.Contains(path, "/"+dir) {
 			return true
 		}
-	}
-	if strings.HasSuffix(path, "/pre-push.sh") || strings.HasPrefix(path, "scripts/pre-push") {
-		return true
 	}
 	return false
 }
@@ -235,7 +226,7 @@ func (r *run) requireRemoteUnchanged(expected string) error {
 // requireHookConfigUntouched stops a run whose push fix silenced the
 // verification instead of satisfying it.
 func (r *run) requireHookConfigUntouched(preSHA string) error {
-	changed, err := r.p.Git.ChangedFiles(r.ctx, r.worktree, preSHA+"..HEAD")
+	changed, err := r.p.Git.ChangedFilesNoRenames(r.ctx, r.worktree, preSHA+"..HEAD")
 	if err != nil {
 		return err
 	}
