@@ -123,6 +123,30 @@ followed by a short log comment for the PR: what failed, what you changed and ho
 		testCmd, logTail, MarkerComment)
 }
 
+// pushFixPrompt asks the session to repair whatever the repository's own
+// pre-push verification refused. It is the third repair prompt beside
+// ciFixPrompt and testFixPrompt, and the strictest: the shortest way out of a
+// rejected push is to disable the check, so the prompt rules that out.
+func pushFixPrompt(branch, logTail string) string {
+	return fmt.Sprintf(`The pipeline tried to push %s and the push was refused before it reached the remote. The repository verifies commits locally on push, and that verification failed.
+
+Its output:
+
+%s
+
+Fix what it reports, in the code. Then run the same check yourself to confirm it passes, and commit.
+
+Hard rules for this step:
+- Do not push. The pipeline pushes for you and repeats the verification.
+- Do not bypass the verification: no --no-verify, no --force, no changes to the hook configuration, and no loosening of a lint, type or dead-code rule to make the complaint disappear. A run that does this is stopped.
+- If the complaint is about unused or unreachable code you added, remove it or wire it up; do not silence the rule.
+
+End your final message with a line that is exactly:
+%s
+followed by a short log comment for the PR: what the check reported, what you changed and how. Write it plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
+		branch, logTail, MarkerComment)
+}
+
 // fixRoundPrompt hands a review round's findings to the session.
 //
 // Suggestions and Questions are handed over once per round but never keep the

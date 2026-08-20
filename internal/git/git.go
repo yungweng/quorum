@@ -12,7 +12,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/yungweng/quorum/internal/cachefs"
@@ -178,6 +180,35 @@ func (g G) Push(ctx context.Context, dir, remote, branch string) (string, error)
 	return g.runCombined(ctx, dir, "push", "-q", remote, "HEAD:refs/heads/"+branch)
 }
 
+// PrePush runs the configured pre-push hook against HEAD.  A failed push by
+// itself cannot tell a local hook failure from a remote rejection; this probe
+// can.
+func (g G) PrePush(ctx context.Context, dir, remote, branch, sha, remoteSHA string) (string, error) {
+	input, err := os.CreateTemp("", "quorum-pre-push-*")
+	if err != nil {
+		return "", err
+	}
+	path := input.Name()
+	defer os.Remove(path)
+	if _, err := fmt.Fprintf(input, "HEAD %s refs/heads/%s %s\n", sha, branch, remoteSHA); err != nil {
+		input.Close()
+		return "", err
+	}
+	if err := input.Close(); err != nil {
+		return "", err
+	}
+	url, err := g.run(ctx, dir, "remote", "get-url", "--push", remote)
+	if err != nil {
+		return "", err
+	}
+	return g.runCombined(ctx, dir, "hook", "run", "--ignore-missing", "--to-stdin="+filepath.Clean(path), "pre-push", "--", remote, url)
+}
+
+// PrePushPath resolves the configured pre-push hook path.
+func (g G) PrePushPath(ctx context.Context, dir string) (string, error) {
+	return g.run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push")
+}
+
 // MergeConflicts reports whether merging head onto base would conflict,
 // without touching any working tree. It needs the --write-tree form of
 // merge-tree (git 2.38); an older git returns an error, which callers treat
@@ -236,6 +267,11 @@ func (g G) HasLocalBranch(ctx context.Context, dir, branch string) bool {
 func (g G) ChangedFiles(ctx context.Context, dir, revRange string, pathspecs ...string) (string, error) {
 	args := append([]string{"diff", "--name-only", revRange}, appendPathspecs(pathspecs)...)
 	return g.run(ctx, dir, args...)
+}
+
+// ChangedFilesNoRenames reports both sides of a rename as delete and add.
+func (g G) ChangedFilesNoRenames(ctx context.Context, dir, revRange string) (string, error) {
+	return g.run(ctx, dir, "diff", "--no-renames", "--name-only", revRange)
 }
 
 // Diff renders the diff against a revision, limited to pathspecs when given.

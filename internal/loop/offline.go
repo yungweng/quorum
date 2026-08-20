@@ -57,7 +57,7 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 	}
 
 	r.rep.Step("Push")
-	if err := r.pushBranch(); err != nil {
+	if err := r.pushBranchWithFixes(); err != nil {
 		return false, err
 	}
 	if err := r.flushFixComments(); err != nil {
