@@ -23,49 +23,18 @@ type pushRejection struct {
 	branch string
 	sha    string
 	out    string
+	local  bool
 }
 
 func (e *pushRejection) Error() string {
 	return fmt.Sprintf("git push failed and origin/%s does not have %s:\n%s", e.branch, e.sha, e.out)
 }
 
-// unfixablePushMarkers are git's own words for the push failures no fix
-// session may touch: someone else moved the branch, credentials, a protected
-// branch, the network.
-var unfixablePushMarkers = []string{
-	"non-fast-forward",
-	"fetch first",
-	"Updates were rejected",
-	"Authentication failed",
-	"could not read Username",
-	"could not read Password",
-	"Permission denied",
-	"Permission to",
-	"protected branch",
-	"GH006",
-	"shallow update not allowed",
-	"Could not resolve host",
-	"Connection timed out",
-	"Connection refused",
-	"The remote end hung up",
-}
-
 // fixablePushRejection reports whether a rejected push looks like the
 // repository's own verification refusing the commits, which is the one push
 // failure a fix session can repair.
-//
-// The test is negative on purpose. There is no portable signal that says "a
-// pre-push hook rejected this": hook frameworks print whatever they like, and
-// git reports their exit code as the same failed push as everything else. The
-// failures that must never reach a session all announce themselves in git's
-// wording, so those are what is matched.
-func fixablePushRejection(out string) bool {
-	for _, marker := range unfixablePushMarkers {
-		if strings.Contains(out, marker) {
-			return false
-		}
-	}
-	return strings.TrimSpace(out) != ""
+func fixablePushRejection(rejected *pushRejection) bool {
+	return rejected != nil && strings.TrimSpace(rejected.out) != "" && rejected.local
 }
 
 // hookConfigFiles are the files a fix session must not change to get a push
@@ -79,6 +48,10 @@ var hookConfigFiles = map[string]bool{
 	"lefthook-local.yaml":     true,
 	".lefthook.yml":           true,
 	".lefthook.yaml":          true,
+	"Makefile":                true,
+	".golangci.yml":           true,
+	".golangci.yaml":          true,
+	".pre-commit-config.yml":  true,
 	".pre-commit-config.yaml": true,
 }
 
@@ -107,11 +80,6 @@ func touchesHookConfig(path string) bool {
 // pushed. The session repairs the finding and commits; the push itself stays
 // with the pipeline, so pushBranch's barrier remains the only thing that
 // decides whether the branch really arrived.
-//
-// Known ceiling: a session that pushes on its own with the verification
-// disabled would satisfy that barrier. The prompt forbids it and the hook
-// configuration is checked afterwards, but a bypass that leaves no trace in
-// the diff is not detectable here.
 func (r *run) pushBranchWithFixes() error {
 	fixed := false
 	for attempt := 1; ; attempt++ {
@@ -123,7 +91,7 @@ func (r *run) pushBranchWithFixes() error {
 			return nil
 		}
 		var rejected *pushRejection
-		if !errors.As(err, &rejected) || attempt > maxPushFixes || !fixablePushRejection(rejected.out) {
+		if !errors.As(err, &rejected) || attempt > maxPushFixes || !fixablePushRejection(rejected) {
 			return err
 		}
 		if r.ctx.Err() != nil {
@@ -137,6 +105,10 @@ func (r *run) pushBranchWithFixes() error {
 		preSHA, shaErr := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 		if shaErr != nil {
 			return shaErr
+		}
+		remoteSHA, err := r.remoteHead()
+		if err != nil {
+			return err
 		}
 		number := r.pushFixTotal + 1
 		tag := fmt.Sprintf("push-fix-%d", number)
@@ -161,6 +133,9 @@ func (r *run) pushBranchWithFixes() error {
 		if err := r.requireHookConfigUntouched(preSHA); err != nil {
 			return err
 		}
+		if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
+			return err
+		}
 
 		r.pushFixTotal = number
 		fixed = true
@@ -172,7 +147,31 @@ func (r *run) pushBranchWithFixes() error {
 		if err := r.ensureTestsGreen(); err != nil {
 			return err
 		}
+		if err := r.requireHookConfigUntouched(preSHA); err != nil {
+			return err
+		}
+		if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
+			return err
+		}
 	}
+}
+
+func (r *run) remoteHead() (string, error) {
+	if r.target.BranchOnly {
+		return r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
+	}
+	return r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+}
+
+func (r *run) requireRemoteUnchanged(expected string) error {
+	actual, err := r.remoteHead()
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("the remote head changed from %s to %s during a push repair; refusing to accept an out-of-band push: %s", expected, actual, r.targetReference())
+	}
+	return nil
 }
 
 // requireHookConfigUntouched stops a run whose push fix silenced the

@@ -12,7 +12,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/yungweng/quorum/internal/cachefs"
@@ -176,6 +178,30 @@ func (g G) LogOneline(ctx context.Context, dir, revRange string) string {
 // exact command in their standing rules.
 func (g G) Push(ctx context.Context, dir, remote, branch string) (string, error) {
 	return g.runCombined(ctx, dir, "push", "-q", remote, "HEAD:refs/heads/"+branch)
+}
+
+// PrePush runs the configured pre-push hook against HEAD.  A failed push by
+// itself cannot tell a local hook failure from a remote rejection; this probe
+// can.
+func (g G) PrePush(ctx context.Context, dir, remote, branch, sha string) (string, error) {
+	input, err := os.CreateTemp("", "quorum-pre-push-*")
+	if err != nil {
+		return "", err
+	}
+	path := input.Name()
+	defer os.Remove(path)
+	if _, err := fmt.Fprintf(input, "refs/heads/%s %s refs/heads/%s %040d\n", branch, sha, branch, 0); err != nil {
+		input.Close()
+		return "", err
+	}
+	if err := input.Close(); err != nil {
+		return "", err
+	}
+	url, err := g.run(ctx, dir, "remote", "get-url", remote)
+	if err != nil {
+		return "", err
+	}
+	return g.runCombined(ctx, dir, "hook", "run", "--ignore-missing", "--to-stdin="+filepath.Clean(path), "pre-push", "--", remote, url)
 }
 
 // MergeConflicts reports whether merging head onto base would conflict,

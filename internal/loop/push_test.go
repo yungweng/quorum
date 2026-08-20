@@ -31,14 +31,17 @@ func TestFixablePushRejectionOnlyCoversLocalVerification(t *testing.T) {
 		"nothing to read":     "   \n",
 	}
 	for name, out := range unfixable {
-		if fixablePushRejection(out) {
+		if fixablePushRejection(&pushRejection{out: out}) {
 			t.Errorf("%s must not be handed to a fix session: %q", name, out)
 		}
 	}
 
-	hook := "pre-push hook\nsrc/app.ts(12,3): error TS2339: Property 'crumb' does not exist\nerror: failed to push some refs to 'example.invalid:acme/api.git'"
-	if !fixablePushRejection(hook) {
+	hook := "pre-push hook\nsrc/app.ts(12,3): error TS2339: Property 'crumb' does not exist"
+	if !fixablePushRejection(&pushRejection{out: hook, local: true}) {
 		t.Error("a verification hook rejection must be repairable")
+	}
+	if fixablePushRejection(&pushRejection{out: hook}) {
+		t.Error("unverified output must not be handed to a fix session")
 	}
 }
 
@@ -46,6 +49,9 @@ func TestTouchesHookConfigCoversTheUsualHookFiles(t *testing.T) {
 	for _, path := range []string{
 		"lefthook.yml",
 		"lefthook-local.yaml",
+		"Makefile",
+		".golangci.yml",
+		".pre-commit-config.yml",
 		".pre-commit-config.yaml",
 		".husky/pre-push",
 		"tools/.githooks/pre-push",
@@ -108,10 +114,11 @@ func (f *fakeFixer) Resume(_ context.Context, _ envexec.Env, _ time.Duration, _ 
 // pushFixRun builds a run whose fake git rejects the first push with hook
 // output and accepts the second one, once the fake fix session has produced a
 // commit. changed is what the fix commit touched.
-func pushFixRun(t *testing.T, changed string) (*run, *fakeFixer) {
+func pushFixRun(t *testing.T, changed string, outOfBandPush bool) (*run, *fakeFixer) {
 	t.Helper()
 	dir := t.TempDir()
 	flag := filepath.Join(dir, "fixed")
+	pushed := filepath.Join(dir, "pushed")
 	bin := filepath.Join(dir, "git")
 	script := `#!/bin/sh
 set -eu
@@ -119,12 +126,18 @@ if [ -f "` + flag + `" ]; then head=new-sha; else head=old-sha; fi
 case "$1 $2" in
   "rev-parse HEAD") echo "$head" ;;
   "push -q")
-    if [ "$head" = "new-sha" ]; then exit 0; fi
+    if [ "$head" = "new-sha" ]; then touch "` + pushed + `"; exit 0; fi
     echo "pre-push hook"
     echo "src/app.ts(12,3): error TS2339: Property 'crumb' does not exist"
     echo "error: failed to push some refs to 'example.invalid:acme/api.git'"
     exit 1 ;;
-  "ls-remote origin") if [ "$head" = "new-sha" ]; then printf 'new-sha\trefs/heads/feature/crumb-tray\n'; else printf 'base-sha\trefs/heads/feature/crumb-tray\n'; fi ;;
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run")
+    if [ "$head" = "new-sha" ]; then exit 0; fi
+    echo "pre-push hook"
+    echo "src/app.ts(12,3): error TS2339: Property 'crumb' does not exist"
+    exit 1 ;;
+  "ls-remote origin") if [ -f "` + pushed + `" ]; then printf 'new-sha\trefs/heads/feature/crumb-tray\n'; else printf 'base-sha\trefs/heads/feature/crumb-tray\n'; fi ;;
   "status --porcelain") ;;
   "diff --name-only") echo "` + changed + `" ;;
   "log --oneline") echo "new-sha fix: satisfy the type check" ;;
@@ -137,6 +150,11 @@ esac
 	fixer := &fakeFixer{onExec: func() {
 		if err := os.WriteFile(flag, nil, 0o644); err != nil {
 			t.Error(err)
+		}
+		if outOfBandPush {
+			if err := os.WriteFile(pushed, nil, 0o644); err != nil {
+				t.Error(err)
+			}
 		}
 	}}
 	return &run{
@@ -157,7 +175,7 @@ esac
 // The whole point of the step: a push the repository's verification refused is
 // repaired and pushed, instead of losing every review round of the run.
 func TestPushBranchWithFixesRepairsARejectedPush(t *testing.T) {
-	r, fixer := pushFixRun(t, "frontend/src/app.ts")
+	r, fixer := pushFixRun(t, "frontend/src/app.ts", false)
 	if err := r.pushBranchWithFixes(); err != nil {
 		t.Fatalf("push after fix: %v", err)
 	}
@@ -175,10 +193,78 @@ func TestPushBranchWithFixesRepairsARejectedPush(t *testing.T) {
 // Silencing the verification is the shortest way out of a rejected push, so a
 // fix that edits the hook configuration stops the run.
 func TestPushFixMayNotRewriteTheVerification(t *testing.T) {
-	r, _ := pushFixRun(t, "lefthook.yml")
+	r, _ := pushFixRun(t, "lefthook.yml", false)
 	err := r.pushBranchWithFixes()
 	if err == nil || !strings.Contains(err.Error(), "lefthook.yml") {
 		t.Fatalf("err = %v, want the run stopped over the hook configuration", err)
+	}
+}
+
+func TestPushFixMayNotPushOutsideThePipeline(t *testing.T) {
+	r, _ := pushFixRun(t, "frontend/src/app.ts", true)
+	err := r.pushBranchWithFixes()
+	if err == nil || !strings.Contains(err.Error(), "out-of-band push") {
+		t.Fatalf("err = %v, want the run stopped over the out-of-band push", err)
+	}
+}
+
+func TestPushFixMayNotRewriteTheGateThroughATestRepair(t *testing.T) {
+	dir := t.TempDir()
+	pushFixed := filepath.Join(dir, "push-fixed")
+	testFixed := filepath.Join(dir, "test-fixed")
+	bin := filepath.Join(dir, "git")
+	script := `#!/bin/sh
+set -eu
+if [ -f "` + pushFixed + `" ]; then head=new-sha; else head=old-sha; fi
+case "$1 $2" in
+  "rev-parse HEAD") echo "$head" ;;
+  "push -q")
+    if [ "$head" = "new-sha" ]; then exit 0; fi
+    echo "pre-push hook"
+    exit 1 ;;
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run")
+    if [ "$head" = "new-sha" ]; then exit 0; fi
+    echo "pre-push hook"
+    exit 1 ;;
+  "ls-remote origin") printf 'base-sha\trefs/heads/feature/crumb-tray\n' ;;
+  "status --porcelain") ;;
+  "diff --name-only")
+    if [ -f "` + testFixed + `" ]; then echo ".golangci.yml"; else echo "src/app.ts"; fi ;;
+  "log --oneline") echo "new-sha fix: satisfy the type check" ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	fixer := &fakeFixer{onExec: func() {
+		calls++
+		path := pushFixed
+		if calls == 2 {
+			path = testFixed
+		}
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Error(err)
+		}
+	}}
+	r := &run{
+		p:        &Pipeline{Git: git.New(bin)},
+		o:        Options{RepoRoot: dir, TestCmd: "test -f " + testFixed, MaxCIFixes: 1},
+		ctx:      context.Background(),
+		rep:      NopReporter{},
+		target:   target.Target{BranchOnly: true},
+		branch:   "feature/crumb-tray",
+		worktree: dir,
+		logDir:   dir,
+		msgDir:   dir,
+		env:      envexec.Env{Worktree: dir},
+		fixer:    fixer,
+	}
+	err := r.pushBranchWithFixes()
+	if err == nil || !strings.Contains(err.Error(), ".golangci.yml") {
+		t.Fatalf("err = %v, want the run stopped over the test repair gate change", err)
 	}
 }
 
@@ -194,6 +280,8 @@ case "$1 $2" in
   "push -q")
     echo "! [rejected] feature/crumb-tray -> feature/crumb-tray (non-fast-forward)"
     exit 1 ;;
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run") exit 0 ;;
   "ls-remote origin") printf 'other-sha\trefs/heads/feature/crumb-tray\n' ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac

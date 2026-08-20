@@ -1014,7 +1014,8 @@ func (r *run) pushBranch() error {
 			return nil
 		}
 		if pushErr != nil {
-			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
+			hookOut, hookErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA)
+			return &pushRejection{branch: r.branch, sha: pushedSHA, out: hookOut, local: hookErr != nil}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
