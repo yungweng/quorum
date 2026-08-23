@@ -2,9 +2,33 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 
 	macnotify "github.com/yungweng/quorum/internal/notify"
 )
+
+// cmdNotify is the detached child that owns one persistent alert until the
+// user opens its pull request or dismisses it.
+func (a *app) cmdNotify(args []string) int {
+	if len(args) != 4 {
+		return a.die("_notify is internal and takes kind repo number url")
+	}
+	number, err := strconv.Atoi(args[2])
+	if err != nil {
+		return a.die("_notify PR number: %v", err)
+	}
+	var logf func(string, ...any)
+	if a.log != nil {
+		logf = a.log.Printf
+	}
+	if err := macnotify.DeliverImportant(args[0], args[1], number, args[3], logf); err != nil {
+		if logf != nil {
+			logf("notification not sent: %v", err)
+		}
+		return exitError
+	}
+	return exitOK
+}
 
 func (a *app) notifyReadyToMerge(enabled bool, repo string, number int, url string) {
 	if !enabled {

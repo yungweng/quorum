@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	macnotify "github.com/yungweng/quorum/internal/notify"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -140,14 +141,8 @@ func (a *app) runChecks() []check {
 		}
 		out = append(out, check{spec.name, versionOf(path), 0, ""})
 	}
-	if runtime.GOOS == "darwin" && a.cfg.Notify {
-		path, err := exec.LookPath("terminal-notifier")
-		if err != nil {
-			out = append(out, check{"notifications", "terminal-notifier not found; detached agent notifications are disabled", 1,
-				"brew install terminal-notifier"})
-		} else {
-			out = append(out, check{"notifications", versionOf(path), 0, ""})
-		}
+	if runtime.GOOS == "darwin" {
+		out = append(out, notificationChecks(a.cfg)...)
 	}
 
 	// GitHub authentication.
@@ -240,6 +235,52 @@ func (a *app) runChecks() []check {
 	out = append(out, check{"budget", budget, level, fixText})
 
 	return out
+}
+
+func notificationChecks(cfg config.Config) []check {
+	if !cfg.Notify {
+		return nil
+	}
+	out := []check{temporaryNotificationCheck()}
+	if cfg.NotifyReadyToMerge || cfg.AutoMerge {
+		out = append(out, persistentAlertCheck())
+	}
+	return out
+}
+
+func temporaryNotificationCheck() check {
+	path, err := exec.LookPath("terminal-notifier")
+	if err != nil {
+		return check{
+			"notifications",
+			"terminal-notifier not found; routine detached notifications are disabled",
+			1,
+			"brew install terminal-notifier",
+		}
+	}
+	return check{"notifications", versionOf(path), 0, ""}
+}
+
+func persistentAlertCheck() check {
+	path, err := exec.LookPath("alerter")
+	if err != nil {
+		return check{
+			"persistent alerts",
+			"alerter not found; important alerts fall back to temporary notifications",
+			1,
+			"brew install vjeantet/tap/alerter",
+		}
+	}
+	version, err := macnotify.AlerterVersion(path)
+	if err != nil {
+		return check{
+			"persistent alerts",
+			err.Error() + "; important alerts fall back to temporary notifications",
+			1,
+			"brew upgrade vjeantet/tap/alerter",
+		}
+	}
+	return check{"persistent alerts", version, 0, ""}
 }
 
 // versionOf asks a tool for its version, falling back to its path.

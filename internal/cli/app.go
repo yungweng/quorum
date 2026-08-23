@@ -114,6 +114,8 @@ func (a *app) run(args []string) int {
 		return a.cmdRun(args)
 	case "_review":
 		return a.cmdReviewOne(args)
+	case "_notify":
+		return a.cmdNotify(args)
 	case "logs":
 		return a.cmdLogs(args)
 	case "doctor":

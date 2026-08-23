@@ -418,12 +418,18 @@ review does not spend tokens repeating that review.
 `NOTIFY_READY_TO_MERGE=1` leaves one persistent macOS Notification Center item
 per pull request whose review came back with zero Blockers and zero Critical
 findings but was not merged by quorum, typically because auto-merge is off.
-The notification names `owner/repo#number`; clicking it opens the
-pull request on GitHub. It replaces the routine completion notification for
-that run and stays visible until dismissed, like the `awaiting approval` item.
-It requires `terminal-notifier` and `NOTIFY=1`, obeys `--no-notify`, and never
-fires for a merged PR, a branch-only run, `POST=0`, or `--dry-run`. The
-default is `0`.
+The notification names `owner/repo#number`; clicking it or its **Open PR**
+button opens the pull request on GitHub. It replaces the routine completion
+notification for that run and stays visible until dismissed, like the
+`awaiting approval` item.
+
+Persistent alerts use `alerter` 26.3 or newer, while routine detached
+notifications remain temporary through `terminal-notifier`. Install it with
+`brew install vjeantet/tap/alerter`. If `alerter` is missing, outdated or
+cannot deliver, quorum logs the reason and sends a temporary
+`terminal-notifier` fallback. `quorum doctor` reports that degraded state.
+The alert requires `NOTIFY=1`, obeys `--no-notify`, and never fires for a
+merged PR, a branch-only run, `POST=0`, or `--dry-run`. The default is `0`.
 
 ### Keeping the machine usable
 
