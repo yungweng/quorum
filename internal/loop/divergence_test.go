@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,21 @@ func TestDivergenceTimeoutSurvivesDefaults(t *testing.T) {
 	}
 }
 
+func TestCIFixTraceJSONIncludesRound(t *testing.T) {
+	b, err := json.Marshal(CIFixTrace{
+		AfterRound: 2,
+		FixTrace:   FixTrace{BeforeSHA: "old", AfterSHA: "new"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"after_round":2`, `"before_sha":"old"`, `"after_sha":"new"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("CI fix JSON is missing %s: %s", want, b)
+		}
+	}
+}
+
 func TestValidateDivergenceReportRequiresConcreteEvidence(t *testing.T) {
 	trace := sampleDivergenceTrace()
 	report := DivergenceReport{
@@ -61,6 +77,57 @@ func TestValidateDivergenceReportRequiresConcreteEvidence(t *testing.T) {
 	report.Conflicts = nil
 	if err := validateDivergenceReport(report, trace); err == nil {
 		t.Fatal("diverged report without conflicts was accepted")
+	}
+}
+
+func TestValidateDivergenceReportAcceptsCIFixEvidenceForItsRound(t *testing.T) {
+	trace := sampleDivergenceTrace()
+	trace.CIFixes = []CIFixTrace{{
+		AfterRound: 2,
+		FixTrace: FixTrace{
+			BeforeSHA: "cccccccc",
+			AfterSHA:  "dddddddd",
+			Commits:   "dddddddd restore seed allowlist",
+		},
+	}}
+	trace.FinalHead = "dddddddd"
+	report := DivergenceReport{
+		Schema: 1, Verdict: DivergenceDiverged,
+		Summary:        "The final CI repair reversed the review fix.",
+		Recommendation: "Restore the reviewed policy and fix the fixture.",
+		Conflicts: []DivergenceConflict{{
+			Title: "Seed policy", Scope: "seed coverage",
+			DecisionA: "Require representative data", DecisionB: "Allow the empty table",
+			EvidenceA: []DivergenceEvidence{{Round: 2, SHA: "cccccccc", Summary: "The review fix removed the exception."}},
+			EvidenceB: []DivergenceEvidence{{Round: 2, SHA: "dddddddd", Summary: "The CI fix restored the exception."}},
+		}},
+	}
+	if err := validateDivergenceReport(report, trace); err != nil {
+		t.Fatalf("CI-fix evidence failed validation: %v", err)
+	}
+	report.Conflicts[0].EvidenceB[0].Round = 1
+	if err := validateDivergenceReport(report, trace); err == nil {
+		t.Fatal("CI-fix evidence was accepted under the wrong round")
+	}
+}
+
+func TestValidateDivergenceReportAcceptsCIFixEvidenceBeforeFirstRound(t *testing.T) {
+	trace := sampleDivergenceTrace()
+	trace.CIFixes = []CIFixTrace{{
+		AfterRound: 0,
+		FixTrace:   FixTrace{BeforeSHA: "initial", AfterSHA: "before-first-review"},
+	}}
+	report := DivergenceReport{
+		Schema: 1, Verdict: DivergenceDiverged, Summary: "The policies conflict.",
+		Recommendation: "Choose one policy.",
+		Conflicts: []DivergenceConflict{{
+			Title: "Policy", Scope: "seed coverage", DecisionA: "Allow none", DecisionB: "Require data",
+			EvidenceA: []DivergenceEvidence{{Round: 0, SHA: "before-first-review", Summary: "The early fix allowed none."}},
+			EvidenceB: []DivergenceEvidence{{Round: 1, SHA: "aaaaaaaa", Summary: "The review required data."}},
+		}},
+	}
+	if err := validateDivergenceReport(report, trace); err != nil {
+		t.Fatalf("pre-review CI-fix evidence failed validation: %v", err)
 	}
 }
 
@@ -98,6 +165,25 @@ func TestDivergenceReportControlsMentions(t *testing.T) {
 	body := renderDivergenceReport(report, 12, nil)
 	if !strings.Contains(body, "after 12 rounds") || strings.Contains(body, "@") {
 		t.Fatalf("unexpected report body:\n%s", body)
+	}
+}
+
+func TestDivergencePromptAndReportNamePreReviewCIFixes(t *testing.T) {
+	if !strings.Contains(divergencePrompt(), "after_round is 0 before the first review") {
+		t.Fatal("divergence prompt does not define the CI-fix round")
+	}
+	report := DivergenceReport{
+		Schema: 1, Verdict: DivergenceDiverged, Summary: "The policies conflict.",
+		Recommendation: "Choose one policy.",
+		Conflicts: []DivergenceConflict{{
+			Title: "Policy", Scope: "seed coverage", DecisionA: "Require data", DecisionB: "Allow none",
+			EvidenceA: []DivergenceEvidence{{Round: 0, SHA: "aaaaaaaa", Summary: "The early fix allowed none."}},
+			EvidenceB: []DivergenceEvidence{{Round: 1, SHA: "bbbbbbbb", Summary: "The review required data."}},
+		}},
+	}
+	body := renderDivergenceReport(report, 1, nil)
+	if !strings.Contains(body, "Before round 1 at `aaaaaaa`") || strings.Contains(body, "Round 0") {
+		t.Fatalf("pre-review evidence label is unclear:\n%s", body)
 	}
 }
 
@@ -255,11 +341,17 @@ func TestTraceRecordsCIFixAndAdvancesFinalHead(t *testing.T) {
 		t.Fatalf("CI fixes = %d, want 1", len(r.divergenceTrace.CIFixes))
 	}
 	fix := r.divergenceTrace.CIFixes[0]
-	if fix.BeforeSHA != "old" || fix.AfterSHA != "new" || fix.Response != r.lastMsg {
+	if fix.AfterRound != 0 || fix.BeforeSHA != "old" || fix.AfterSHA != "new" || fix.Response != r.lastMsg {
 		t.Fatalf("CI fix = %+v", fix)
 	}
 	if r.divergenceTrace.FinalHead != "new" {
 		t.Fatalf("final head = %q, want new", r.divergenceTrace.FinalHead)
+	}
+
+	r.traceReview(1, review.Findings{HeadSHA: "new"}, "Finding")
+	r.traceCIFix("new", "newer", "ci-fix-2")
+	if fix := r.divergenceTrace.CIFixes[1]; fix.AfterRound != 1 {
+		t.Fatalf("CI fix after round 1 recorded after_round = %d", fix.AfterRound)
 	}
 }
 

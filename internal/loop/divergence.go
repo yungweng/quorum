@@ -44,7 +44,7 @@ type DivergenceTrace struct {
 	InitialHead string                 `json:"initial_head"`
 	FinalHead   string                 `json:"final_head"`
 	Rounds      []DivergenceRoundTrace `json:"rounds"`
-	CIFixes     []FixTrace             `json:"ci_fixes,omitempty"`
+	CIFixes     []CIFixTrace           `json:"ci_fixes,omitempty"`
 }
 
 type DivergenceRoundTrace struct {
@@ -64,6 +64,11 @@ type FixTrace struct {
 	AfterSHA  string `json:"after_sha"`
 	Commits   string `json:"commits,omitempty"`
 	Response  string `json:"response,omitempty"`
+}
+
+type CIFixTrace struct {
+	AfterRound int `json:"after_round"`
+	FixTrace
 }
 
 // DivergenceReport is both the machine-readable result and the source for the
@@ -104,7 +109,7 @@ Decide whether the run is:
 
 For "diverged", cite both sides with exact round numbers and SHAs from the input. Do not call a repeated but never-fixed finding divergence. Prefer a compatible resolution when ownership, state, or scope can make both requirements hold.
 Use the recorded before/after SHAs to inspect git diffs when comments alone are ambiguous. The last fix has no later review; do not treat its claim of a fix as independently verified.
-CI fixes record repairs made after failed checks. They may occur before the first review or between review rounds.
+CI fixes record repairs made after failed checks. Their after_round is 0 before the first review and N after review round N. Cite a CI fix with that exact round value.
 
 Write exactly one JSON object, with no Markdown fence or surrounding prose:
 {
@@ -156,7 +161,8 @@ func (r *run) traceFix(round int, beforeSHA, afterSHA, tag string) {
 
 func (r *run) traceCIFix(beforeSHA, afterSHA, tag string) {
 	r.divergenceTrace.CIFixes = append(r.divergenceTrace.CIFixes,
-		r.newFixTrace(beforeSHA, afterSHA, tag))
+		CIFixTrace{AfterRound: len(r.divergenceTrace.Rounds),
+			FixTrace: r.newFixTrace(beforeSHA, afterSHA, tag)})
 	r.divergenceTrace.FinalHead = afterSHA
 	r.writeDivergenceTrace()
 }
@@ -362,39 +368,65 @@ func validateDivergenceReport(report DivergenceReport, trace DivergenceTrace) er
 	if report.Verdict == DivergenceDiverged && len(report.Conflicts) == 0 {
 		return fmt.Errorf("diverged report has no evidenced conflict")
 	}
-	validEvidence := map[int]map[string]bool{}
+	validEvidence := divergenceEvidenceIndex(trace)
+	for i, conflict := range report.Conflicts {
+		if err := validateDivergenceConflict(i+1, conflict, validEvidence); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func divergenceEvidenceIndex(trace DivergenceTrace) map[int]map[string]bool {
+	valid := map[int]map[string]bool{0: {}}
 	for _, round := range trace.Rounds {
-		validEvidence[round.Round] = map[string]bool{round.ReviewedSHA: true}
-		if round.Fix != nil {
-			validEvidence[round.Round][round.Fix.BeforeSHA] = true
-			validEvidence[round.Round][round.Fix.AfterSHA] = true
-			for _, line := range strings.Split(round.Fix.Commits, "\n") {
-				if fields := strings.Fields(line); len(fields) > 0 {
-					validEvidence[round.Round][fields[0]] = true
-				}
+		valid[round.Round] = map[string]bool{round.ReviewedSHA: true}
+	}
+	addFix := func(round int, fix FixTrace) {
+		shas, ok := valid[round]
+		if !ok {
+			return
+		}
+		shas[fix.BeforeSHA] = true
+		shas[fix.AfterSHA] = true
+		for _, line := range strings.Split(fix.Commits, "\n") {
+			if fields := strings.Fields(line); len(fields) > 0 {
+				shas[fields[0]] = true
 			}
 		}
 	}
-	for i, conflict := range report.Conflicts {
-		fields := conflict.Title + conflict.Scope + conflict.DecisionA + conflict.DecisionB +
-			conflict.CompatibleResolution
-		if strings.Contains(fields, "@") {
-			return fmt.Errorf("conflict %d contains an untrusted mention", i+1)
+	for _, round := range trace.Rounds {
+		if round.Fix != nil {
+			addFix(round.Round, *round.Fix)
 		}
-		if strings.TrimSpace(conflict.Title) == "" || strings.TrimSpace(conflict.Scope) == "" ||
-			strings.TrimSpace(conflict.DecisionA) == "" || strings.TrimSpace(conflict.DecisionB) == "" {
-			return fmt.Errorf("conflict %d is missing its title, scope, or decisions", i+1)
+	}
+	for _, fix := range trace.CIFixes {
+		addFix(fix.AfterRound, fix.FixTrace)
+	}
+	return valid
+}
+
+func validateDivergenceConflict(number int, conflict DivergenceConflict,
+	validEvidence map[int]map[string]bool,
+) error {
+	fields := conflict.Title + conflict.Scope + conflict.DecisionA + conflict.DecisionB +
+		conflict.CompatibleResolution
+	if strings.Contains(fields, "@") {
+		return fmt.Errorf("conflict %d contains an untrusted mention", number)
+	}
+	if strings.TrimSpace(conflict.Title) == "" || strings.TrimSpace(conflict.Scope) == "" ||
+		strings.TrimSpace(conflict.DecisionA) == "" || strings.TrimSpace(conflict.DecisionB) == "" {
+		return fmt.Errorf("conflict %d is missing its title, scope, or decisions", number)
+	}
+	if len(conflict.EvidenceA) == 0 || len(conflict.EvidenceB) == 0 {
+		return fmt.Errorf("conflict %d does not evidence both decisions", number)
+	}
+	for _, evidence := range append(slices.Clone(conflict.EvidenceA), conflict.EvidenceB...) {
+		if !validEvidence[evidence.Round][evidence.SHA] {
+			return fmt.Errorf("conflict %d cites unknown round %d sha %q", number, evidence.Round, evidence.SHA)
 		}
-		if len(conflict.EvidenceA) == 0 || len(conflict.EvidenceB) == 0 {
-			return fmt.Errorf("conflict %d does not evidence both decisions", i+1)
-		}
-		for _, evidence := range append(slices.Clone(conflict.EvidenceA), conflict.EvidenceB...) {
-			if !validEvidence[evidence.Round][evidence.SHA] {
-				return fmt.Errorf("conflict %d cites unknown round %d sha %q", i+1, evidence.Round, evidence.SHA)
-			}
-			if strings.TrimSpace(evidence.Summary) == "" || strings.Contains(evidence.Summary, "@") {
-				return fmt.Errorf("conflict %d has invalid evidence text", i+1)
-			}
+		if strings.TrimSpace(evidence.Summary) == "" || strings.Contains(evidence.Summary, "@") {
+			return fmt.Errorf("conflict %d has invalid evidence text", number)
 		}
 	}
 	return nil
@@ -411,11 +443,12 @@ func renderDivergenceReport(report DivergenceReport, rounds int, mentions []stri
 		fmt.Fprintf(&b, "\n\n#### %s\n\n**Scope:** %s\n\n**Decision A:** %s\n\n**Decision B:** %s",
 			conflict.Title, conflict.Scope, conflict.DecisionA, conflict.DecisionB)
 		fmt.Fprint(&b, "\n\n**Evidence:**")
-		for _, evidence := range conflict.EvidenceA {
-			fmt.Fprintf(&b, "\n- Round %d at `%s`: %s", evidence.Round, shortSHA(evidence.SHA), evidence.Summary)
-		}
-		for _, evidence := range conflict.EvidenceB {
-			fmt.Fprintf(&b, "\n- Round %d at `%s`: %s", evidence.Round, shortSHA(evidence.SHA), evidence.Summary)
+		for _, evidence := range append(slices.Clone(conflict.EvidenceA), conflict.EvidenceB...) {
+			if evidence.Round == 0 {
+				fmt.Fprintf(&b, "\n- Before round 1 at `%s`: %s", shortSHA(evidence.SHA), evidence.Summary)
+			} else {
+				fmt.Fprintf(&b, "\n- Round %d at `%s`: %s", evidence.Round, shortSHA(evidence.SHA), evidence.Summary)
+			}
 		}
 		if strings.TrimSpace(conflict.CompatibleResolution) != "" {
 			fmt.Fprintf(&b, "\n\n**Compatible resolution:** %s", conflict.CompatibleResolution)
