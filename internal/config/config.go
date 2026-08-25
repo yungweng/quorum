@@ -106,7 +106,7 @@ type Config struct {
 	AutoMergeAuthors []string
 
 	Notify bool
-	// NotifyReadyToMerge leaves one persistent, clickable Notification Center
+	// NotifyReadyToMerge leaves one clickable Notification Center
 	// item per pull request whose clean review was not auto-merged, so "ready
 	// to merge" survives until the user opens the PR or dismisses it.
 	NotifyReadyToMerge bool
@@ -573,7 +573,7 @@ func (c Config) Render() string {
 		strings.Join(c.AutoMergeAuthors, " "))
 
 	w("NOTIFY=%s\n", bit(c.Notify))
-	w("NOTIFY_READY_TO_MERGE=%s\t# persistent alert per PR whose clean review was not auto-merged\n", bit(c.NotifyReadyToMerge))
+	w("NOTIFY_READY_TO_MERGE=%s\t# clickable notification per clean PR not auto-merged\n", bit(c.NotifyReadyToMerge))
 
 	if c.ReviewArgs != "" {
 		w("\n# Retired: pr-codex-review is built in now, so this is no longer passed\n")

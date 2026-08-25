@@ -37,7 +37,6 @@ costs one review no matter how many times it is pushed to.
 
 ```bash
 brew install yungweng/tap/quorum terminal-notifier
-brew install vjeantet/tap/alerter  # persistent ready/approval alerts
 brew install --cask codex     # Homebrew formulas cannot depend on a cask
 ```
 
@@ -57,15 +56,12 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) and
 `grok` (Grok CLI) are optional and only needed when `REVIEW_ENGINE`/
 `FIX_ENGINE` or `--engine`/`--review-engine` select them.
-`terminal-notifier` sends temporary notifications from detached macOS agent
-runs. Foreground commands normally notify through the terminal. `alerter`
-26.3 or newer sends the two notifications that must stay visible: an own pull
-request needing another person's approval, and, with
-`NOTIFY_READY_TO_MERGE=1`, a clean review that quorum did not merge. Each one
-is named `owner/repo#number`; clicking it or its **Open PR** button opens the
-pull request on GitHub. If `alerter` is missing or cannot deliver the alert,
-quorum logs the problem and sends a temporary `terminal-notifier` fallback.
-`quorum doctor` reports a missing or outdated notifier.
+`terminal-notifier` sends notifications from detached macOS agent runs.
+Foreground commands normally notify through the terminal. It also sends the
+two clickable action notifications: an own pull request needing another
+person's approval, and, with `NOTIFY_READY_TO_MERGE=1`, a clean review that
+quorum did not merge. Each one is named `owner/repo#number`; clicking it opens
+the pull request on GitHub. `quorum doctor` reports a missing notifier.
 `direnv` is optional and only needed for projects that have an `.envrc`.
 
 `make install-hooks` is needed once per clone and after a tracked hook changes.

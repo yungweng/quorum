@@ -282,7 +282,7 @@ func notifySetting() setting {
 func readyToMergeSetting() setting {
 	return setting{"ready to merge", func(c config.Config) string {
 		if c.NotifyReadyToMerge {
-			return "persistent alert per PR whose clean review was not auto-merged"
+			return "clickable notification per clean PR not auto-merged"
 		}
 		return "off"
 	}, func(a *app, in *bufio.Reader, c *config.Config) error {

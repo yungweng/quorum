@@ -35,7 +35,7 @@ func (r *Runner) notify(title, body, url string) {
 
 // notifyApprovalRequired always uses Notification Center, including for a
 // foreground run. Its per-PR group is not replaced by routine completion
-// notifications, so the action stays visible until the user dismisses it.
+// notifications.
 func (r *Runner) notifyApprovalRequired(repo string, number int) {
 	if !r.Cfg.Notify {
 		return
@@ -50,8 +50,8 @@ func (r *Runner) notifyApprovalRequired(repo string, number int) {
 	}
 }
 
-// notifyReadyToMerge mirrors notifyApprovalRequired: a persistent, clickable
-// Notification Center item per pull request whose clean review was not merged.
+// notifyReadyToMerge mirrors notifyApprovalRequired: a clickable Notification
+// Center item per pull request whose clean review was not merged.
 func (r *Runner) notifyReadyToMerge(repo string, number int) {
 	if !r.Cfg.Notify {
 		return

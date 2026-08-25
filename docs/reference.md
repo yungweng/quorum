@@ -358,7 +358,7 @@ AUTO_MERGE=0             # one switch for agent, review and babysit runs
 AUTO_MERGE_TIMEOUT="2h"  # wait for checks and mergeability; 0 disables timeout
 AUTO_MERGE_AUTHORS=""    # only merge PRs from these logins; empty allows every author
 NOTIFY=1                 # terminal; macOS system alerts need terminal-notifier
-NOTIFY_READY_TO_MERGE=0  # persistent alert per PR whose clean review was not auto-merged
+NOTIFY_READY_TO_MERGE=0  # clickable notification per clean PR not auto-merged
 ```
 
 Durations accept a bare number of seconds or a value like `30m`, `45m`, `2h`.
@@ -415,19 +415,15 @@ review does not spend tokens repeating that review.
 
 ### Ready-to-merge notifications
 
-`NOTIFY_READY_TO_MERGE=1` leaves one persistent macOS Notification Center item
+`NOTIFY_READY_TO_MERGE=1` leaves one clickable macOS Notification Center item
 per pull request whose review came back with zero Blockers and zero Critical
 findings but was not merged by quorum, typically because auto-merge is off.
-The notification names `owner/repo#number`; clicking it or its **Open PR**
-button opens the pull request on GitHub. It replaces the routine completion
-notification for that run and stays visible until dismissed, like the
-`awaiting approval` item.
+The notification names `owner/repo#number`; clicking it opens the pull request
+on GitHub. It replaces the routine completion notification for that run.
 
-Persistent alerts use `alerter` 26.3 or newer, while routine detached
-notifications remain temporary through `terminal-notifier`. Install it with
-`brew install vjeantet/tap/alerter`. If `alerter` is missing, outdated or
-cannot deliver, quorum logs the reason and sends a temporary
-`terminal-notifier` fallback. `quorum doctor` reports that degraded state.
+Action and routine detached notifications use `terminal-notifier`, which exits
+after delivery instead of keeping one helper process alive per notification.
+`quorum doctor` reports when it is missing.
 The alert requires `NOTIFY=1`, obeys `--no-notify`, and never fires for a
 merged PR, a branch-only run, `POST=0`, or `--dry-run`. The default is `0`.
 
@@ -436,6 +432,11 @@ merged PR, a branch-only run, `POST=0`, or `--dry-run`. The default is `0`.
 The Codex reviewers spend most of their time waiting on the network. What used
 to cost real time was the dependency install, once per reviewer, which the
 shared dependency cache removed.
+
+Quorum also adds Go's `-trimpath` build flag unless `GOFLAGS` already sets it.
+Without it, Go records each run's unique worktree path and caches another copy
+of otherwise identical build output. Projects can opt out with
+`GOFLAGS=-trimpath=false` when they need absolute paths in test binaries.
 
 - `MAX_CONCURRENT` is how many reviews run at once, and each runs all
   `REVIEWERS` passes in parallel. A review that trickles through its passes is a

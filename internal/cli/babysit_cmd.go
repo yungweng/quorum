@@ -436,7 +436,7 @@ type loopTermReporter struct {
 	status  *ui.Status
 	notify  bool
 	verbose bool
-	// readySent records that the persistent ready-to-merge notification went
+	// readySent records that the ready-to-merge notification went
 	// out, so the summary skips its own transient completion notification.
 	readySent bool
 	// pending holds a finished review round's step facts until its RoundResult

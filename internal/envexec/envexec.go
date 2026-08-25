@@ -10,6 +10,8 @@ package envexec
 import (
 	"context"
 	"io"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/yungweng/quorum/internal/proc"
@@ -40,10 +42,31 @@ func (e Env) Run(ctx context.Context, timeout time.Duration, c Cmd) error {
 		Name:   name,
 		Args:   args,
 		Dir:    e.Worktree,
+		Env:    goCacheEnv(),
 		Stdin:  c.Stdin,
 		Stdout: c.Stdout,
 		Stderr: c.Stderr,
 	})
+}
+
+// goCacheEnv makes Go build outputs reusable across quorum's uniquely named
+// worktrees. An explicit setting wins because some projects test path handling.
+func goCacheEnv() []string {
+	env := os.Environ()
+	flags := os.Getenv("GOFLAGS")
+	for _, flag := range strings.Fields(flags) {
+		if flag == "-trimpath" || strings.HasPrefix(flag, "-trimpath=") {
+			return env
+		}
+	}
+	value := strings.TrimSpace(flags + " -trimpath")
+	for i, entry := range env {
+		if strings.HasPrefix(entry, "GOFLAGS=") {
+			env[i] = "GOFLAGS=" + value
+			return env
+		}
+	}
+	return append(env, "GOFLAGS="+value)
 }
 
 // wrap turns a command into its direnv equivalent when direnv is active.

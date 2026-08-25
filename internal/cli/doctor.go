@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
-	macnotify "github.com/yungweng/quorum/internal/notify"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -241,11 +240,7 @@ func notificationChecks(cfg config.Config) []check {
 	if !cfg.Notify {
 		return nil
 	}
-	out := []check{temporaryNotificationCheck()}
-	if cfg.NotifyReadyToMerge || cfg.AutoMerge {
-		out = append(out, persistentAlertCheck())
-	}
-	return out
+	return []check{temporaryNotificationCheck()}
 }
 
 func temporaryNotificationCheck() check {
@@ -259,28 +254,6 @@ func temporaryNotificationCheck() check {
 		}
 	}
 	return check{"notifications", versionOf(path), 0, ""}
-}
-
-func persistentAlertCheck() check {
-	path, err := exec.LookPath("alerter")
-	if err != nil {
-		return check{
-			"persistent alerts",
-			"alerter not found; important alerts fall back to temporary notifications",
-			1,
-			"brew install vjeantet/tap/alerter",
-		}
-	}
-	version, err := macnotify.AlerterVersion(path)
-	if err != nil {
-		return check{
-			"persistent alerts",
-			err.Error() + "; important alerts fall back to temporary notifications",
-			1,
-			"brew upgrade vjeantet/tap/alerter",
-		}
-	}
-	return check{"persistent alerts", version, 0, ""}
 }
 
 // versionOf asks a tool for its version, falling back to its path.
