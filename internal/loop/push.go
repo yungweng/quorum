@@ -140,6 +140,19 @@ func (r *run) pushBranchWithFixes() error {
 			return err
 		}
 		if afterSHA == preSHA {
+			if err := r.requireHookUnchanged(hookStamp); err != nil {
+				return err
+			}
+			if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
+				return err
+			}
+			if remoteSHA == afterSHA {
+				r.headSHA = afterSHA
+				if fixed {
+					return r.flushFixComments()
+				}
+				return nil
+			}
 			return fmt.Errorf("%w: push fix %d produced no commit, a human is needed: %s",
 				ErrNoProgress, number, r.targetReference())
 		}

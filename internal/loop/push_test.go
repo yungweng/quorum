@@ -116,6 +116,47 @@ func (f *fakeFixer) Resume(_ context.Context, _ envexec.Env, _ time.Duration, _ 
 	return os.WriteFile(outFile, []byte("fixed the type error\n"), 0o644)
 }
 
+func noCommitPushFixRun(t *testing.T, remoteAfterFailure string) *run {
+	t.Helper()
+	dir := t.TempDir()
+	queried := filepath.Join(dir, "queried")
+	bin := filepath.Join(dir, "git")
+	script := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "rev-parse HEAD") echo "head-sha" ;;
+  "rev-parse --path-format=absolute") echo "$PWD/.githooks/pre-push" ;;
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run") echo "Error: parallel golangci-lint is running"; exit 1 ;;
+  "ls-remote origin")
+    if [ -f "` + queried + `" ]; then
+      printf '` + remoteAfterFailure + `\trefs/heads/feature/crumb-tray\n'
+    else
+      touch "` + queried + `"
+      printf 'base-sha\trefs/heads/feature/crumb-tray\n'
+    fi ;;
+  "status --porcelain") ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &run{
+		p:        &Pipeline{Git: git.New(bin)},
+		o:        Options{RepoRoot: dir},
+		ctx:      context.Background(),
+		rep:      NopReporter{},
+		target:   target.Target{BranchOnly: true},
+		branch:   "feature/crumb-tray",
+		worktree: dir,
+		logDir:   dir,
+		msgDir:   dir,
+		env:      envexec.Env{Worktree: dir},
+		fixer:    &fakeFixer{},
+	}
+}
+
 // pushFixRun builds a run whose fake git rejects the first push with hook
 // output and accepts the second one, once the fake fix session has produced a
 // commit. changed is what the fix commit touched.
@@ -211,6 +252,24 @@ esac
 	var rejected *pushRejection
 	if !errors.As(err, &rejected) || !strings.Contains(err.Error(), "transport failed") {
 		t.Fatalf("err = %v, want the original failed push", err)
+	}
+}
+
+func TestPushBranchWithFixesAcceptsAnUnchangedHeadAlreadyOnTheRemote(t *testing.T) {
+	r := noCommitPushFixRun(t, "head-sha")
+	if err := r.pushBranchWithFixes(); err != nil {
+		t.Fatalf("matching remote after transient hook failure: %v", err)
+	}
+	if r.headSHA != "head-sha" {
+		t.Fatalf("accepted head = %q, want head-sha", r.headSHA)
+	}
+}
+
+func TestPushBranchWithFixesStillRejectsNoProgressBeforeTheRemoteHasTheHead(t *testing.T) {
+	r := noCommitPushFixRun(t, "base-sha")
+	err := r.pushBranchWithFixes()
+	if !errors.Is(err, ErrNoProgress) {
+		t.Fatalf("err = %v, want ErrNoProgress", err)
 	}
 }
 
