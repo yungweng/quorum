@@ -72,7 +72,7 @@ var (
 	// metaSigns catch an aggregator that narrated what it did instead of
 	// producing the comment. Posting one of those to a PR under the user's own
 	// name is worse than failing the run.
-	metaSigns = regexp.MustCompile(`(?i)I tried to post|gh pr comment|api\.github\.com|exact comment I prepared`)
+	metaSigns = regexp.MustCompile(`(?i)I tried to post|gh pr comment|exact comment I prepared`)
 	// summaryHeadingStart matches the report's opening heading even when a
 	// multi-turn engine glues tool narration onto the same line
 	// ("…cascade.## Summary"). Case follows the rest of the section matcher.

@@ -194,6 +194,15 @@ func TestValidateRejectsMetaOutput(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsGitHubAPIURLInFinding(t *testing.T) {
+	body := strings.Replace(goodComment,
+		"- The retry loop has no upper bound.",
+		"- The request to https://api.github.com/repos/acme/api failed without a retry.", 1)
+	if err := ValidateComment(write(t, body)); err != nil {
+		t.Errorf("a valid finding containing a GitHub API URL was rejected: %v", err)
+	}
+}
+
 func TestValidateRejectsACodeFence(t *testing.T) {
 	fenced := "```markdown\n" + goodComment + "\n```\n"
 	if err := ValidateComment(write(t, fenced)); err == nil {
