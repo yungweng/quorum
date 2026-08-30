@@ -181,3 +181,18 @@ func TestStrikeCrossesOutOnATerminal(t *testing.T) {
 		t.Errorf("Strike = %q", got)
 	}
 }
+
+// Every label a run header uses fits the label column, so their values start
+// at the same offset. "review model" is the longest and used to overflow.
+func TestRowAlignsTheLongestLabel(t *testing.T) {
+	var b strings.Builder
+	w := &Writer{Out: &b, Width: 80}
+	w.Row("pr", "x")
+	w.Row("review model", "x")
+	w.Row("verification", "x")
+	for _, line := range strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n") {
+		if got := strings.Index(line, "x"); got != 2+labelColumn+1 {
+			t.Errorf("value of %q starts at column %d, want %d", line, got, 2+labelColumn+1)
+		}
+	}
+}

@@ -461,8 +461,36 @@ func (l *loopTermReporter) flushPending() {
 		return
 	}
 	l.hasPending = false
-	l.out.Printf("%s\n", l.out.Dim(fmt.Sprintf("%s %s · %s · %s",
-		l.out.SymOK(), l.pending.label, l.pending.model.Tag(), ui.Duration(l.pending.elapsed))))
+	l.out.Printf("%s\n", l.stepLine(l.out.Green(l.out.SymOK()), l.pending.label,
+		l.pending.model.Tag(), ui.Duration(l.pending.elapsed)))
+}
+
+// stepLine is the one shape every timeline line has: a coloured symbol, the
+// label in normal weight, and dim metadata joined by dots. Callers append a
+// coloured tail of their own where a line ends in a verdict.
+func (l *loopTermReporter) stepLine(sym, label string, meta ...string) string {
+	line := sym + " " + label
+	if len(meta) > 0 {
+		line += l.out.Dim(" · " + strings.Join(meta, " · "))
+	}
+	return line
+}
+
+// callout prints a block the run wants a decision on. Its first line is the
+// marker the session wrote; the rest is the session's own text, indented
+// under it so it reads as one item of the timeline rather than a new frame.
+func (l *loopTermReporter) callout(text string) {
+	l.status.Clear()
+	l.flushPending()
+	head, body, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	head = strings.TrimSuffix(strings.TrimSpace(head), ":")
+	l.out.Printf("%s\n", l.out.Yellow(l.out.SymWarn()+" "+head))
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		l.out.Printf("    %s\n", line)
+	}
 }
 
 func (l *loopTermReporter) Header(h loop.Header) {
@@ -545,10 +573,14 @@ func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.D
 // which one paid for an hour of wall clock is the question the line is read for.
 // A review round's facts are held back and merged into its RoundResult; a
 // discarded round is crossed out, so a rerun of the same number below it does
-// not read as the run counting twice.
+// not read as the run counting twice. A failed step stays on the timeline in
+// red, so the summary's error has a line to point at.
 func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
 	l.status.Clear()
+	o := l.out
+	dur := ui.Duration(elapsed)
 	if !ok {
+		o.Printf("%s%s\n", l.stepLine(o.Red(o.SymFail()), label, m.Tag(), dur), o.Red(" · failed"))
 		return
 	}
 	if reviewRoundLabel.MatchString(label) {
@@ -556,29 +588,31 @@ func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Du
 		l.hasPending = true
 		return
 	}
-	line := fmt.Sprintf("%s %s · %s · %s", l.out.SymOK(), label, m.Tag(), ui.Duration(elapsed))
-	if strings.Contains(label, "(discarded)") {
-		line = l.out.Strike(line)
+	if base, found := strings.CutSuffix(label, " (discarded)"); found {
+		o.Printf("%s\n", o.Dim(o.Strike(l.stepLine(o.SymSkip(), base, m.Tag(), dur, "discarded"))))
+		return
 	}
-	l.out.Printf("%s\n", l.out.Dim(line))
+	o.Printf("%s\n", l.stepLine(o.Green(o.SymOK()), label, m.Tag(), dur))
 }
 
 func (l *loopTermReporter) RoundResult(round int, f review.Findings, clean bool) {
 	l.status.Clear()
-	line := f.Summary()
+	o := l.out
+	verdict := f.Summary()
 	if clean {
-		line = l.out.Green(line)
+		verdict = o.Green(verdict)
 	} else {
-		line = l.out.Red(line)
+		verdict = o.Red(verdict)
 	}
-	prefix := fmt.Sprintf("%s Review round %d", l.out.SymOK(), round)
-	if l.hasPending && l.pending.label == fmt.Sprintf("Review round %d", round) {
+	label := fmt.Sprintf("Review round %d", round)
+	var meta []string
+	if l.hasPending && l.pending.label == label {
 		l.hasPending = false
-		prefix += fmt.Sprintf(" · %s · %s", l.pending.model.Tag(), ui.Duration(l.pending.elapsed))
+		meta = []string{l.pending.model.Tag(), ui.Duration(l.pending.elapsed)}
 	} else {
 		l.flushPending()
 	}
-	l.out.Printf("%s %s\n", l.out.Dim(prefix+" ·"), line)
+	o.Printf("%s%s%s\n", l.stepLine(o.Green(o.SymOK()), label, meta...), o.Dim(" · "), verdict)
 }
 
 // CIWait keeps the wait on the transient status line; only a terminal-less run
@@ -598,39 +632,37 @@ func (l *loopTermReporter) CIWait(pr int, elapsed time.Duration) {
 
 func (l *loopTermReporter) CIGreen(elapsed time.Duration) {
 	l.status.Clear()
-	l.out.Printf("%s%s\n", l.out.Green("CI green"), l.out.Dim("  ·  waited "+ui.Duration(elapsed)))
+	o := l.out
+	o.Printf("%s\n", l.stepLine(o.Green(o.SymOK()), o.Green("CI green"), ui.Duration(elapsed)))
 }
 
 func (l *loopTermReporter) CIRed(attempt, max int) {
 	l.status.Clear()
-	l.out.Printf("%s\n", l.out.Red(fmt.Sprintf("CI red; starting fix attempt %d/%d.", attempt, max)))
+	o := l.out
+	o.Printf("%s\n", l.stepLine(o.Red(o.SymFail()), o.Red("CI red"), fmt.Sprintf("fix attempt %d/%d", attempt, max)))
 }
 
 func (l *loopTermReporter) Info(s string) {
 	l.status.Clear()
 	l.flushPending()
-	l.out.Printf("%s\n", l.out.Dim(s))
+	l.out.Printf("  %s\n", l.out.Dim(s))
 }
 
 func (l *loopTermReporter) Warn(s string) {
 	l.status.Clear()
-	fmt.Fprintf(os.Stderr, "warning: %s\n", s)
+	l.flushPending()
+	l.out.Printf("%s\n", l.out.Yellow(l.out.SymWarn()+" "+s))
 }
 
-func (l *loopTermReporter) Questions(text string) { l.block(text) }
-func (l *loopTermReporter) Dispute(text string)   { l.block(text) }
-
-func (l *loopTermReporter) block(text string) {
-	l.status.Clear()
-	fmt.Println()
-	l.out.Rule()
-	fmt.Println(text)
-	l.out.Rule()
-}
+func (l *loopTermReporter) Questions(text string) { l.callout(text) }
+func (l *loopTermReporter) Dispute(text string)   { l.callout(text) }
 
 func (l *loopTermReporter) EnvrcChanged(diff string) {
 	l.status.Clear()
-	fmt.Fprintf(os.Stderr, "%s\n%s\n", l.out.Red("A .envrc file changed inside the worktree."), diff)
+	l.out.Printf("%s\n", l.out.Yellow(l.out.SymWarn()+" A .envrc file changed inside the worktree"))
+	for _, line := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
+		l.out.Printf("    %s\n", line)
+	}
 }
 
 func (l *loopTermReporter) Prompt(text string) {
@@ -645,12 +677,16 @@ func (l *loopTermReporter) Notify(title, body string) {
 	}
 }
 
-// summary prints the closing block of a run.
+// summary prints the closing block of a run. Its first line is the verdict:
+// one symbol and one word say how the run ended, and the dim rest of the line
+// says why, so nothing below it has to be read to know whether to act.
 func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus string, mergeErr error) {
 	o := l.out
 	l.flushPending()
-	fmt.Println()
+	o.Printf("\n")
 	o.Rule()
+	sym, word, detail := l.verdict(res, runErr, mergeStatus, mergeErr)
+	o.Printf("%s %s  %s\n", sym, o.Bold(word), o.Dim(detail))
 	switch {
 	case res.Local:
 		o.Row("target", o.Bold(res.PR.HeadRefName)+o.Dim("  ·  local run, any open PR was left alone"))
@@ -660,17 +696,8 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 		o.Row("pr", o.Bold(fmt.Sprintf("#%d", res.PR.Number))+"  "+o.Link(o.Blue(res.PR.URL), res.PR.URL))
 	}
 	o.Row("branch", res.PR.HeadRefName)
-	o.Row("rounds", fmt.Sprintf("%d review round(s)", res.Rounds))
 	o.Row("duration", ui.Duration(res.Duration))
-	if len(res.RoundLog) > 0 {
-		fmt.Println("  Commits per round:")
-		for _, r := range res.RoundLog {
-			fmt.Printf("    %s:\n", r.Label)
-			for _, line := range strings.Split(r.Commits, "\n") {
-				fmt.Printf("      %s\n", line)
-			}
-		}
-	}
+	l.commitRows(res.RoundLog)
 	if res.Divergence != nil {
 		o.Row("analysis", res.Divergence.Verdict)
 		switch {
@@ -690,63 +717,95 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 		}
 		o.Row("description", o.Green(status)+"  "+o.Link(o.Dim(filepath.Base(res.PRDescriptionFile)), "file://"+res.PRDescriptionFile))
 	}
+	// The rebuttal is on GitHub when it could be posted; only an unposted one
+	// is worth repeating here, since the terminal is then its only copy.
+	unposted := false
+	if res.Converged && res.DisputeAccepted && !res.BranchOnly {
+		switch {
+		case res.DisputeCommentURL != "":
+			o.Row("rebuttal", o.Link(o.Blue(res.DisputeCommentURL), res.DisputeCommentURL))
+		case res.DisputeCommentPosted:
+			o.Row("rebuttal", o.Green("posted"))
+		default:
+			o.Row("rebuttal", o.Yellow("could not be posted"))
+			unposted = true
+		}
+	}
+	if unposted && res.DisputeText != "" {
+		l.callout(res.DisputeText)
+	}
+	o.Rule()
+
 	switch {
 	case mergeErr != nil:
-		o.Row("result", o.Red(mergeErr.Error()))
-		o.Rule()
 		l.Notify("Auto-merge failed", fmt.Sprintf("%s ist sauber, konnte aber nicht gemerged werden", babysitTargetLabel(res)))
 	case res.Converged && res.DisputeAccepted:
-		result := "remaining findings disputed by Codex and accepted"
-		if !res.BranchOnly {
-			result = "CI green, " + result
-		}
-		o.Row("result", o.Green(result))
-		if !res.BranchOnly {
-			switch {
-			case res.DisputeCommentURL != "":
-				o.Row("rebuttal", o.Link(o.Blue(res.DisputeCommentURL), res.DisputeCommentURL))
-			case res.DisputeCommentPosted:
-				o.Row("rebuttal", o.Green("posted"))
-			default:
-				fmt.Println("  Note: the rebuttal could not be posted; it is included below.")
-			}
-		}
-		if res.DisputeText != "" {
-			for _, line := range strings.Split(res.DisputeText, "\n") {
-				fmt.Printf("  %s\n", line)
-			}
-		}
-		o.Rule()
 		l.Notify("Fertig", fmt.Sprintf("%s fertig; Disputes akzeptiert, bereit fuer den manuellen Test", babysitTargetLabel(res)))
 	case res.Converged:
-		result := "review clean"
-		if !res.BranchOnly {
-			result += ", CI green"
-		}
-		o.Row("result", o.Green(result))
-		switch mergeStatus {
-		case automerge.Merged:
-			o.Row("auto-merge", o.Green("merged"))
-		case automerge.ApprovalRequired:
-			o.Row("auto-merge", o.Yellow(automerge.ApprovalRequired))
-		}
-		o.Rule()
 		if mergeStatus != automerge.ApprovalRequired && !l.readySent {
 			l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
 		}
 	case res.Divergence != nil && res.Divergence.Verdict == loop.DivergenceDiverged:
-		o.Row("result", o.Red("diverged; manual decision required"))
-		o.Rule()
 		l.Notify("Diverged", fmt.Sprintf("%s braucht eine manuelle Designentscheidung", babysitTargetLabel(res)))
+	}
+}
+
+// verdict picks the symbol, the word and the reason for the summary's first
+// line. The cases are checked in the order the old result row used, so the
+// same run ends with the same outcome, only said in one word.
+func (l *loopTermReporter) verdict(res *loop.Result, runErr error, mergeStatus string, mergeErr error) (sym, word, detail string) {
+	o := l.out
+	rounds := fmt.Sprintf("%d round", res.Rounds)
+	if res.Rounds != 1 {
+		rounds += "s"
+	}
+	clean := "review clean after " + rounds
+	if !res.BranchOnly {
+		clean = "CI green · " + clean
+	}
+	ok := func(word, detail string) (string, string, string) {
+		return o.Green(o.SymOK()), o.Green(word), detail
+	}
+	bad := func(word, detail string) (string, string, string) {
+		return o.Red(o.SymFail()), o.Red(word), detail
+	}
+	switch {
+	case mergeErr != nil:
+		return bad("FAILED", mergeErr.Error())
+	case res.Converged && res.DisputeAccepted:
+		return ok("READY", clean+" · disputed findings accepted")
+	case res.Converged && mergeStatus == automerge.Merged:
+		return ok("MERGED", clean)
+	case res.Converged && mergeStatus == automerge.ApprovalRequired:
+		return ok("READY", clean+" · auto-merge needs approval")
+	case res.Converged:
+		return ok("READY", clean)
+	case res.Divergence != nil && res.Divergence.Verdict == loop.DivergenceDiverged:
+		return o.Yellow(o.SymWarn()), o.Yellow("DIVERGED"), "manual decision required"
 	case errors.Is(runErr, loop.ErrNotConverged):
-		o.Row("result", o.Red("not converged"))
-		o.Rule()
+		return bad("NOT CONVERGED", "after "+rounds)
 	case runErr != nil:
-		o.Row("result", o.Red("failed: "+runErr.Error()))
-		o.Rule()
+		return bad("FAILED", runErr.Error())
 	default:
-		o.Row("result", o.Red("failed"))
-		o.Rule()
+		return bad("FAILED", "")
+	}
+}
+
+// commitRows lists the commits each fix step pushed, one row per commit with
+// the step named on its first line, so the block sits in the same grid as the
+// rows around it.
+func (l *loopTermReporter) commitRows(log []loop.RoundEntry) {
+	width := 0
+	for _, r := range log {
+		width = max(width, ui.Cells(r.Label))
+	}
+	label := "commits"
+	for _, r := range log {
+		name := r.Label
+		for _, line := range strings.Split(r.Commits, "\n") {
+			l.out.Row(label, ui.Pad(name, width)+"  "+line)
+			label, name = "", ""
+		}
 	}
 }
 

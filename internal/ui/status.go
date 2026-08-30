@@ -24,6 +24,23 @@ func (w *Writer) SymFail() string {
 	return "FAIL:"
 }
 
+// SymWarn marks a warning or a gate that needs a decision.
+func (w *Writer) SymWarn() string {
+	if w.Color {
+		return "⚠"
+	}
+	return "warn:"
+}
+
+// SymSkip marks work that finished but was superseded, like a review of a
+// head that a CI fix moved on from.
+func (w *Writer) SymSkip() string {
+	if w.Color {
+		return "↻"
+	}
+	return "--"
+}
+
 // Rule prints a horizontal separator across the block width.
 //
 // It used to be sixty columns whatever the terminal did, which on a wide
@@ -40,7 +57,7 @@ func (w *Writer) Rule() {
 // labelColumn is the width of the label column in a run header. It is wide
 // enough for the longest label any header uses, so review and babysit line
 // their values up at the same offset.
-const labelColumn = 11
+const labelColumn = 12
 
 // Row prints one aligned "label   value" line of a run header. Labels are dim
 // and lowercase so the eye lands on the values, which are what change.

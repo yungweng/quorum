@@ -174,7 +174,7 @@ func TestStepLinesNameTheModelThatRanTheStep(t *testing.T) {
 
 	got := out.String()
 	for _, want := range []string{
-		"Review round 2 (discarded) · gpt-5.6-terra/max · 11m",
+		"Review round 2 · gpt-5.6-terra/max · 11m · discarded",
 		"CI fix 1 · opus/high · 11m",
 	} {
 		if !strings.Contains(got, want) {
@@ -332,13 +332,13 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 		{
 			name: "round limit",
 			err:  errors.Join(loop.ErrNotConverged, errors.New("after 12 review rounds")),
-			want: "not converged",
+			want: "NOT CONVERGED  after 1 round",
 		},
 		{
 			name:     "dirty worktree",
 			err:      errors.New("worktree still has uncommitted changes"),
-			want:     "failed: worktree still has uncommitted changes",
-			unwanted: "not converged",
+			want:     "FAILED  worktree still has uncommitted changes",
+			unwanted: "NOT CONVERGED",
 		},
 		{
 			name: "divergence",
@@ -348,15 +348,15 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 				Rounds:     12,
 				Divergence: &loop.DivergenceReport{Verdict: loop.DivergenceDiverged},
 			},
-			want:     "diverged; manual decision required",
-			unwanted: "failed:",
+			want:     "DIVERGED  manual decision required",
+			unwanted: "FAILED",
 		},
 		{
 			name:     "auto-merge failure",
 			err:      errors.New("auto-merge failed: permission denied"),
 			mergeErr: errors.New("auto-merge failed: permission denied"),
-			want:     "auto-merge failed: permission denied",
-			unwanted: "not converged",
+			want:     "FAILED  auto-merge failed: permission denied",
+			unwanted: "NOT CONVERGED",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -416,5 +416,92 @@ func TestPendingReviewRoundLineIsFlushedByLaterOutput(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "Review round 3 · gpt-5.6-terra/medium · 1m") {
 		t.Errorf("the held round line was lost:\n%s", got)
+	}
+}
+
+// A step that fails used to vanish from the timeline; the summary then named
+// an error with no line to point at.
+func TestFailedStepPrintsARedLine(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+
+	rep.StepEnd("CI fix 2", engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}, 3*time.Minute, false)
+
+	if got, want := out.String(), "FAIL: CI fix 2 · gpt-5.6-terra/low · 3m · failed"; !strings.Contains(got, want) {
+		t.Errorf("failed step line is missing %q:\n%s", want, got)
+	}
+}
+
+// Warnings sit in the timeline with everything else. Sent to stderr they were
+// styled differently from every neighbouring line and, when piped, landed out
+// of order.
+func TestWarningsGoThroughTheWriter(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+
+	rep.Warn("push rejected before it reached the remote")
+
+	if got, want := out.String(), "warn: push rejected before it reached the remote\n"; got != want {
+		t.Errorf("Warn wrote %q, want %q", got, want)
+	}
+}
+
+// The dispute text reaches the terminal once during the run. The summary
+// links the posted rebuttal instead of repeating it, and repeats it only when
+// posting failed and the terminal is its only copy.
+func TestSummaryRepeatsOnlyAnUnpostedRebuttal(t *testing.T) {
+	dispute := "DISPUTED FINDINGS:\n1. The fallback is unreachable."
+	base := loop.Result{
+		PR:     gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray", URL: "https://github.com/acme/api/pull/42"},
+		Rounds: 2, Converged: true, DisputeAccepted: true, DisputeText: dispute,
+	}
+	render := func(res loop.Result) string {
+		var out bytes.Buffer
+		w := ui.New(os.Stdout).To(&out)
+		rep := &loopTermReporter{out: w, status: w.Status()}
+		rep.summary(&res, nil, "", nil)
+		return out.String()
+	}
+
+	posted := base
+	posted.DisputeCommentURL = "https://github.com/acme/api/pull/42#issuecomment-7"
+	got := render(posted)
+	if !strings.Contains(got, "ok: READY  CI green · review clean after 2 rounds · disputed findings accepted") {
+		t.Errorf("verdict line is missing:\n%s", got)
+	}
+	if !strings.Contains(got, "rebuttal     https://github.com/acme/api/pull/42#issuecomment-7") {
+		t.Errorf("rebuttal row is missing:\n%s", got)
+	}
+	if strings.Contains(got, "The fallback is unreachable") {
+		t.Errorf("a posted rebuttal was repeated:\n%s", got)
+	}
+
+	got = render(base)
+	if !strings.Contains(got, "warn: DISPUTED FINDINGS\n    1. The fallback is unreachable.") {
+		t.Errorf("an unposted rebuttal was not shown:\n%s", got)
+	}
+}
+
+// The commit list is part of the summary grid: the step name and its commits
+// line up under the value column like every other row.
+func TestSummaryCommitsSitInTheRowGrid(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+	rep.summary(&loop.Result{
+		PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1, Converged: true,
+		RoundLog: []loop.RoundEntry{
+			{Label: "CI fix 1", Commits: "1111111 fix: lint\n2222222 fix: format"},
+			{Label: "Push fix 1", Commits: "3333333 fix: hook"},
+		},
+	}, nil, "", nil)
+
+	want := "  commits      CI fix 1    1111111 fix: lint\n" +
+		"                           2222222 fix: format\n" +
+		"               Push fix 1  3333333 fix: hook\n"
+	if got := out.String(); !strings.Contains(got, want) {
+		t.Errorf("commit rows are not aligned, want:\n%s\ngot:\n%s", want, got)
 	}
 }

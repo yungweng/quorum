@@ -514,7 +514,7 @@ func (t *termReporter) Info(s string) {
 
 func (t *termReporter) Warn(s string) {
 	t.clear()
-	fmt.Fprintf(os.Stderr, "warning: %s\n", s)
+	t.out.Printf("%s\n", t.out.Yellow(t.out.SymWarn()+" "+s))
 }
 
 // clear takes both transient displays down before anything permanent is

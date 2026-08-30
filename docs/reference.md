@@ -147,6 +147,25 @@ Failed runs always keep their worktree for inspection, regardless of
 `--keep-worktree`. The normal cache collector removes old failed runs after the
 retention period.
 
+### Reading the output
+
+A run prints one heading per phase (`CI`, `ROUND 1/12`, `PR DESCRIPTION`) and
+one line per step under it. Each step line starts with a symbol, names the
+model that ran it and its duration, and ends with the result where there is
+one:
+
+| symbol | meaning |
+|---|---|
+| `✓` | the step finished and its outcome is good: CI green, a fix committed, a review done |
+| `✗` | the step failed, or CI is red |
+| `⚠` | a warning, or a gate that needs a decision: disputed findings, open questions, a changed `.envrc` |
+| `↻` | superseded work, crossed out: a review of a head that a CI fix moved on from |
+
+Indented dim lines are notes on what the pipeline is doing between steps. The
+closing block starts with the verdict, one word after the symbol: `READY`,
+`MERGED`, `DIVERGED`, `NOT CONVERGED` or `FAILED`, followed by the reason.
+Without a terminal the symbols become `ok:`, `FAIL:`, `warn:` and `--`.
+
 ## Other commands
 
 | Command | Options |

@@ -118,7 +118,7 @@ func (r *run) pushBranchWithFixes() error {
 		}
 
 		logPath := filepath.Join(r.logDir, "push-last.log")
-		r.rep.Warn(fmt.Sprintf("the push was rejected before it reached the remote; starting push fix %d/%d, see %s",
+		r.rep.Warn(fmt.Sprintf("push rejected before it reached the remote; push fix %d/%d, see %s",
 			attempt, maxPushFixes, logPath))
 
 		preSHA, shaErr := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")

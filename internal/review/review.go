@@ -575,7 +575,7 @@ func (r *Runner) allowDirenv(ctx context.Context, o Options, run runPaths, baseR
 	if err := env.Allow(ctx); err != nil {
 		return fmt.Errorf("direnv allow: %w", err)
 	}
-	rep.Info("direnv:   allowed")
+	rep.Info("direnv allowed")
 	return nil
 }
 

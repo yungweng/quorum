@@ -77,10 +77,10 @@ func (r *run) disputeGate(tagBase, preSHA string) error {
 			if n >= 2 {
 				r.disputeAccepted = true
 				r.disputeText = dispute
-				r.rep.Info("autonomous mode: dispute upheld after the forced re-check, accepting the rebuttals")
+				r.rep.Info("dispute upheld after the re-check, rebuttal accepted")
 				return nil
 			}
-			r.rep.Info("autonomous mode: forcing one adversarial re-check of the dispute")
+			r.rep.Info("autonomous mode: forcing one adversarial re-check")
 			if err := r.resume(tag, forceRecheckPrompt); err != nil {
 				return err
 			}
@@ -235,7 +235,7 @@ func (r *run) setupDirenv() error {
 	}
 	r.direnvActive = true
 	r.envrcStamp = r.stampEnvrc()
-	r.rep.Info("direnv:   allowed")
+	r.rep.Info("direnv allowed")
 	return nil
 }
 

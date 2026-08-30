@@ -212,7 +212,7 @@ func (r *run) discardReview() {
 		return
 	}
 	r.review = nil
-	r.rep.Info("CI needs a fix; discarding the review of the outgoing head...")
+	r.rep.Info("discarding the review of the outgoing head")
 	r.waitReview(br, fmt.Sprintf("Review round %d (discarded)", br.round))
 }
 

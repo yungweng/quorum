@@ -583,7 +583,7 @@ func (r *run) execute() (*Result, error) {
 
 	for iteration := 1; iteration <= r.o.MaxIter; iteration++ {
 		res.Rounds = iteration
-		r.rep.Step(fmt.Sprintf("Review round %d/%d", iteration, r.o.MaxIter))
+		r.rep.Step(fmt.Sprintf("Round %d/%d", iteration, r.o.MaxIter))
 		r.prog.Round = iteration
 		r.enter(PhaseReview)
 
@@ -640,7 +640,6 @@ func (r *run) execute() (*Result, error) {
 			break
 		}
 
-		r.rep.Step(fmt.Sprintf("Fix round %d/%d", iteration, r.o.MaxIter))
 		r.enter(PhaseFix)
 		preFixSHA := currentSHA
 		tag := fmt.Sprintf("fix-round-%d", iteration)
@@ -1032,6 +1031,7 @@ func (r *run) pushBranch() error {
 	os.WriteFile(logPath, []byte(out), 0o644)
 
 	deadline := time.Now().Add(headSettleTimeout)
+	announced := false
 	for {
 		var remote string
 		if r.target.BranchOnly {
@@ -1050,7 +1050,10 @@ func (r *run) pushBranch() error {
 			return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
 				r.branch, remote, pushedSHA, headSettleTimeout)
 		}
-		r.rep.Info("waiting for GitHub to register the pushed head...")
+		if !announced {
+			r.rep.Info("waiting for GitHub to register the pushed head")
+			announced = true
+		}
 		select {
 		case <-time.After(5 * time.Second):
 		case <-r.ctx.Done():
@@ -1354,9 +1357,23 @@ func (p *Pipeline) reporter() Reporter {
 
 // stepLabel turns an internal tag into what the status line shows.
 func stepLabel(tag string) string {
+	// Gate follow-ups hang off their round's tag: fix-round-2-dispute-1 is
+	// the first forced re-check of round 2, fix-round-2-answers-1 its first
+	// answer to open questions. The round number is already on the screen
+	// above them, so the label names only the follow-up.
+	if rest, ok := strings.CutPrefix(tag, "fix-round-"); ok {
+		if _, n, ok := strings.Cut(rest, "-dispute-"); ok {
+			return "Dispute re-check " + n
+		}
+		if _, n, ok := strings.Cut(rest, "-answers-"); ok {
+			return "Answers " + n
+		}
+	}
 	switch {
 	case strings.HasPrefix(tag, "fix-round-"):
 		return "Fix round " + strings.TrimPrefix(tag, "fix-round-")
+	case strings.HasPrefix(tag, "push-fix-"):
+		return "Push fix " + strings.TrimPrefix(tag, "push-fix-")
 	case strings.HasPrefix(tag, "ci-fix-"):
 		return "CI fix " + strings.TrimPrefix(tag, "ci-fix-")
 	case strings.HasPrefix(tag, "test-fix-"):
