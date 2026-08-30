@@ -210,3 +210,147 @@ func TestLogOnelineFollowsFirstParent(t *testing.T) {
 		t.Fatalf("a commit merged in from the base is listed as the branch's own:\n%s", out)
 	}
 }
+
+func TestIsolateHooksSnapshotsAWorktreeAwayFromSharedHookChanges(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	dir := conflictRepo(t)
+	shared := filepath.Join(dir, ".git", "hooks", "pre-push")
+	if err := os.WriteFile(shared, []byte("#!/bin/sh\necho first\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd := exec.Command("git", "worktree", "add", "--quiet", "--detach", worktree, "HEAD")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	g := New("git")
+	isolated, err := g.IsolateHooks(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "#!/bin/sh\necho first\n"
+	isolatedHook := filepath.Join(isolated, "pre-push")
+	if data, err := os.ReadFile(isolatedHook); err != nil || string(data) != want {
+		t.Fatalf("isolated hook = %q, %v; want %q", data, err, want)
+	}
+	if info, err := os.Stat(isolatedHook); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("isolated hook mode = %v, %v; want 0755", info, err)
+	}
+
+	if err := os.WriteFile(shared, []byte("#!/bin/sh\necho second\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(isolatedHook); err != nil || string(data) != want {
+		t.Fatalf("shared rewrite reached isolated hook: %q, %v", data, err)
+	}
+	resumed, err := g.IsolateHooks(context.Background(), worktree)
+	if err != nil || resumed != isolated {
+		t.Fatalf("resumed hook snapshot = %q, %v; want %q", resumed, err, isolated)
+	}
+	if data, err := os.ReadFile(isolatedHook); err != nil || string(data) != want {
+		t.Fatalf("resume replaced the isolated hook: %q, %v", data, err)
+	}
+	resolved, err := g.WithHooksPath(isolated).PrePushPath(context.Background(), worktree)
+	if err != nil || resolved != isolatedHook {
+		t.Fatalf("scoped pre-push path = %q, %v; want %q", resolved, err, isolatedHook)
+	}
+}
+
+func TestIsolateHooksCopiesConfiguredRelativePathsAndInternalSymlinks(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	dir := conflictRepo(t)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd := exec.Command("git", "worktree", "add", "--quiet", "--detach", worktree, "HEAD")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "config", "core.hooksPath", ".githooks")
+	cmd.Dir = worktree
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", err, out)
+	}
+	hooks := filepath.Join(worktree, ".githooks")
+	if err := os.Mkdir(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "runner"), []byte("#!/bin/sh\necho stable\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("runner", filepath.Join(hooks, "pre-push")); err != nil {
+		t.Fatal(err)
+	}
+
+	isolated, err := New("git").IsolateHooks(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedHook := filepath.Join(isolated, "pre-push")
+	if data, err := os.ReadFile(isolatedHook); err != nil || string(data) != "#!/bin/sh\necho stable\n" {
+		t.Fatalf("isolated symlink = %q, %v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "runner"), []byte("#!/bin/sh\necho changed\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(isolatedHook); err != nil || string(data) != "#!/bin/sh\necho stable\n" {
+		t.Fatalf("configured hook rewrite reached isolated symlink: %q, %v", data, err)
+	}
+}
+
+func TestIsolateHooksAcceptsAMissingConfiguredHookDirectory(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	dir := conflictRepo(t)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd := exec.Command("git", "worktree", "add", "--quiet", "--detach", worktree, "HEAD")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "config", "core.hooksPath", ".missing-hooks")
+	cmd.Dir = worktree
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", err, out)
+	}
+
+	isolated, err := New("git").IsolateHooks(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(isolated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("isolated missing hook directory contains %d entries", len(entries))
+	}
+}
+
+func TestPushPinsTheVerifiedSHAAndSkipsTheSecondHookRun(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	bin := filepath.Join(dir, "git")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "` + argsPath + `"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := New(bin).Push(context.Background(), dir, "origin", "feature/crumb-tray", "verified-sha"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "push\n-q\n--no-verify\norigin\nverified-sha:refs/heads/feature/crumb-tray\n"
+	if got := string(data); got != want {
+		t.Fatalf("git arguments = %q, want %q", got, want)
+	}
+}

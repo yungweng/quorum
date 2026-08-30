@@ -13,7 +13,7 @@ import (
 // line out of this file with sed, so both the name and the shape of this
 // declaration are load-bearing. Keep it a plain `var Version = "X.Y.Z"` here
 // in package main.
-var Version = "1.14.5"
+var Version = "1.14.6"
 
 func main() {
 	os.Exit(cli.Run(Version, os.Args[1:]))

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,6 +43,80 @@ func TestFixablePushRejectionOnlyCoversLocalVerification(t *testing.T) {
 	}
 	if fixablePushRejection(&pushRejection{hookOut: hook}) {
 		t.Error("unverified output must not be handed to a fix session")
+	}
+	lock := "Error: parallel golangci-lint is running"
+	if fixablePushRejection(&pushRejection{hookOut: lock, local: true}) {
+		t.Error("a transient linter lock must not be handed to a fix session")
+	}
+}
+
+func TestPrePushRetriesAGolangCILockAndThenPasses(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	bin := filepath.Join(dir, "git")
+	script := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run")
+    count=0
+    if [ -f "` + calls + `" ]; then count=$(cat "` + calls + `"); fi
+    count=$((count + 1))
+    printf '%s' "$count" > "` + calls + `"
+    if [ "$count" -eq 1 ]; then
+      echo "Error: parallel golangci-lint is running"
+      exit 1
+    fi ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{ctx: context.Background(), rep: NopReporter{}, worktree: dir}
+	if out, err := r.prePushWithRetry(git.New(bin), "origin", "feature/crumb-tray", "head-sha", "base-sha", 3, 0); err != nil {
+		t.Fatalf("retrying transient pre-push failure: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "2" {
+		t.Fatalf("pre-push attempts = %s, want 2", got)
+	}
+}
+
+func TestPrePushBoundsAPersistentGolangCILock(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	bin := filepath.Join(dir, "git")
+	script := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run")
+    count=0
+    if [ -f "` + calls + `" ]; then count=$(cat "` + calls + `"); fi
+    printf '%s' "$((count + 1))" > "` + calls + `"
+    echo "Error: parallel golangci-lint is running"
+    exit 1 ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{ctx: context.Background(), rep: NopReporter{}, worktree: dir}
+	out, err := r.prePushWithRetry(git.New(bin), "origin", "feature/crumb-tray", "head-sha", "base-sha", 3, 0)
+	if err == nil || !strings.Contains(err.Error(), "3 attempts") || !strings.Contains(out, "parallel golangci-lint") {
+		t.Fatalf("persistent lock result = %q, %v", out, err)
+	}
+	data, readErr := os.ReadFile(calls)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := string(data); got != "3" {
+		t.Fatalf("pre-push attempts = %s, want 3", got)
 	}
 }
 
@@ -127,7 +202,7 @@ case "$1 $2" in
   "rev-parse HEAD") echo "head-sha" ;;
   "rev-parse --path-format=absolute") echo "$PWD/.githooks/pre-push" ;;
   "remote get-url") echo "example.invalid:acme/api.git" ;;
-  "hook run") echo "Error: parallel golangci-lint is running"; exit 1 ;;
+  "hook run") echo "src/app.ts(12,3): error TS2339: Property 'crumb' does not exist"; exit 1 ;;
   "ls-remote origin")
     if [ -f "` + queried + `" ]; then
       printf '` + remoteAfterFailure + `\trefs/heads/feature/crumb-tray\n'
@@ -298,6 +373,59 @@ func TestPushFixMayNotRewriteTheVerification(t *testing.T) {
 	err := r.pushBranchWithFixes()
 	if err == nil || !strings.Contains(err.Error(), "lefthook.yml") {
 		t.Fatalf("err = %v, want the run stopped over the hook configuration", err)
+	}
+}
+
+func TestHookStampIgnoresAnotherWorktreeButStillRejectsItsOwnHookChange(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	shared := filepath.Join(dir, ".git", "hooks", "pre-push")
+	privateDir := filepath.Join(dir, "private-hooks")
+	if err := os.Mkdir(privateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	private := filepath.Join(privateDir, "pre-push")
+	for _, path := range []string{shared, private} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &run{
+		p: &Pipeline{Git: git.New("git")}, ctx: context.Background(), worktree: dir,
+		hooksPath: privateDir,
+	}
+	stamp, err := r.hookStamp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("#!/bin/sh\necho another-worktree\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.requireHookUnchanged(stamp); err != nil {
+		t.Fatalf("shared hook rewrite affected the run: %v", err)
+	}
+	cmd = exec.Command("git", "config", "core.hooksPath", "other-hooks")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", err, out)
+	}
+	if err := r.requireHookUnchanged(stamp); err == nil || !strings.Contains(err.Error(), "pre-push hook changed") {
+		t.Fatalf("configured hook path rewrite = %v, want safety refusal", err)
+	}
+	cmd = exec.Command("git", "config", "--unset", "core.hooksPath")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config --unset core.hooksPath: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(private, []byte("#!/bin/sh\necho bypass\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.requireHookUnchanged(stamp); err == nil || !strings.Contains(err.Error(), "pre-push hook changed") {
+		t.Fatalf("private hook rewrite = %v, want safety refusal", err)
 	}
 }
 

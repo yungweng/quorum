@@ -9,8 +9,10 @@ package envexec
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,9 @@ import (
 type Env struct {
 	Worktree string
 	Direnv   bool
+	// GitHooksPath keeps hook installers and agent-run git commands inside the
+	// worktree's private hook snapshot instead of the repository's shared hooks.
+	GitHooksPath string
 	// DirenvBin is the resolved direnv path. Empty falls back to a PATH lookup,
 	// which is wrong under launchd and right everywhere else.
 	DirenvBin string
@@ -38,15 +43,59 @@ type Cmd struct {
 // Run executes cmd in the worktree with the given timeout (0 disables it).
 func (e Env) Run(ctx context.Context, timeout time.Duration, c Cmd) error {
 	name, args := e.wrap(c.Name, c.Args)
+	env, err := commandEnv(e.GitHooksPath)
+	if err != nil {
+		return err
+	}
 	return proc.Run(ctx, timeout, proc.Spec{
 		Name:   name,
 		Args:   args,
 		Dir:    e.Worktree,
-		Env:    goCacheEnv(),
+		Env:    env,
 		Stdin:  c.Stdin,
 		Stdout: c.Stdout,
 		Stderr: c.Stderr,
 	})
+}
+
+func commandEnv(hooksPath string) ([]string, error) {
+	env := goCacheEnv()
+	if hooksPath == "" {
+		return env, nil
+	}
+	count := 0
+	if value, ok := envValue(env, "GIT_CONFIG_COUNT"); ok {
+		var err error
+		count, err = strconv.Atoi(value)
+		if err != nil || count < 0 {
+			return nil, fmt.Errorf("invalid GIT_CONFIG_COUNT %q", value)
+		}
+	}
+	env = setEnv(env, "GIT_CONFIG_COUNT", strconv.Itoa(count+1))
+	env = setEnv(env, fmt.Sprintf("GIT_CONFIG_KEY_%d", count), "core.hooksPath")
+	env = setEnv(env, fmt.Sprintf("GIT_CONFIG_VALUE_%d", count), hooksPath)
+	return env, nil
+}
+
+func envValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix), true
+		}
+	}
+	return "", false
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i := range env {
+		if strings.HasPrefix(env[i], prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 // goCacheEnv makes Go build outputs reusable across quorum's uniquely named
@@ -91,9 +140,14 @@ func (e Env) Allow(ctx context.Context) error {
 	if bin == "" {
 		bin = "direnv"
 	}
+	env, err := commandEnv(e.GitHooksPath)
+	if err != nil {
+		return err
+	}
 	return proc.Run(ctx, 2*time.Minute, proc.Spec{
 		Name: bin,
 		Args: []string{"allow"},
 		Dir:  e.Worktree,
+		Env:  env,
 	})
 }

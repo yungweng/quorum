@@ -30,14 +30,24 @@ type pushRejection struct {
 }
 
 func (e *pushRejection) Error() string {
+	if e.local {
+		return fmt.Sprintf("pre-push verification failed for %s at %s:\n%s", e.branch, e.sha, e.out)
+	}
 	return fmt.Sprintf("git push failed and origin/%s does not have %s:\n%s", e.branch, e.sha, e.out)
+}
+
+const golangCILockMessage = "parallel golangci-lint is running"
+
+func transientPrePushFailure(out string) bool {
+	return strings.Contains(out, golangCILockMessage)
 }
 
 // fixablePushRejection reports whether a rejected push looks like the
 // repository's own verification refusing the commits, which is the one push
 // failure a fix session can repair.
 func fixablePushRejection(rejected *pushRejection) bool {
-	return rejected != nil && strings.TrimSpace(rejected.hookOut) != "" && rejected.local
+	return rejected != nil && strings.TrimSpace(rejected.hookOut) != "" && rejected.local &&
+		!transientPrePushFailure(rejected.hookOut)
 }
 
 // hookConfigFiles are the files a fix session must not change to get a push
@@ -200,18 +210,22 @@ func (r *run) remoteHead() (string, error) {
 }
 
 func (r *run) hookStamp() (string, error) {
-	path, err := r.p.Git.PrePushPath(r.ctx, r.worktree)
+	sourcePath, err := r.p.Git.PrePushPath(r.ctx, r.worktree)
+	if err != nil {
+		return "", err
+	}
+	path, err := r.p.Git.WithHooksPath(r.hooksPath).PrePushPath(r.ctx, r.worktree)
 	if err != nil {
 		return "", err
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return path + ":missing", nil
+		return sourcePath + "|" + path + ":missing", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s:%x", path, sha256.Sum256(data)), nil
+	return fmt.Sprintf("%s|%s:%x", sourcePath, path, sha256.Sum256(data)), nil
 }
 
 func (r *run) requireHookUnchanged(expected string) error {

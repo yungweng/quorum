@@ -22,7 +22,8 @@ import (
 
 // G runs git from a resolved binary.
 type G struct {
-	Bin string
+	Bin       string
+	hooksPath string
 }
 
 func New(bin string) G {
@@ -32,8 +33,23 @@ func New(bin string) G {
 	return G{Bin: bin}
 }
 
+// WithHooksPath returns a copy whose git commands use hooksPath without
+// changing repository configuration on disk.
+func (g G) WithHooksPath(hooksPath string) G {
+	g.hooksPath = hooksPath
+	return g
+}
+
+func (g G) args(args []string) []string {
+	if g.hooksPath == "" {
+		return args
+	}
+	return append([]string{"-c", "core.hooksPath=" + g.hooksPath}, args...)
+}
+
 // run executes git in dir and returns trimmed stdout.
 func (g G) run(ctx context.Context, dir string, args ...string) (string, error) {
+	args = g.args(args)
 	cmd := exec.CommandContext(ctx, g.Bin, args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
@@ -52,6 +68,7 @@ func (g G) run(ctx context.Context, dir string, args ...string) (string, error) 
 // runCombined is for commands whose output matters even when they fail, such as
 // a push whose pre-push hook printed the reason.
 func (g G) runCombined(ctx context.Context, dir string, args ...string) (string, error) {
+	args = g.args(args)
 	cmd := exec.CommandContext(ctx, g.Bin, args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -171,13 +188,13 @@ func (g G) LogOneline(ctx context.Context, dir, revRange string) string {
 	return out
 }
 
-// Push pushes HEAD to a branch on the remote and returns the combined output.
+// Push pushes a SHA that PrePush already verified to a branch on the remote.
 //
-// The detached worktree is why the refspec is explicit: a bare `git push` fails
-// on a detached HEAD, which is also why the Codex fix sessions are told the
-// exact command in their standing rules.
-func (g G) Push(ctx context.Context, dir, remote, branch string) (string, error) {
-	return g.runCombined(ctx, dir, "push", "-q", remote, "HEAD:refs/heads/"+branch)
+// Pinning the source SHA closes the gap between verification and transport: a
+// hook cannot move HEAD and make the command push code it did not verify. The
+// hook already ran through PrePush, so the transport must not run it again.
+func (g G) Push(ctx context.Context, dir, remote, branch, sha string) (string, error) {
+	return g.runCombined(ctx, dir, "push", "-q", "--no-verify", remote, sha+":refs/heads/"+branch)
 }
 
 // PrePush runs the configured pre-push hook against HEAD.  A failed push by

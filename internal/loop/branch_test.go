@@ -22,7 +22,7 @@ case "$*" in
   "rev-parse HEAD") echo "head-sha" ;;
 	"remote get-url --push origin") echo "example.invalid:acme/api.git" ;;
 	"hook run --ignore-missing"*) ;;
-  "push -q origin HEAD:refs/heads/feature/crumb-tray") ;;
+	"push -q --no-verify origin head-sha:refs/heads/feature/crumb-tray") ;;
   "ls-remote origin refs/heads/feature/crumb-tray") printf 'head-sha\trefs/heads/feature/crumb-tray\n' ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac

@@ -70,7 +70,13 @@ const (
 	// noChecksTimeout is how long to keep asking before accepting that a PR
 	// genuinely has no CI.
 	noChecksTimeout = 180 * time.Second
-	runRetention    = 7 * 24 * time.Hour
+	// A golangci-lint process uses a shared cache lock and rejects concurrent
+	// runners. The hook itself can be expensive, so a small bounded retry is
+	// enough to outlive the competing run without handing a transient lock to a
+	// fix session as though it were a code defect.
+	prePushLockAttempts   = 3
+	prePushLockRetryDelay = 5 * time.Second
+	runRetention          = 7 * 24 * time.Hour
 )
 
 // Options configure one pipeline run.
@@ -262,6 +268,7 @@ type run struct {
 	headSHA      string
 	root         string
 	worktree     string
+	hooksPath    string
 	logDir       string
 	msgDir       string
 	releaseClaim func()
@@ -466,8 +473,15 @@ func (r *run) prepare() error {
 	if err := r.p.Git.WorktreeAdd(r.ctx, r.o.RepoRoot, r.worktree, headSHA); err != nil {
 		return err
 	}
+	r.hooksPath, err = r.p.Git.IsolateHooks(r.ctx, r.worktree)
+	if err != nil {
+		return fmt.Errorf("isolate worktree hooks: %w", err)
+	}
 
-	r.env = envexec.Env{Worktree: r.worktree, Direnv: r.o.UseDirenv, DirenvBin: r.o.DirenvBin}
+	r.env = envexec.Env{
+		Worktree: r.worktree, Direnv: r.o.UseDirenv, DirenvBin: r.o.DirenvBin,
+		GitHooksPath: r.hooksPath,
+	}
 	fixer, err := engine.NewFixer(r.o.Engine, engine.FixerOptions{
 		Bin: r.o.engineBin(r.o.Engine), Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
 	})
@@ -990,6 +1004,7 @@ func dirtyStatusPreview(status string) string {
 // completed checks. A red new commit would then read as green, so nothing is
 // trusted until GitHub reports the pushed sha as the PR head.
 func (r *run) pushBranch() error {
+	g := r.p.Git.WithHooksPath(r.hooksPath)
 	pushedSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 	if err != nil {
 		return err
@@ -998,16 +1013,21 @@ func (r *run) pushBranch() error {
 	if err != nil {
 		return err
 	}
-	prePushOut, prePushErr := r.p.Git.PrePush(r.ctx, r.worktree, "origin", r.branch, pushedSHA, remoteBefore)
+	prePushOut, prePushErr := r.prePushWithRetry(g, "origin", r.branch, pushedSHA, remoteBefore,
+		prePushLockAttempts, prePushLockRetryDelay)
 	if prePushErr != nil {
 		logPath := filepath.Join(r.logDir, "push-last.log")
 		os.WriteFile(logPath, []byte(prePushOut), 0o644)
+		var contention *prePushContention
+		if errors.As(prePushErr, &contention) {
+			return prePushErr
+		}
 		return &pushRejection{branch: r.branch, sha: pushedSHA, out: prePushOut, hookOut: prePushOut, local: true}
 	}
-	// Pre-push hooks spam the terminal and can fail spuriously when they race a
-	// push the session already made, so their output only surfaces when the
-	// push failed and the sha never arrived.
-	out, pushErr := r.p.Git.Push(r.ctx, r.worktree, "origin", r.branch)
+	// PrePush verified this exact SHA. Do not run the same hook again during the
+	// transport: concurrent linters can make an already-passing check fail on
+	// the second run.
+	out, pushErr := g.Push(r.ctx, r.worktree, "origin", r.branch, pushedSHA)
 	logPath := filepath.Join(r.logDir, "push-last.log")
 	os.WriteFile(logPath, []byte(out), 0o644)
 
@@ -1035,6 +1055,38 @@ func (r *run) pushBranch() error {
 		case <-time.After(5 * time.Second):
 		case <-r.ctx.Done():
 			return r.ctx.Err()
+		}
+	}
+}
+
+type prePushContention struct {
+	branch   string
+	attempts int
+}
+
+func (e *prePushContention) Error() string {
+	return fmt.Sprintf("pre-push verification for %s could not start after %d attempts because another golangci-lint process is running",
+		e.branch, e.attempts)
+}
+
+func (r *run) prePushWithRetry(g git.G, remote, branch, sha, remoteSHA string, attempts int, delay time.Duration) (string, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 1; ; attempt++ {
+		out, err := g.PrePush(r.ctx, r.worktree, remote, branch, sha, remoteSHA)
+		if err == nil || !transientPrePushFailure(out) {
+			return out, err
+		}
+		if attempt == attempts {
+			return out, &prePushContention{branch: branch, attempts: attempts}
+		}
+		r.rep.Info(fmt.Sprintf("pre-push verification is waiting for another golangci-lint process; retrying %d/%d in %s...",
+			attempt+1, attempts, delay))
+		select {
+		case <-time.After(delay):
+		case <-r.ctx.Done():
+			return out, r.ctx.Err()
 		}
 	}
 }
