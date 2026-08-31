@@ -294,10 +294,14 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("isolate worktree hooks: %w", err)
 	}
+	configPath, err := r.Git.IsolateConfig(ctx, run.worktree)
+	if err != nil {
+		return nil, fmt.Errorf("isolate worktree config: %w", err)
+	}
 
 	env := envexec.Env{
 		Worktree: run.worktree, Direnv: o.UseDirenv, DirenvBin: o.DirenvBin,
-		GitHooksPath: hooksPath,
+		GitConfig: configPath, GitHooksPath: hooksPath,
 	}
 	if o.UseDirenv {
 		if err := r.allowDirenv(ctx, o, run, baseRef, env, rep); err != nil {

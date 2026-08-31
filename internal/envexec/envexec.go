@@ -23,6 +23,9 @@ import (
 type Env struct {
 	Worktree string
 	Direnv   bool
+	// GitConfig keeps agent-run `git config` writes out of the repository's
+	// shared config. Other git commands ignore GIT_CONFIG and behave normally.
+	GitConfig string
 	// GitHooksPath keeps hook installers and agent-run git commands inside the
 	// worktree's private hook snapshot instead of the repository's shared hooks.
 	GitHooksPath string
@@ -43,7 +46,7 @@ type Cmd struct {
 // Run executes cmd in the worktree with the given timeout (0 disables it).
 func (e Env) Run(ctx context.Context, timeout time.Duration, c Cmd) error {
 	name, args := e.wrap(c.Name, c.Args)
-	env, err := commandEnv(e.GitHooksPath)
+	env, err := commandEnv(e.GitConfig, e.GitHooksPath)
 	if err != nil {
 		return err
 	}
@@ -58,8 +61,11 @@ func (e Env) Run(ctx context.Context, timeout time.Duration, c Cmd) error {
 	})
 }
 
-func commandEnv(hooksPath string) ([]string, error) {
+func commandEnv(config, hooksPath string) ([]string, error) {
 	env := goCacheEnv()
+	if config != "" {
+		env = setEnv(env, "GIT_CONFIG", config)
+	}
 	if hooksPath == "" {
 		return env, nil
 	}
@@ -140,7 +146,7 @@ func (e Env) Allow(ctx context.Context) error {
 	if bin == "" {
 		bin = "direnv"
 	}
-	env, err := commandEnv(e.GitHooksPath)
+	env, err := commandEnv(e.GitConfig, e.GitHooksPath)
 	if err != nil {
 		return err
 	}

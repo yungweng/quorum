@@ -10,6 +10,69 @@ import (
 	"path/filepath"
 )
 
+// IsolateConfig copies the repository config into the linked worktree's
+// private Git directory. GIT_CONFIG can point at the copy so agent-run
+// `git config` commands cannot write to the repository's shared config.
+func (g G) IsolateConfig(ctx context.Context, worktree string) (string, error) {
+	plain := G{Bin: g.Bin}
+	gitDir, err := plain.run(ctx, worktree, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+	if err != nil {
+		return "", err
+	}
+	commonDir, err := plain.run(ctx, worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(gitDir, "quorum-config")
+	if ready, err := privateConfigReady(target); ready || err != nil {
+		return target, err
+	}
+	data, err := os.ReadFile(filepath.Join(commonDir, "config"))
+	if err != nil {
+		return "", err
+	}
+	if err := publishConfig(data, gitDir, target); err != nil {
+		if ready, statErr := privateConfigReady(target); ready && statErr == nil {
+			return target, nil
+		}
+		return "", err
+	}
+	return target, nil
+}
+
+func publishConfig(data []byte, gitDir, target string) error {
+	tmp, err := os.CreateTemp(gitDir, ".quorum-config-")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		return fmt.Errorf("publish isolated config: %w", err)
+	}
+	return nil
+}
+
+func privateConfigReady(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("isolated config is not a regular file: %s", path)
+	}
+	return true, nil
+}
+
 // IsolateHooks snapshots the worktree's configured hooks into its private Git
 // directory. Linked worktrees otherwise share hooks, so one environment's hook
 // installer can rewrite another run's verification while it is being checked.

@@ -260,6 +260,44 @@ func TestIsolateHooksSnapshotsAWorktreeAwayFromSharedHookChanges(t *testing.T) {
 	}
 }
 
+func TestIsolateConfigCopiesTheSharedConfigOnce(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	dir := conflictRepo(t)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd := exec.Command("git", "worktree", "add", "--quiet", "--detach", worktree, "HEAD")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	g := New("git")
+	isolated, err := g.IsolateConfig(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(isolated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "config", "core.hooksPath", "/dev/null")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v\n%s", err, out)
+	}
+	after, err := os.ReadFile(isolated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("shared config change reached the isolated copy")
+	}
+	resumed, err := g.IsolateConfig(context.Background(), worktree)
+	if err != nil || resumed != isolated {
+		t.Fatalf("resumed config = %q, %v; want %q", resumed, err, isolated)
+	}
+}
+
 func TestIsolateHooksCopiesConfiguredRelativePathsAndInternalSymlinks(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")

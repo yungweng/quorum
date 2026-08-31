@@ -477,10 +477,14 @@ func (r *run) prepare() error {
 	if err != nil {
 		return fmt.Errorf("isolate worktree hooks: %w", err)
 	}
+	configPath, err := r.p.Git.IsolateConfig(r.ctx, r.worktree)
+	if err != nil {
+		return fmt.Errorf("isolate worktree config: %w", err)
+	}
 
 	r.env = envexec.Env{
 		Worktree: r.worktree, Direnv: r.o.UseDirenv, DirenvBin: r.o.DirenvBin,
-		GitHooksPath: r.hooksPath,
+		GitConfig: configPath, GitHooksPath: r.hooksPath,
 	}
 	fixer, err := engine.NewFixer(r.o.Engine, engine.FixerOptions{
 		Bin: r.o.engineBin(r.o.Engine), Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,

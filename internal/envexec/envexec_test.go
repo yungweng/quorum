@@ -93,3 +93,80 @@ exec "$@"
 		t.Fatalf("direnv allow did not receive scoped git config: %v", err)
 	}
 }
+
+func TestRunKeepsGitConfigWritesOutOfTheSharedWorktreeConfig(t *testing.T) {
+	repo, worktree := linkedWorktree(t)
+	gitDirCmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+	gitDirCmd.Dir = worktree
+	gitDir, err := gitDirCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateConfig := filepath.Join(string(bytes.TrimSpace(gitDir)), "quorum-config")
+	sharedConfig, err := os.ReadFile(filepath.Join(repo, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privateConfig, sharedConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = (Env{
+		Worktree: worktree, GitConfig: privateConfig,
+		GitHooksPath: filepath.Join(worktree, "hooks"),
+	}).Run(context.Background(), 0, Cmd{
+		Name: "/bin/sh", Args: []string{"-c", "git config --local core.hooksPath /dev/null"},
+	})
+	if err == nil {
+		t.Fatal("git config --local succeeded; want the shared scope blocked")
+	}
+	cmd := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err == nil || len(out) != 0 {
+		t.Fatalf("shared core.hooksPath = %q, %v; want unset", out, err)
+	}
+	err = (Env{Worktree: worktree, GitConfig: privateConfig}).Run(context.Background(), 0, Cmd{
+		Name: "/bin/sh", Args: []string{"-c", "git config core.hooksPath /private/hooks"},
+	})
+	if err != nil {
+		t.Fatalf("unscoped private git config: %v", err)
+	}
+	cmd = exec.Command("git", "config", "--file", privateConfig, "--get", "core.hooksPath")
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "/private/hooks\n" {
+		t.Fatalf("private core.hooksPath = %q, %v; want /private/hooks", out, err)
+	}
+}
+
+func linkedWorktree(t *testing.T) (string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for key, value := range map[string]string{
+		"user.email": "example@example.invalid",
+		"user.name":  "Example User",
+	} {
+		cmd = exec.Command("git", "config", key, value)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git config %s: %v\n%s", key, err, out)
+		}
+	}
+	cmd = exec.Command("git", "commit", "--quiet", "--allow-empty", "-m", "Initial fixture")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd = exec.Command("git", "worktree", "add", "--quiet", "--detach", worktree)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	return repo, worktree
+}
