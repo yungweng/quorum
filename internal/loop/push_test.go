@@ -73,9 +73,19 @@ esac
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := &run{ctx: context.Background(), rep: NopReporter{}, worktree: dir}
+	rep := &activityReporter{}
+	r := &run{ctx: context.Background(), rep: rep, worktree: dir}
 	if out, err := r.prePushWithRetry(git.New(bin), "origin", "feature/crumb-tray", "head-sha", "base-sha", 3, 0); err != nil {
 		t.Fatalf("retrying transient pre-push failure: %v\n%s", err, out)
+	}
+	wantActivities := []string{
+		"running pre-push verification",
+		"waiting to retry pre-push verification",
+		"running pre-push verification",
+	}
+	if got := strings.Join(rep.started, "|"); got != strings.Join(wantActivities, "|") || rep.done != len(wantActivities) {
+		t.Fatalf("push activities = %v, done %d; want %v, done %d",
+			rep.started, rep.done, wantActivities, len(wantActivities))
 	}
 	data, err := os.ReadFile(calls)
 	if err != nil {

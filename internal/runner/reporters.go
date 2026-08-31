@@ -121,6 +121,16 @@ func (l *loopLogReporter) StepEnd(label string, m engine.Model, elapsed time.Dur
 	l.printf("%s: %s on %s in %s", label, status, m.Tag(), elapsed.Round(time.Second))
 }
 
+// Activity ticks are terminal animation. A detached run records only the
+// transition, so its log says what blocked without growing once a second.
+func (l *loopLogReporter) Activity(label string, elapsed time.Duration) {
+	if elapsed == 0 {
+		l.printf("%s: running", label)
+	}
+}
+
+func (l *loopLogReporter) ActivityDone() {}
+
 func (l *loopLogReporter) RoundResult(round int, f review.Findings, clean bool) {
 	verdict := "findings remain"
 	if clean {

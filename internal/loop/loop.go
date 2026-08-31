@@ -902,16 +902,22 @@ func (r *run) codexCall(tag, prompt string) error {
 
 	r.rep.StepStart(stepLabel(tag), r.fixModel)
 	started := time.Now()
-
-	if r.sessionID == "" {
-		var id engine.SessionRef
-		id, err = r.fixer.Exec(r.ctx, r.env, r.o.FixTimeout,
-			firstPrompt(r.rules, r.prCtx, prompt), msgPath, out)
-		if err == nil {
-			r.sessionID = id
+	var id engine.SessionRef
+	err = await(r.ctx, progressInterval, func(elapsed time.Duration) {
+		if elapsed > 0 {
+			r.rep.StepTick(stepLabel(tag), r.fixModel, elapsed)
 		}
-	} else {
-		err = r.fixer.Resume(r.ctx, r.env, r.o.FixTimeout, r.sessionID, prompt, msgPath, out)
+	}, func() error {
+		if r.sessionID == "" {
+			var callErr error
+			id, callErr = r.fixer.Exec(r.ctx, r.env, r.o.FixTimeout,
+				firstPrompt(r.rules, r.prCtx, prompt), msgPath, out)
+			return callErr
+		}
+		return r.fixer.Resume(r.ctx, r.env, r.o.FixTimeout, r.sessionID, prompt, msgPath, out)
+	})
+	if err == nil && id != "" {
+		r.sessionID = id
 	}
 	r.rep.StepEnd(stepLabel(tag), r.fixModel, time.Since(started), err == nil)
 
@@ -1004,12 +1010,16 @@ func dirtyStatusPreview(status string) string {
 // trusted until GitHub reports the pushed sha as the PR head.
 func (r *run) pushBranch() error {
 	g := r.p.Git.WithHooksPath(r.hooksPath)
-	pushedSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
-	if err != nil {
+	var pushedSHA, remoteBefore string
+	if err := r.waitActivity("checking the remote head before push", func() error {
+		var err error
+		pushedSHA, err = r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+		if err != nil {
+			return err
+		}
+		remoteBefore, err = r.remoteHead()
 		return err
-	}
-	remoteBefore, err := r.remoteHead()
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 	prePushOut, prePushErr := r.prePushWithRetry(g, "origin", r.branch, pushedSHA, remoteBefore,
@@ -1026,40 +1036,47 @@ func (r *run) pushBranch() error {
 	// PrePush verified this exact SHA. Do not run the same hook again during the
 	// transport: concurrent linters can make an already-passing check fail on
 	// the second run.
-	out, pushErr := g.Push(r.ctx, r.worktree, "origin", r.branch, pushedSHA)
+	var out string
+	pushErr := r.waitActivity("pushing "+r.branch, func() error {
+		var err error
+		out, err = g.Push(r.ctx, r.worktree, "origin", r.branch, pushedSHA)
+		return err
+	})
 	logPath := filepath.Join(r.logDir, "push-last.log")
 	os.WriteFile(logPath, []byte(out), 0o644)
 
 	deadline := time.Now().Add(headSettleTimeout)
-	announced := false
-	for {
-		var remote string
-		if r.target.BranchOnly {
-			remote, _ = r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
-		} else {
-			remote, _ = r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
-		}
-		if pushErr != nil {
-			return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
-		}
-		if remote == pushedSHA {
-			r.headSHA = pushedSHA
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
-				r.branch, remote, pushedSHA, headSettleTimeout)
-		}
-		if !announced {
-			r.rep.Info("waiting for GitHub to register the pushed head")
-			announced = true
-		}
-		select {
-		case <-time.After(5 * time.Second):
-		case <-r.ctx.Done():
-			return r.ctx.Err()
-		}
+	remote, _ := r.remoteHead()
+	if pushErr != nil {
+		return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
 	}
+	if remote == pushedSHA {
+		r.headSHA = pushedSHA
+		return nil
+	}
+	r.rep.Info("waiting for GitHub to register the pushed head")
+	return r.waitForPushedHead(pushedSHA, deadline)
+}
+
+func (r *run) waitForPushedHead(pushedSHA string, deadline time.Time) error {
+	return r.waitActivity("waiting for GitHub to register the pushed head", func() error {
+		for {
+			select {
+			case <-time.After(5 * time.Second):
+			case <-r.ctx.Done():
+				return r.ctx.Err()
+			}
+			remote, _ := r.remoteHead()
+			if remote == pushedSHA {
+				r.headSHA = pushedSHA
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
+					r.branch, remote, pushedSHA, headSettleTimeout)
+			}
+		}
+	})
 }
 
 type prePushContention struct {
@@ -1077,7 +1094,12 @@ func (r *run) prePushWithRetry(g git.G, remote, branch, sha, remoteSHA string, a
 		attempts = 1
 	}
 	for attempt := 1; ; attempt++ {
-		out, err := g.PrePush(r.ctx, r.worktree, remote, branch, sha, remoteSHA)
+		var out string
+		err := r.waitActivity("running pre-push verification", func() error {
+			var hookErr error
+			out, hookErr = g.PrePush(r.ctx, r.worktree, remote, branch, sha, remoteSHA)
+			return hookErr
+		})
 		if err == nil || !transientPrePushFailure(out) {
 			return out, err
 		}
@@ -1086,10 +1108,15 @@ func (r *run) prePushWithRetry(g git.G, remote, branch, sha, remoteSHA string, a
 		}
 		r.rep.Info(fmt.Sprintf("pre-push verification is waiting for another golangci-lint process; retrying %d/%d in %s...",
 			attempt+1, attempts, delay))
-		select {
-		case <-time.After(delay):
-		case <-r.ctx.Done():
-			return out, r.ctx.Err()
+		if err := r.waitActivity("waiting to retry pre-push verification", func() error {
+			select {
+			case <-time.After(delay):
+				return nil
+			case <-r.ctx.Done():
+				return r.ctx.Err()
+			}
+		}); err != nil {
+			return out, err
 		}
 	}
 }

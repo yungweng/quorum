@@ -200,8 +200,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	// A finished run is the only thing that grows the cache, so the next
 	// collector has to measure instead of trusting a size from before it.
 	defer a.forgetCacheSize()
+	rep.Activity("preparing run", 0)
 	res, err := pipe.Run(ctx, o)
-	rep.status.Clear()
+	rep.ActivityDone()
 	mergeStatus := ""
 	var mergeErr error
 	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMerge, a.cfg.Post, res.LastFindings) {
@@ -216,7 +217,9 @@ func (a *app) cmdBabysit(argv []string) int {
 			// run for the same reason, less legibly.
 			rep.Info("auto-merge: skipped, the suggestion round pushed commits the final review has not seen")
 		} else {
+			rep.Activity("finishing auto-merge", 0)
 			mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
+			rep.ActivityDone()
 			mergeStatus, mergeErr = mergeResult.Status, finishErr
 			if mergeErr == nil && mergeStatus == automerge.ApprovalRequired {
 				a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
@@ -448,6 +451,11 @@ type loopTermReporter struct {
 		elapsed time.Duration
 	}
 	hasPending bool
+	active     struct {
+		label   string
+		elapsed time.Duration
+		shown   bool
+	}
 }
 
 // reviewRoundLabel matches exactly the step labels that a RoundResult follows.
@@ -480,7 +488,7 @@ func (l *loopTermReporter) stepLine(sym, label string, meta ...string) string {
 // marker the session wrote; the rest is the session's own text, indented
 // under it so it reads as one item of the timeline rather than a new frame.
 func (l *loopTermReporter) callout(text string) {
-	l.status.Clear()
+	l.clearActive()
 	l.flushPending()
 	head, body, _ := strings.Cut(strings.TrimSpace(text), "\n")
 	head = strings.TrimSuffix(strings.TrimSpace(head), ":")
@@ -494,6 +502,7 @@ func (l *loopTermReporter) callout(text string) {
 }
 
 func (l *loopTermReporter) Header(h loop.Header) {
+	l.clearActive()
 	o := l.out
 	o.Rule()
 	switch {
@@ -551,7 +560,7 @@ func (l *loopTermReporter) Header(h loop.Header) {
 }
 
 func (l *loopTermReporter) Step(title string) {
-	l.status.Clear()
+	l.clearActive()
 	l.flushPending()
 	l.out.Step(title)
 }
@@ -559,13 +568,13 @@ func (l *loopTermReporter) Step(title string) {
 func (l *loopTermReporter) StepStart(label string, m engine.Model) {
 	if !l.out.Color {
 		l.out.Printf("running: %s · %s\n", label, m.Tag())
+		return
 	}
+	l.setActive(label+" · "+m.Tag(), 0)
 }
 
 func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.Duration) {
-	if !l.verbose {
-		l.status.Spin(label+" · "+m.Tag(), elapsed)
-	}
+	l.setActive(label+" · "+m.Tag(), elapsed)
 }
 
 // StepEnd names the model between the step and its duration. A run has a review
@@ -576,7 +585,7 @@ func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.D
 // not read as the run counting twice. A failed step stays on the timeline in
 // red, so the summary's error has a line to point at.
 func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
-	l.status.Clear()
+	l.clearActive()
 	o := l.out
 	dur := ui.Duration(elapsed)
 	if !ok {
@@ -595,8 +604,48 @@ func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Du
 	o.Printf("%s\n", l.stepLine(o.Green(o.SymOK()), label, m.Tag(), dur))
 }
 
+func (l *loopTermReporter) Activity(label string, elapsed time.Duration) {
+	if !l.out.Color {
+		if elapsed == 0 {
+			l.out.Printf("running: %s\n", label)
+		}
+		return
+	}
+	l.setActive(label, elapsed)
+}
+
+func (l *loopTermReporter) ActivityDone() { l.clearActive() }
+
+func (l *loopTermReporter) setActive(label string, elapsed time.Duration) {
+	if l.verbose {
+		return
+	}
+	l.active.label = label
+	l.active.elapsed = elapsed
+	l.active.shown = true
+	l.liveStatus().Spin(label, elapsed)
+}
+
+func (l *loopTermReporter) clearActive() {
+	l.active.shown = false
+	l.liveStatus().Clear()
+}
+
+func (l *loopTermReporter) redrawActive() {
+	if l.active.shown {
+		l.liveStatus().Spin(l.active.label, l.active.elapsed)
+	}
+}
+
+func (l *loopTermReporter) liveStatus() *ui.Status {
+	if l.status == nil {
+		l.status = l.out.Status()
+	}
+	return l.status
+}
+
 func (l *loopTermReporter) RoundResult(round int, f review.Findings, clean bool) {
-	l.status.Clear()
+	l.clearActive()
 	o := l.out
 	verdict := f.Summary()
 	if clean {
@@ -622,7 +671,7 @@ func (l *loopTermReporter) CIWait(pr int, elapsed time.Duration) {
 		l.flushPending()
 	}
 	if l.out.Color {
-		l.status.Spin(fmt.Sprintf("waiting for CI on PR #%d", pr), elapsed)
+		l.setActive(fmt.Sprintf("waiting for CI on PR #%d", pr), elapsed)
 		return
 	}
 	if elapsed == 0 {
@@ -631,34 +680,36 @@ func (l *loopTermReporter) CIWait(pr int, elapsed time.Duration) {
 }
 
 func (l *loopTermReporter) CIGreen(elapsed time.Duration) {
-	l.status.Clear()
+	l.clearActive()
 	o := l.out
 	o.Printf("%s\n", l.stepLine(o.Green(o.SymOK()), o.Green("CI green"), ui.Duration(elapsed)))
 }
 
 func (l *loopTermReporter) CIRed(attempt, max int) {
-	l.status.Clear()
+	l.clearActive()
 	o := l.out
 	o.Printf("%s\n", l.stepLine(o.Red(o.SymFail()), o.Red("CI red"), fmt.Sprintf("fix attempt %d/%d", attempt, max)))
 }
 
 func (l *loopTermReporter) Info(s string) {
-	l.status.Clear()
+	l.liveStatus().Clear()
 	l.flushPending()
 	l.out.Printf("  %s\n", l.out.Dim(s))
+	l.redrawActive()
 }
 
 func (l *loopTermReporter) Warn(s string) {
-	l.status.Clear()
+	l.liveStatus().Clear()
 	l.flushPending()
 	l.out.Printf("%s\n", l.out.Yellow(l.out.SymWarn()+" "+s))
+	l.redrawActive()
 }
 
 func (l *loopTermReporter) Questions(text string) { l.callout(text) }
 func (l *loopTermReporter) Dispute(text string)   { l.callout(text) }
 
 func (l *loopTermReporter) EnvrcChanged(diff string) {
-	l.status.Clear()
+	l.clearActive()
 	l.out.Printf("%s\n", l.out.Yellow(l.out.SymWarn()+" A .envrc file changed inside the worktree"))
 	for _, line := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
 		l.out.Printf("    %s\n", line)
@@ -666,7 +717,7 @@ func (l *loopTermReporter) EnvrcChanged(diff string) {
 }
 
 func (l *loopTermReporter) Prompt(text string) {
-	l.status.Clear()
+	l.clearActive()
 	fmt.Println(text)
 }
 
@@ -682,6 +733,7 @@ func (l *loopTermReporter) Notify(title, body string) {
 // says why, so nothing below it has to be read to know whether to act.
 func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus string, mergeErr error) {
 	o := l.out
+	l.clearActive()
 	l.flushPending()
 	o.Printf("\n")
 	o.Rule()

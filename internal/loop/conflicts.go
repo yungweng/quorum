@@ -19,11 +19,18 @@ func (r *run) ensureMergeable() error {
 		return nil
 	}
 	base := r.pr.BaseRefName
-	if err := r.p.Git.Fetch(r.ctx, r.o.RepoRoot, "origin",
-		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", base, base)); err != nil {
+	if err := r.waitActivity("fetching "+base+" for the conflict check", func() error {
+		return r.p.Git.Fetch(r.ctx, r.o.RepoRoot, "origin",
+			fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", base, base))
+	}); err != nil {
 		return err
 	}
-	conflicted, err := r.p.Git.MergeConflicts(r.ctx, r.worktree, "origin/"+base, "HEAD")
+	var conflicted bool
+	err := r.waitActivity("checking merge conflicts with "+base, func() error {
+		var checkErr error
+		conflicted, checkErr = r.p.Git.MergeConflicts(r.ctx, r.worktree, "origin/"+base, "HEAD")
+		return checkErr
+	})
 	if err != nil {
 		// An old git without merge-tree --write-tree cannot answer. That is a
 		// degraded run, not a broken one; CI and the merge still guard the end.

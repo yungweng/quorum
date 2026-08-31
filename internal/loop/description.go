@@ -57,9 +57,15 @@ func (r *run) finishPRDescription(res *Result) error {
 		logFile.Close()
 		return err
 	}
-	err = safe.DescribePR(r.ctx, r.env, finalDescriptionTimeout,
-		finalDescriptionPrompt(r.pr.Number, r.pr.Title, r.pr.BaseRefName),
-		bodyPath, strings.NewReader(r.pr.Body), logFile)
+	err = await(r.ctx, progressInterval, func(elapsed time.Duration) {
+		if elapsed > 0 {
+			r.rep.StepTick(label, r.reviewModel, elapsed)
+		}
+	}, func() error {
+		return safe.DescribePR(r.ctx, r.env, finalDescriptionTimeout,
+			finalDescriptionPrompt(r.pr.Number, r.pr.Title, r.pr.BaseRefName),
+			bodyPath, strings.NewReader(r.pr.Body), logFile)
+	})
 	logFile.Close()
 	if err != nil {
 		return fmt.Errorf("generating final PR description: %w; see %s", err, logPath)

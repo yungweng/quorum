@@ -53,7 +53,7 @@ func (r *run) ensureTestsGreen() error {
 		logPath := filepath.Join(r.logDir, fmt.Sprintf("tests-%d.log", r.testRuns))
 		r.enter(PhaseTests)
 		r.rep.Step("Tests: " + r.o.TestCmd)
-		err := r.runTestCmd(logPath)
+		err := r.waitActivity("running local tests", func() error { return r.runTestCmd(logPath) })
 		if cleanErr := r.requireCleanWorktree(fmt.Sprintf("tests-%d", r.testRuns)); cleanErr != nil {
 			return cleanErr
 		}

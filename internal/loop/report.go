@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -57,6 +58,10 @@ type Reporter interface {
 	StepStart(label string, m engine.Model)
 	StepTick(label string, m engine.Model, elapsed time.Duration)
 	StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool)
+	// Activity reports blocking work that does not run on a model. The first
+	// call carries elapsed zero; later calls update the same transient line.
+	Activity(label string, elapsed time.Duration)
+	ActivityDone()
 	RoundResult(round int, f review.Findings, clean bool)
 	// CIWait is called once when a CI wait starts, with elapsed zero, and then
 	// about once a second while it lasts. CIGreen carries how long that wait
@@ -84,6 +89,8 @@ func (NopReporter) Step(string)                                       {}
 func (NopReporter) StepStart(string, engine.Model)                    {}
 func (NopReporter) StepTick(string, engine.Model, time.Duration)      {}
 func (NopReporter) StepEnd(string, engine.Model, time.Duration, bool) {}
+func (NopReporter) Activity(string, time.Duration)                    {}
+func (NopReporter) ActivityDone()                                     {}
 func (NopReporter) RoundResult(int, review.Findings, bool)            {}
 func (NopReporter) CIWait(int, time.Duration)                         {}
 func (NopReporter) CIGreen(time.Duration)                             {}
@@ -95,6 +102,38 @@ func (NopReporter) Dispute(string)                                    {}
 func (NopReporter) EnvrcChanged(string)                               {}
 func (NopReporter) Prompt(string)                                     {}
 func (NopReporter) Notify(string, string)                             {}
+
+const progressInterval = time.Second
+
+func (r *run) waitActivity(label string, work func() error) error {
+	defer r.rep.ActivityDone()
+	return await(r.ctx, progressInterval, func(elapsed time.Duration) {
+		r.rep.Activity(label, elapsed)
+	}, work)
+}
+
+// await keeps progress moving while work blocks. Every production caller
+// passes work that observes ctx; after cancellation await joins it so a timed
+// out subprocess cannot keep touching the worktree after the pipeline returns.
+func await(ctx context.Context, interval time.Duration, tick func(time.Duration), work func() error) error {
+	started := time.Now()
+	tick(0)
+	done := make(chan error, 1)
+	go func() { done <- work() }()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ticker.C:
+			tick(time.Since(started))
+		case <-ctx.Done():
+			return <-done
+		}
+	}
+}
 
 func splitLines(s string) []string {
 	s = strings.TrimRight(s, "\n")

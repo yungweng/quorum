@@ -120,6 +120,8 @@ func (r *run) pushBranchWithFixes() error {
 		logPath := filepath.Join(r.logDir, "push-last.log")
 		r.rep.Warn(fmt.Sprintf("push rejected before it reached the remote; push fix %d/%d, see %s",
 			attempt, maxPushFixes, logPath))
+		number := r.pushFixTotal + 1
+		r.rep.Activity(fmt.Sprintf("preparing push fix %d", number), 0)
 
 		preSHA, shaErr := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 		if shaErr != nil {
@@ -133,7 +135,6 @@ func (r *run) pushBranchWithFixes() error {
 		if err != nil {
 			return err
 		}
-		number := r.pushFixTotal + 1
 		tag := fmt.Sprintf("push-fix-%d", number)
 		r.enter(PhaseFix)
 		if err := r.codexCall(tag, pushFixPrompt(r.branch, tailLines(logPath, pushLogTailLines))); err != nil {

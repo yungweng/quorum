@@ -183,6 +183,73 @@ func TestStepLinesNameTheModelThatRanTheStep(t *testing.T) {
 	}
 }
 
+// A model step can run for hours without writing normal output. Its live line
+// must exist before the first one-second tick, or the terminal says nothing is
+// happening for the whole synchronous fix call.
+func TestStepStartImmediatelyShowsWhatIsRunning(t *testing.T) {
+	var out bytes.Buffer
+	w := (&ui.Writer{Out: os.Stdout, Color: true, Width: 100}).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}
+
+	rep.StepStart("Fix round 4", model)
+
+	got := ui.StripANSI(out.String())
+	if !strings.Contains(got, "Fix round 4 · gpt-5.6-terra/low · 0s") {
+		t.Fatalf("StepStart left the terminal without a live step: %q", got)
+	}
+}
+
+// Permanent output temporarily borrows the status line. The active step has
+// to be redrawn in the same call rather than waiting for a later ticker.
+func TestWarningRestoresTheActiveStep(t *testing.T) {
+	var out bytes.Buffer
+	w := (&ui.Writer{Out: os.Stdout, Color: true, Width: 100}).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}
+
+	rep.StepStart("Push fix 1", model)
+	out.Reset()
+	rep.Warn("push rejected before it reached the remote")
+
+	got := ui.StripANSI(out.String())
+	if !strings.Contains(got, "push rejected before it reached the remote\n") ||
+		!strings.HasSuffix(got, "Push fix 1 · gpt-5.6-terra/low · 0s") {
+		t.Fatalf("warning did not restore the active step immediately: %q", got)
+	}
+}
+
+func TestActivityImmediatelyNamesNonModelWork(t *testing.T) {
+	var out bytes.Buffer
+	w := (&ui.Writer{Out: os.Stdout, Color: true, Width: 100}).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+
+	rep.Activity("running pre-push verification", 0)
+
+	got := ui.StripANSI(out.String())
+	if !strings.Contains(got, "running pre-push verification · 0s") {
+		t.Fatalf("Activity left the blocking operation invisible: %q", got)
+	}
+	rep.ActivityDone()
+	if rep.active.shown {
+		t.Fatal("finished activity remained live")
+	}
+}
+
+func TestActivityTicksDoNotFillPipedOutput(t *testing.T) {
+	var out bytes.Buffer
+	w := ui.New(os.Stdout).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+
+	rep.Activity("running pre-push verification", 0)
+	rep.Activity("running pre-push verification", time.Second)
+	rep.ActivityDone()
+
+	if got, want := out.String(), "running: running pre-push verification\n"; got != want {
+		t.Fatalf("plain activity output = %q, want %q", got, want)
+	}
+}
+
 // The fix model has its own row. It used to hang off "fix sessions", where a
 // user looking for a model setting had no reason to open it.
 func TestFixModelIsItsOwnSettingRow(t *testing.T) {
