@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/yungweng/quorum/internal/deps"
 )
 
 // maxPushFixes bounds how often a rejected push is handed to a fix session:
@@ -96,21 +98,46 @@ func touchesHookConfig(path string) bool {
 // Everything a repository checks only on push - type checks, unused exports,
 // linters the local test gate does not run - otherwise surfaces after every
 // review round is already spent, and the whole run is lost with nothing
-// pushed. The session repairs the finding and commits; the push itself stays
-// with the pipeline, so pushBranch's barrier remains the only thing that
-// decides whether the branch really arrived.
+// pushed. The session may repair code or install an ignored local dependency;
+// the push itself stays with the pipeline, so its hook rerun remains the only
+// thing that decides whether the branch really arrived.
 func (r *run) pushBranchWithFixes() error {
+	cache := deps.Cache{
+		Root: r.o.DepsDir, Repo: strings.ReplaceAll(r.o.Repo, "/", "-"), Worktree: r.worktree,
+	}
+	var dependencyLinks []string
+	if cache.Root != "" && cache.Repo != "" {
+		links, reused, err := cache.Link()
+		if err != nil {
+			r.rep.Warn(fmt.Sprintf("dependency cache lookup failed before push: %v", err))
+		}
+		dependencyLinks = append(dependencyLinks, links...)
+		for _, project := range reused {
+			r.rep.Info("deps:     reused " + project.String())
+		}
+	}
+	defer func() { deps.Unlink(dependencyLinks) }()
+
 	fixed := false
+	noCommitFix := 0
 	for attempt := 1; ; attempt++ {
 		err := r.pushBranch()
 		if err == nil {
+			r.capturePushDependencies(cache, &dependencyLinks)
 			if fixed {
 				return r.flushFixComments()
 			}
 			return nil
 		}
 		var rejected *pushRejection
-		if !errors.As(err, &rejected) || attempt > maxPushFixes || !fixablePushRejection(rejected) {
+		if !errors.As(err, &rejected) || !fixablePushRejection(rejected) {
+			return err
+		}
+		if noCommitFix != 0 {
+			return fmt.Errorf("%w: push fix %d produced no commit and pre-push verification still fails; a human is needed: %s",
+				ErrNoProgress, noCommitFix, r.targetReference())
+		}
+		if attempt > maxPushFixes {
 			return err
 		}
 		if r.ctx.Err() != nil {
@@ -164,8 +191,9 @@ func (r *run) pushBranchWithFixes() error {
 				}
 				return nil
 			}
-			return fmt.Errorf("%w: push fix %d produced no commit, a human is needed: %s",
-				ErrNoProgress, number, r.targetReference())
+			noCommitFix = number
+			r.rep.Info(fmt.Sprintf("push fix %d changed only local environment state; retrying pre-push verification", number))
+			continue
 		}
 		if err := r.requireHookConfigUntouched(preSHA); err != nil {
 			return err
@@ -176,7 +204,6 @@ func (r *run) pushBranchWithFixes() error {
 		if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
 			return err
 		}
-
 		r.pushFixTotal = number
 		fixed = true
 		label := fmt.Sprintf("Push fix %d", number)
@@ -196,6 +223,20 @@ func (r *run) pushBranchWithFixes() error {
 		if err := r.requireRemoteUnchanged(remoteSHA); err != nil {
 			return err
 		}
+	}
+}
+
+func (r *run) capturePushDependencies(cache deps.Cache, links *[]string) {
+	if cache.Root == "" || cache.Repo == "" {
+		return
+	}
+	captured, cached, err := cache.Capture()
+	if err != nil {
+		r.rep.Warn(fmt.Sprintf("publishing dependency trees after push repair failed: %v", err))
+	}
+	*links = append(*links, captured...)
+	for _, project := range cached {
+		r.rep.Info("deps:     cached " + project.String())
 	}
 }
 

@@ -312,7 +312,7 @@ from the tools they replace.
 2  aborted at a gate
 3  CI or the local test command still red after --max-ci-fixes attempts
 4  not converged after --max-iter rounds
-5  a fix round produced no changes although findings remain
+5  a fix step made no progress while its failure remains
 6  the review/fix history contains incompatible decisions
 7  merge conflicts with the base branch remain unresolved
 8  the engine refused: its usage limit is exhausted

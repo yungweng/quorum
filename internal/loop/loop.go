@@ -41,9 +41,9 @@ var (
 	ErrCIRed = errors.New("CI still red after the allowed fix attempts")
 	// ErrNotConverged is exit 4.
 	ErrNotConverged = errors.New("review did not converge")
-	// ErrNoProgress is exit 5: a fix round changed nothing while findings
-	// remain, and did not dispute them either.
-	ErrNoProgress = errors.New("fix round produced no changes although findings remain")
+	// ErrNoProgress is exit 5: a fix step changed nothing while its finding or
+	// failing verification remains.
+	ErrNoProgress = errors.New("fix step made no progress while its failure remains")
 	// ErrDiverged is exit 6: the bounded analysis found incompatible review/fix
 	// decisions and produced a report for manual resolution.
 	ErrDiverged = errors.New("review loop diverged")

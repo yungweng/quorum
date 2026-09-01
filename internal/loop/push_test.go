@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/git"
@@ -355,6 +356,102 @@ func TestPushBranchWithFixesStillRejectsNoProgressBeforeTheRemoteHasTheHead(t *t
 	err := r.pushBranchWithFixes()
 	if !errors.Is(err, ErrNoProgress) {
 		t.Fatalf("err = %v, want ErrNoProgress", err)
+	}
+}
+
+func writeDependencyFixture(t *testing.T, dir string, installed bool) {
+	t.Helper()
+	frontend := filepath.Join(dir, "frontend")
+	if err := os.MkdirAll(frontend, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(frontend, "pnpm-lock.yaml"), []byte("lock"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if installed {
+		tool := filepath.Join(frontend, "node_modules", "tool")
+		if err := os.MkdirAll(filepath.Dir(tool), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tool, []byte("ready"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func dependencyPushGit(t *testing.T, root, ready, pushed string) string {
+	t.Helper()
+	bin := filepath.Join(root, "git")
+	script := `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "rev-parse HEAD") echo "head-sha" ;;
+  "rev-parse --path-format=absolute") echo "$PWD/.githooks/pre-push" ;;
+  "remote get-url") echo "example.invalid:acme/api.git" ;;
+  "hook run") if [ -f "` + ready + `" ]; then exit 0; fi; echo "tool: command not found"; exit 1 ;;
+  "push -q") touch "` + pushed + `" ;;
+  "ls-remote origin") if [ -f "` + pushed + `" ]; then printf 'head-sha\trefs/heads/feature/crumb-tray\n'; else printf 'base-sha\trefs/heads/feature/crumb-tray\n'; fi ;;
+  "status --porcelain") ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+func dependencyPushRun(t *testing.T, cached bool) (*run, *fakeFixer) {
+	t.Helper()
+	root := t.TempDir()
+	depsRoot := filepath.Join(root, "deps")
+	dir := filepath.Join(root, "worktree")
+	writeDependencyFixture(t, dir, false)
+	if cached {
+		donor := filepath.Join(root, "donor")
+		writeDependencyFixture(t, donor, true)
+		if _, trees, err := (deps.Cache{Root: depsRoot, Repo: "acme-api", Worktree: donor}).Capture(); err != nil || len(trees) != 1 {
+			t.Fatalf("seed dependency cache: cached %d: %v", len(trees), err)
+		}
+	}
+	pushed := filepath.Join(root, "pushed")
+	ready := filepath.Join(dir, "frontend", "node_modules", "tool")
+	fixer := &fakeFixer{onExec: func() { writeDependencyFixture(t, dir, true) }}
+	r := &run{
+		p:   &Pipeline{Git: git.New(dependencyPushGit(t, root, ready, pushed))},
+		o:   Options{Repo: "acme/api", RepoRoot: dir, DepsDir: depsRoot},
+		ctx: context.Background(), rep: NopReporter{}, target: target.Target{BranchOnly: true},
+		branch: "feature/crumb-tray", worktree: dir, logDir: dir, msgDir: dir,
+		env: envexec.Env{Worktree: dir}, fixer: fixer,
+	}
+	return r, fixer
+}
+
+// Installing a missing tool changes only ignored environment state. The
+// pipeline must prove that repair by rerunning its own hook.
+func TestPushBranchWithFixesRetriesAnEnvironmentOnlyRepair(t *testing.T) {
+	r, fixer := dependencyPushRun(t, false)
+	if err := r.pushBranchWithFixes(); err != nil {
+		t.Fatalf("environment-only push repair: %v", err)
+	}
+	if len(fixer.prompts) != 1 || r.headSHA != "head-sha" {
+		t.Fatalf("fix sessions = %d, pushed head = %q; want 1 and head-sha", len(fixer.prompts), r.headSHA)
+	}
+	if trees := (deps.Cache{Root: r.o.DepsDir}).Trees(); len(trees) != 1 {
+		t.Fatalf("cached dependency trees = %d, want 1", len(trees))
+	}
+}
+
+func TestPushBranchWithFixesReusesCachedDependenciesBeforeVerification(t *testing.T) {
+	r, fixer := dependencyPushRun(t, true)
+	if err := r.pushBranchWithFixes(); err != nil {
+		t.Fatalf("push with cached dependencies: %v", err)
+	}
+	if len(fixer.prompts) != 0 {
+		t.Fatalf("fix sessions = %d, want none", len(fixer.prompts))
+	}
+	if _, err := os.Lstat(filepath.Join(r.worktree, "frontend", "node_modules")); !os.IsNotExist(err) {
+		t.Fatalf("temporary dependency link survived the push: %v", err)
 	}
 }
 
