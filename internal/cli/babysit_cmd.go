@@ -582,7 +582,7 @@ func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.D
 // model and a fix model, the header scrolls away within the first round, and
 // which one paid for an hour of wall clock is the question the line is read for.
 // A review round's facts are held back and merged into its RoundResult; a
-// discarded round is crossed out, so a rerun of the same number below it does
+// cancelled round is crossed out, so a rerun of the same number below it does
 // not read as the run counting twice. A failed step stays on the timeline in
 // red, so the summary's error has a line to point at.
 func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
@@ -598,8 +598,8 @@ func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Du
 		l.hasPending = true
 		return
 	}
-	if base, found := strings.CutSuffix(label, " (discarded)"); found {
-		o.Printf("%s\n", o.Dim(o.Strike(l.stepLine(o.SymSkip(), base, m.Tag(), dur, "discarded"))))
+	if base, found := strings.CutSuffix(label, " (cancelled)"); found {
+		o.Printf("%s\n", o.Dim(o.Strike(l.stepLine(o.SymSkip(), base, m.Tag(), dur, "cancelled"))))
 		return
 	}
 	o.Printf("%s\n", l.stepLine(o.Green(o.SymOK()), label, m.Tag(), dur))

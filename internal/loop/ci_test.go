@@ -8,7 +8,62 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/review"
 )
+
+type cancelAwareReviewer struct {
+	started  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+}
+
+func (f *cancelAwareReviewer) Run(ctx context.Context, _ review.Options) (*review.Result, error) {
+	close(f.started)
+	select {
+	case <-ctx.Done():
+		close(f.canceled)
+		return nil, ctx.Err()
+	case <-f.release:
+		return &review.Result{}, nil
+	}
+}
+
+func TestDiscardReviewCancelsRunningReview(t *testing.T) {
+	reviewer := &cancelAwareReviewer{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	r := &run{
+		p:   &Pipeline{Review: reviewer},
+		ctx: context.Background(),
+		rep: NopReporter{},
+	}
+	r.startReview(1)
+	<-reviewer.started
+
+	done := make(chan struct{})
+	go func() {
+		r.discardReview()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(reviewer.release)
+		<-done
+		t.Fatal("discardReview waited for the review instead of cancelling it")
+	}
+	select {
+	case <-reviewer.canceled:
+	default:
+		t.Fatal("discardReview returned without cancelling the review context")
+	}
+	if r.review != nil {
+		t.Fatal("discardReview kept the cancelled review")
+	}
+}
 
 func TestCIWaitPublishesItsPhase(t *testing.T) {
 	root := t.TempDir()
