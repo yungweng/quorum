@@ -95,6 +95,7 @@ func TestProgressStepModelFollowsThePhase(t *testing.T) {
 		{PhaseConflictFix, fix.Tag()},
 		{PhaseStarting, ""},
 		{PhaseCI, ""},
+		{PhaseBaseUpdate, ""},
 	} {
 		m, ok := Progress{Phase: tc.phase, Review: rev, Fix: fix}.StepModel()
 		if tc.want == "" {

@@ -162,10 +162,10 @@ neither exists yet. `--local` forces that mode even when an open PR exists, for
 a run that must not touch the PR.
 
 Draft PRs need a `--draft` flag (or `BABYSIT_DRAFTS=1` in the config) before
-babysit will push fixes and comments to them. And when the branch conflicts
-with its base, babysit first merges the base and resolves the conflicts through
-the fix session, then reviews the merged result; `--no-resolve-conflicts` turns
-that off.
+babysit will push fixes and comments to them. Before the first review and before
+reporting ready, babysit fetches the base and merges it when the branch is
+behind. Conflicts go through the fix session, and the merged head is reviewed
+again. `--no-resolve-conflicts` turns all automatic base updates off.
 
 Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.

@@ -75,9 +75,8 @@ type Config struct {
 	// BabysitDrafts lets `quorum babysit` work on a draft pull request without
 	// passing --draft each time.
 	BabysitDrafts bool
-	// ResolveConflicts has babysit merge the base branch and resolve the
-	// conflicts before any review round, instead of polishing a branch that
-	// cannot land.
+	// ResolveConflicts has babysit merge the latest base before reviewing and
+	// resolve conflicts through the fix session.
 	ResolveConflicts bool
 	// FixSuggestions has babysit run one terminal fix round when the final
 	// review is clean but still lists Suggestions: triage each one, implement
@@ -556,7 +555,7 @@ func (c Config) Render() string {
 		strings.Join(c.DivergenceEscalateTo, " "))
 	w("SANDBOXED=%s\t\t# 1 uses the engine's own sandbox/approval defaults instead of bypassing them\n", bit(c.Sandboxed))
 	w("BABYSIT_DRAFTS=%s\t# 1 lets `quorum babysit` work on draft PRs without --draft\n", bit(c.BabysitDrafts))
-	w("RESOLVE_CONFLICTS=%s\t# merge the base branch and resolve conflicts before reviewing\n", bit(c.ResolveConflicts))
+	w("RESOLVE_CONFLICTS=%s\t# update from the base and resolve conflicts before reporting ready\n", bit(c.ResolveConflicts))
 	w("FIX_SUGGESTIONS=%s\t# after a clean final review, triage and implement leftover Suggestions once\n", bit(c.FixSuggestions))
 	w("LOOP_MODE=%q\t# offline: iterate locally, one push and CI run at the end; online: push and wait for CI every round\n\n", c.LoopMode)
 

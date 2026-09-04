@@ -369,10 +369,11 @@ the user-local ~/.config/quorum/testcmd/<owner>/<repo>, then the repository's
 own .quorum/testcmd. The repo file is read from the base branch, never from
 the change under review, so a change cannot weaken or hijack its own gate.
 
-Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. When the
-branch conflicts with its base, the base is merged and the conflicts resolved
-before the first review; RESOLVE_CONFLICTS=0 or --no-resolve-conflicts turns
-that off.
+Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. Before
+the first review and before reporting ready, quorum fetches the base and merges
+it when the branch is behind. Conflicts go through the fix session, and the
+merged head is reviewed again. RESOLVE_CONFLICTS=0 or --no-resolve-conflicts
+turns all automatic base updates off.
 
 When the final review is clean but still lists Suggestions, one last fix round
 triages them: it implements the ones worth keeping and skips the rest, without
@@ -407,7 +408,7 @@ Options:
   --draft                Work on a draft PR (standing default: BABYSIT_DRAFTS=1)
   --local                Ignore any open PR: review and fix the pushed branch,
                          post nothing to GitHub
-  --no-resolve-conflicts Do not merge the base branch when the branch conflicts
+  --no-resolve-conflicts Do not update the branch from its base
   --no-fix-suggestions   Skip the suggestion triage round after a clean review
   --sandboxed            Use the engine's own sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously

@@ -854,6 +854,8 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 		what = fmt.Sprintf("CI fix %d", p.CIFix)
 	case loop.PhaseTests:
 		what = "running tests"
+	case loop.PhaseBaseUpdate:
+		what = "updating base branch"
 	case loop.PhaseConflictFix:
 		what = "resolving merge conflicts"
 	case loop.PhaseDivergence:

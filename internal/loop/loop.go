@@ -130,8 +130,9 @@ type Options struct {
 	// affected checks are run.
 	TestCmd    string
 	TestCmdSet bool // true when an explicit or user-local empty command disables fallback
-	// ResolveConflicts merges origin/<base> through the fix session whenever
-	// the branch conflicts with its base, before any review round.
+	// ResolveConflicts keeps the branch current with origin/<base>. Clean
+	// updates use git directly; conflicts go through the fix session. Any
+	// update invalidates an older review of the branch head.
 	ResolveConflicts bool
 	// FixSuggestions runs one terminal fix round when the final review is
 	// clean but still lists Suggestions: triage each one, implement what is
@@ -557,18 +558,18 @@ func (r *run) execute() (*Result, error) {
 		r.startDivergenceTrace()
 	}
 
-	// Conflicts are handled before anything else: a conflicted PR cannot merge,
-	// GitHub never even starts its pull_request checks, and a review of the
-	// unmerged head would polish code that cannot land as it is.
-	if err := r.ensureMergeable(); err != nil {
+	// Update from the base before anything else so the first review covers the
+	// code that will land rather than an already stale branch head.
+	baseUpdated, err := r.ensureBaseCurrent()
+	if err != nil {
 		return res, err
 	}
 
-	// A conflict fix above moved the head, so a handed-in resume would replay
+	// A base update above moved the head, so a handed-in resume would replay
 	// reviewer output for a head that no longer exists; only an untouched head
 	// may reuse it.
 	resume := r.o.ResumeRun
-	if r.conflictFixes > 0 {
+	if baseUpdated {
 		resume = ""
 	}
 	r.startReviewWith(1, resume)
@@ -633,6 +634,16 @@ func (r *run) execute() (*Result, error) {
 				}
 				continue
 			}
+			baseUpdated, err := r.ensureBaseCurrent()
+			if err != nil {
+				return res, err
+			}
+			if baseUpdated {
+				if err := r.prepareReviewAfterBaseUpdate(iteration, "clean"); err != nil {
+					return res, err
+				}
+				continue
+			}
 			res.Converged = true
 			if suggestionRoundDue(r.o, findings) {
 				pushed, err := r.suggestionRound(iteration, findings, comment, currentSHA)
@@ -693,12 +704,12 @@ func (r *run) execute() (*Result, error) {
 						}
 						continue
 					}
-					conflictFixes := r.conflictFixes
-					if err := r.ensureMergeable(); err != nil {
+					baseUpdated, err := r.ensureBaseCurrent()
+					if err != nil {
 						return res, err
 					}
-					if r.conflictFixes != conflictFixes {
-						r.rep.Info("merge conflict resolution moved the head past the disputed review; reviewing the resolved head")
+					if baseUpdated {
+						r.rep.Info("base branch update moved the head past the disputed review; reviewing the updated head")
 						if iteration < r.o.MaxIter {
 							r.startReview(iteration + 1)
 						}
@@ -723,6 +734,16 @@ func (r *run) execute() (*Result, error) {
 						}
 						continue
 					}
+				}
+				baseUpdated, err := r.ensureBaseCurrent()
+				if err != nil {
+					return res, err
+				}
+				if baseUpdated {
+					if err := r.prepareReviewAfterBaseUpdate(iteration, "disputed"); err != nil {
+						return res, err
+					}
+					continue
 				}
 				commentURL, commentPosted, err := r.postDisputeComment(
 					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
@@ -762,8 +783,8 @@ func (r *run) execute() (*Result, error) {
 		}
 
 		// The base may have moved during the round. Re-checking here, while no
-		// review is running, keeps a late conflict from surviving to the merge.
-		if err := r.ensureMergeable(); err != nil {
+		// review is running, keeps the next review on an up-to-date head.
+		if _, err := r.ensureBaseCurrent(); err != nil {
 			return res, err
 		}
 		if r.o.Offline {
@@ -772,7 +793,7 @@ func (r *run) execute() (*Result, error) {
 			}
 			// Test repairs can move the local head after the first check above.
 			// Refresh the base before starting a review of those new commits.
-			if err := r.ensureMergeable(); err != nil {
+			if _, err := r.ensureBaseCurrent(); err != nil {
 				return res, err
 			}
 		}
@@ -807,6 +828,21 @@ func (r *run) execute() (*Result, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+func (r *run) prepareReviewAfterBaseUpdate(round int, reviewed string) error {
+	r.rep.Info("base branch update moved the head past the " + reviewed + " review; reviewing the updated head")
+	if round < r.o.MaxIter {
+		r.startReview(round + 1)
+	}
+	if r.target.BranchOnly || r.o.Offline {
+		return nil
+	}
+	if err := r.ensureCIGreen(); err != nil {
+		r.killReview()
+		return err
+	}
+	return nil
 }
 
 // suggestionRoundDue keeps Suggestions strictly terminal: the round runs at

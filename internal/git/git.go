@@ -226,32 +226,11 @@ func (g G) PrePushPath(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push")
 }
 
-// MergeConflicts reports whether merging head onto base would conflict,
-// without touching any working tree. It needs the --write-tree form of
-// merge-tree (git 2.38); an older git returns an error, which callers treat
-// as "unknown" rather than as an answer.
-func (g G) MergeConflicts(ctx context.Context, dir, base, head string) (bool, error) {
-	cmd := exec.CommandContext(ctx, g.Bin, "merge-tree", "--write-tree", "--name-only", base, head)
-	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err == nil {
-		return false, nil
-	}
-	// Exit 1 covers both "conflicts" and "not something we can merge". Only a
-	// real conflict run writes the merged tree's oid to stdout, so an empty
-	// stdout means the question could not be answered, not that it was.
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 && strings.TrimSpace(stdout.String()) != "" {
-		return true, nil
-	}
-	msg := strings.TrimSpace(stderr.String())
-	if msg == "" {
-		msg = err.Error()
-	}
-	return false, fmt.Errorf("git merge-tree --write-tree %s %s: %s", base, head, firstLine(msg))
+// UnmergedFiles lists paths whose index entries are still unresolved after a
+// merge stopped. An empty result distinguishes an ordinary merge failure from
+// conflicts that the fix session can resolve.
+func (g G) UnmergedFiles(ctx context.Context, dir string) (string, error) {
+	return g.run(ctx, dir, "diff", "--name-only", "--diff-filter=U")
 }
 
 // IsAncestor reports whether ancestor is reachable from descendant. It is how

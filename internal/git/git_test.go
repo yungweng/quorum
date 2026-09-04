@@ -37,6 +37,8 @@ func conflictRepo(t *testing.T) string {
 	}
 
 	run("init", "-q", "-b", "main")
+	run("config", "user.name", "Test User")
+	run("config", "user.email", "test@example.invalid")
 	write("shared.txt", "base\n")
 	run("add", "shared.txt")
 	run("commit", "-q", "-m", "base")
@@ -53,32 +55,26 @@ func conflictRepo(t *testing.T) string {
 	return dir
 }
 
-func TestMergeConflictsProbe(t *testing.T) {
+func TestUnmergedFilesReportsMergeConflicts(t *testing.T) {
 	dir := conflictRepo(t)
 	g := New("git")
-
-	conflicted, err := g.MergeConflicts(context.Background(), dir, "main", "feature")
+	cmd := exec.Command("git", "checkout", "-q", "feature")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout feature: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "merge", "main")
+	cmd.Dir = dir
+	mergeOutput, mergeErr := cmd.CombinedOutput()
+	if mergeErr == nil {
+		t.Fatal("fixture merge unexpectedly succeeded")
+	}
+	got, err := g.UnmergedFiles(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !conflicted {
-		t.Error("both sides edited the same line, but no conflict was reported")
-	}
-
-	conflicted, err = g.MergeConflicts(context.Background(), dir, "main", "clean")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conflicted {
-		t.Error("independent changes were reported as a conflict")
-	}
-}
-
-func TestMergeConflictsProbeReportsUnknownRefsAsErrors(t *testing.T) {
-	dir := conflictRepo(t)
-	g := New("git")
-	if _, err := g.MergeConflicts(context.Background(), dir, "main", "no-such-branch"); err == nil {
-		t.Fatal("an unresolvable ref must be an error, not an answer")
+	if got != "shared.txt" {
+		t.Fatalf("unmerged files = %q, want shared.txt; merge output:\n%s", got, mergeOutput)
 	}
 }
 

@@ -62,7 +62,8 @@ reporting without breaking the build.
 
 ## Constraints
 
-- **Safety stops are deliberate.** Refusing to post on head drift, refusing
+- **Safety stops are deliberate.** Refusing to post on head drift, refusing to
+  report ready after the base moved beyond the reviewed head, refusing
   automatic `direnv allow` on an `.envrc` the PR changed, refusing a fenced or
   structurally wrong aggregator answer, refusing dirty or diverged checkouts and
   fork PRs, stopping a fix round that produced nothing. Do not weaken one to

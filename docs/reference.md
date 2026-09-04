@@ -90,9 +90,10 @@ satisfying it stops the run. Rejections git describes itself - non-fast-forward,
 credentials, a protected branch, the network - never reach a fix session.
 
 Draft PRs are refused unless the run says `--draft` or the config says
-`BABYSIT_DRAFTS=1`. When the branch conflicts with its base branch, the base is
-merged and the conflicts resolved through the fix session before the first
-review; `RESOLVE_CONFLICTS=0` or `--no-resolve-conflicts` turns that off.
+`BABYSIT_DRAFTS=1`. Before the first review and before reporting ready, babysit
+fetches the base and merges it when the branch is behind. Conflicts go through
+the fix session, and the merged head is reviewed again. `RESOLVE_CONFLICTS=0`
+or `--no-resolve-conflicts` turns all automatic base updates off.
 
 When the final review comes back with zero Blockers and Critical findings but
 still lists Suggestions, one last fix round triages them in the same session:
@@ -132,7 +133,7 @@ generation.
 | `--divergence-scan` | Analyze all rounds after the limit, write a report, then stop | off |
 | `--draft` | Work on a draft PR | off, or `BABYSIT_DRAFTS=1` |
 | `--local` | Ignore any open PR and work on the pushed branch only | off |
-| `--no-resolve-conflicts` | Do not merge the base branch on conflicts | resolution on |
+| `--no-resolve-conflicts` | Do not update the branch from its base | base updates on |
 | `--no-fix-suggestions` | Skip the suggestion triage round after a clean review | round on |
 | `--sandboxed` | Use the engine's own sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
@@ -260,9 +261,9 @@ posting or committing something misleading.
 - **Draft PRs are refused** unless you pass `--draft` or set `BABYSIT_DRAFTS=1`.
   A draft is a PR its author marked "not ready"; pushing fix commits and posting
   comments to it needs an explicit go-ahead.
-- **A conflict resolution that did not resolve stops the run.** After the merge
-  session, the same conflict probe runs again; a merge that left conflict
-  markers or skipped a file cannot pass on the session's own say-so.
+- **A base update must contain the fetched base.** After a clean merge or a
+  conflict fix, quorum checks the commit graph itself. A session cannot pass by
+  aborting the merge or committing unrelated work.
 - **The target changed an `.envrc`.** The run stops before loading it unless
   you pass `--allow-envrc-change` after reading the diff yourself.
 - **Do not push to the target branch while a run is active.** A review refuses
@@ -368,7 +369,7 @@ DIVERGENCE_SCAN=0        # analyze the current run after MAX_ITER, then stop
 DIVERGENCE_ESCALATE_TO="" # users or org/team slugs to mention, without @
 SANDBOXED=0
 BABYSIT_DRAFTS=0         # 1 lets quorum babysit work on draft PRs without --draft
-RESOLVE_CONFLICTS=1      # merge the base branch and resolve conflicts before reviewing
+RESOLVE_CONFLICTS=1      # update from the base and resolve conflicts before reporting ready
 FIX_SUGGESTIONS=1        # after a clean final review, triage and implement leftover Suggestions once
 LOOP_MODE="offline"      # offline: iterate locally, one push and CI run at the end; online: push and CI wait every round
 

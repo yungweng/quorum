@@ -227,8 +227,8 @@ If you changed nothing, do not commit or push, do not use the marker, and briefl
 %s`, number, finish, MarkerComment, comment)
 }
 
-// conflictFixPrompt asks the session to merge the base branch and resolve the
-// conflicts. The direction is base into head: it keeps the branch's own
+// conflictFixPrompt asks the session to resolve the base merge the pipeline
+// already started. The direction is base into head: it keeps the branch's own
 // history intact and is the merge GitHub would attempt for the PR.
 func conflictFixPrompt(number int, base, branch string, branchOnly, offline bool) string {
 	target := fmt.Sprintf("PR #%d", number)
@@ -239,11 +239,10 @@ func conflictFixPrompt(number int, base, branch string, branchOnly, offline bool
 	if offline {
 		finish = ". Do not push."
 	}
-	prompt := fmt.Sprintf(`%s conflicts with its base branch %s and cannot be merged as it is.
+	prompt := fmt.Sprintf(`The pipeline started merging base branch %s into %s, but Git stopped with conflicts.
 
-Merge the base into the current checkout with exactly: git merge origin/%s
-Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge %s into %s"%s`,
-		target, base, base, base, branch, finish)
+Continue the active merge; do not abort or restart it. Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge %s into %s"%s`,
+		base, target, base, branch, finish)
 	if branchOnly {
 		return prompt
 	}

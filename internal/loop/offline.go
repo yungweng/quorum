@@ -47,12 +47,12 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			return false, nil
 		}
 	}
-	conflictFixes := r.conflictFixes
-	if err := r.ensureMergeable(); err != nil {
+	baseUpdated, err := r.ensureBaseCurrent()
+	if err != nil {
 		return false, err
 	}
-	if r.conflictFixes != conflictFixes {
-		r.rep.Info("merge conflict resolution moved the head past the clean review; reviewing the resolved head")
+	if baseUpdated {
+		r.rep.Info("base branch update moved the head past the clean review; reviewing the updated head")
 		return false, nil
 	}
 
@@ -72,6 +72,14 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 		}
 		if r.headSHA != prePushSHA {
 			r.rep.Info("CI repairs moved the head past the reviewed commit; reviewing the repaired head")
+			return false, nil
+		}
+		baseUpdated, err := r.ensureBaseCurrent()
+		if err != nil {
+			return false, err
+		}
+		if baseUpdated {
+			r.rep.Info("base branch advanced during CI; reviewing the updated head")
 			return false, nil
 		}
 		if err := r.requirePublishedHead(r.headSHA); err != nil {
