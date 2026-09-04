@@ -40,7 +40,7 @@ type bgResult struct {
 // A review only needs the pushed PR head, not green checks, so it overlaps the
 // CI wait instead of queueing behind it. It must never overlap a Codex fix
 // session: a fix moves the head sha out from under the findings, which is why
-// ensureCIGreen discards a running review before it starts one.
+// ensureCIGreen cancels a running review before it starts one.
 func (r *run) startReview(round int) { r.startReviewWith(round, "") }
 
 // startReviewWith starts a review in the background, reusing resumeDir's
@@ -198,22 +198,19 @@ func (r *run) waitReview(br *bgReview, label string) bgResult {
 	}
 }
 
-// discardReview waits out a review whose findings a CI fix is about to
-// invalidate, and drops its result.
-//
-// Waiting rather than cancelling is deliberate. The review of the outgoing head
-// still finishes and posts its comment; only the pipeline stops acting on it.
-// Cancelling would save the remaining reviewer passes, but it also throws away a
-// review that is already paid for and that still describes the code as it stood
-// a moment ago. The fix session runs afterwards either way.
+// discardReview cancels a review whose findings a CI fix is about to invalidate
+// and waits for its processes to stop before the fix session starts.
 func (r *run) discardReview() {
 	br := r.review
 	if br == nil {
 		return
 	}
 	r.review = nil
-	r.rep.Info("discarding the review of the outgoing head")
-	r.waitReview(br, fmt.Sprintf("Review round %d (discarded)", br.round))
+	r.rep.Info("cancelling the review of the outgoing head")
+	br.cancel()
+	<-br.done
+	r.rep.StepEnd(fmt.Sprintf("Review round %d (cancelled)", br.round), r.reviewModel,
+		time.Since(br.started), true)
 }
 
 // killReview cancels a running review outright. Used on the paths that end the

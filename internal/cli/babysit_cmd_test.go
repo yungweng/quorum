@@ -169,12 +169,12 @@ func TestStepLinesNameTheModelThatRanTheStep(t *testing.T) {
 
 	reviewModel := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "max"}
 	fixModel := engine.Model{Engine: "claude", Name: "opus", Effort: "high"}
-	rep.StepEnd("Review round 2 (discarded)", reviewModel, 11*time.Minute, true)
+	rep.StepEnd("Review round 2 (cancelled)", reviewModel, 11*time.Minute, true)
 	rep.StepEnd("CI fix 1", fixModel, 11*time.Minute, true)
 
 	got := out.String()
 	for _, want := range []string{
-		"Review round 2 · gpt-5.6-terra/max · 11m · discarded",
+		"Review round 2 · gpt-5.6-terra/max · 11m · cancelled",
 		"CI fix 1 · opus/high · 11m",
 	} {
 		if !strings.Contains(got, want) {
