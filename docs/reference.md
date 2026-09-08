@@ -104,8 +104,11 @@ did before. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns the round off.
 If it pushes commits, the run still waits for CI on them, and auto-merge is
 skipped because the review never saw those commits.
 
-After a posted PR run converges with green CI, a fresh read-only Codex pass
-writes a local PR-description candidate. The result describes the final
+After a posted PR run converges with green CI, a fresh read-only pass on the
+review model writes a local PR-description candidate. It receives the precomputed diff and
+original body, may consult at most three relevant files, and has a three-minute
+generation timeout. Diffs above 2 MiB are replaced by a diffstat; the pass must
+omit behavior claims it cannot verify. The result describes the final
 implementation, not the sequence of findings and fixes. It keeps relevant
 links, rollout notes, test instructions and screenshots. When the final
 behavior, scope or architecture materially departs from the original direction,

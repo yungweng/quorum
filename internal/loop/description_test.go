@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
@@ -52,6 +54,11 @@ func descriptionFixture(t *testing.T, original, final string) (*run, *Result, de
 	}
 	descriptionTestGit(t, worktree, "add", "retry.go")
 	descriptionTestGit(t, worktree, "commit", "-q", "-m", "Initial fixture")
+	descriptionTestGit(t, worktree, "update-ref", "refs/remotes/origin/main", "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "retry.go"), []byte("package retry\n\nconst MaxAttempts = 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	descriptionTestGit(t, worktree, "commit", "-qam", "Bound retry attempts")
 	head := descriptionTestGit(t, worktree, "rev-parse", "HEAD")
 
 	resultPath := filepath.Join(root, "generated.md")
@@ -143,8 +150,10 @@ func TestFinishPRDescriptionUpdatesChangedBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(stdin) != original {
-		t.Fatalf("generator stdin = %q, want original body", stdin)
+	for _, want := range []string{original, "diff --git a/retry.go b/retry.go", "+const MaxAttempts = 3"} {
+		if !strings.Contains(string(stdin), want) {
+			t.Fatalf("generator input missing %q: %s", want, stdin)
+		}
 	}
 	generated, err := os.ReadFile(result.PRDescriptionFile)
 	if err != nil {
@@ -277,5 +286,70 @@ func TestReadFinalPRDescriptionRejectsUnsafeShape(t *testing.T) {
 				t.Fatal("unsafe description was accepted")
 			}
 		})
+	}
+}
+
+func TestFinishPRDescriptionGrokReceivesDiffWithoutShellTools(t *testing.T) {
+	r, result, paths := descriptionFixture(t, "Bound retries.", "Bounds retry attempts.")
+	r.reviewModel = engine.Model{Engine: engine.Grok, Name: "test-model", Effort: "medium"}
+	r.o.GrokBin = filepath.Join(t.TempDir(), "grok")
+	script := `#!/bin/sh
+set -eu
+case " $* " in
+ *" --tools read_file,grep,list_dir "*) ;;
+ *) exit 9 ;;
+esac
+while [ "$#" -gt 0 ]; do
+ if [ "$1" = "--prompt-file" ]; then
+  cp "$2" "` + paths.stdin + `"
+  break
+ fi
+ shift
+done
+printf '%s\n' '{"text":"Bounds retry attempts."}'
+`
+	if err := os.WriteFile(r.o.GrokBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.finishPRDescription(result); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.ReadFile(paths.stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Bound retries.", "diff --git a/retry.go b/retry.go", "+const MaxAttempts = 3"} {
+		if !strings.Contains(string(input), want) {
+			t.Fatalf("Grok prompt missing %q", want)
+		}
+	}
+}
+
+func TestFinalDescriptionInputLargeDiffUsesStat(t *testing.T) {
+	r, _, _ := descriptionFixture(t, "Bound retries.", "Bounds retries.")
+	if err := os.WriteFile(filepath.Join(r.worktree, "large.txt"), []byte(strings.Repeat("fixture line\n", finalDescriptionDiffCap/10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	descriptionTestGit(t, r.worktree, "add", "large.txt")
+	descriptionTestGit(t, r.worktree, "commit", "-qm", "Add large fixture")
+	input, err := r.finalDescriptionInput(io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(input, "Only the diffstat follows") || !strings.Contains(input, "large.txt") || strings.Contains(input, "+fixture line") {
+		t.Fatalf("expected diffstat fallback, got %.500s", input)
+	}
+}
+
+func TestFinishPRDescriptionMissingBaseDoesNotGenerateOrPost(t *testing.T) {
+	r, result, paths := descriptionFixture(t, "Bound retries.", "Bounds retries.")
+	descriptionTestGit(t, r.worktree, "update-ref", "-d", "refs/remotes/origin/main")
+	if err := r.finishPRDescription(result); err == nil || !strings.Contains(err.Error(), "preparing final PR description diff") {
+		t.Fatalf("error = %v", err)
+	}
+	for _, path := range []string{paths.stdin, paths.editArgs} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("unexpected generation or posting at %s: %v", path, err)
+		}
 	}
 }
