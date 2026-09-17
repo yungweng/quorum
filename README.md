@@ -212,9 +212,10 @@ pass. It prefers a merge commit to preserve existing behavior, then squash,
 then rebase. It never uses administrator privileges. A non-empty
 `AUTO_MERGE_AUTHORS` limits merging to pull requests from those GitHub logins;
 everyone else's clean review stays posted, but the merge waits for a person.
-For an own PR, quorum
-skips both approval and merge, reports `awaiting approval`, and leaves a
-dedicated macOS Notification Center item. A moved head, a local report
+GitHub does not let you approve your own PR, so quorum merges it without an
+approval when the target branch requires none. If the branch requires an
+approving review, quorum skips both approval and merge, reports
+`awaiting approval`, and leaves a dedicated macOS Notification Center item. A moved head, a local report
 (`POST=0` or `--dry-run`), a branch without a PR, and a target branch that
 requires a merge queue are not merged. A repository with no supported merge
 method is rejected before approval.

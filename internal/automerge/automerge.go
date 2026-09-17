@@ -54,7 +54,7 @@ func Allowed(enabled, post bool, findings review.Findings) bool {
 // existing approval for that commit is reused, and a merged PR is success.
 // A non-empty allowedAuthors list limits merging to those PR authors; a pull
 // request from anyone else keeps its clean review and waits for a person,
-// exactly like an own PR.
+// exactly like an own PR whose branch requires an approving review.
 func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string, allowedAuthors []string) (Result, error) {
 	var result Result
 	mergeMethod := gh.MergeMethodMerge
@@ -80,7 +80,11 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if err != nil {
 		return result, err
 	}
-	if strings.EqualFold(pr.Author.Login, login) {
+	// GitHub refuses an approval from the PR's author. An own PR can still be
+	// merged when the branch rules require no approving review; otherwise it
+	// waits for a person.
+	ownPR := strings.EqualFold(pr.Author.Login, login)
+	if ownPR && pr.ReviewDecision == "REVIEW_REQUIRED" {
 		result.Status = ApprovalRequired
 		return result, nil
 	}
@@ -150,7 +154,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
 			fmt.Errorf("refusing auto-merge: pull request %s#%d has active change requests", repo, number))
 	}
-	if !approved {
+	if !approved && !ownPR {
 		current, err := client.PRDetails(ctx, repo, number)
 		if err != nil {
 			return result, err

@@ -634,10 +634,10 @@ esac`)
 	}
 }
 
-func TestRunLeavesOwnPullRequestAwaitingApproval(t *testing.T) {
+func TestRunLeavesOwnPullRequestAwaitingRequiredApproval(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
-  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"reviewer"}}' ;;
+  1) echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"REVIEW_REQUIRED","author":{"login":"reviewer"}}' ;;
   2) echo 'reviewer' ;;
 esac`)
 	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
@@ -650,6 +650,47 @@ esac`)
 	args := readArgs(t, argsFile)
 	if strings.Contains(args, "graphql") || strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
 		t.Fatalf("own PR reached a side effect:\n%s", args)
+	}
+}
+
+func TestRunMergesOwnPullRequestWithoutRequiredApproval(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","reviewDecision":"","author":{"login":"reviewer"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[]' ;;
+  4) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"reviewer"}}' ;;
+  5) echo '{"merged":true}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Merged || result.ApprovalAttempted || result.ApprovalCreated {
+		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") {
+		t.Fatalf("own PR was approved by its author:\n%s", args)
+	}
+	if !strings.Contains(args, "api --method PUT repos/acme/api/pulls/42/merge -f merge_method=merge -f sha=abc123") {
+		t.Fatalf("own PR was not merged at the reviewed head:\n%s", args)
+	}
+}
+
+func TestRunRefusesOwnPullRequestWithChangeRequests(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"headRefOid":"abc123","state":"OPEN","author":{"login":"reviewer"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '[{"id":5,"state":"CHANGES_REQUESTED","commit_id":"abc123","user":{"login":"example-user"}}]' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err == nil || !strings.Contains(err.Error(), "active change requests") {
+		t.Fatalf("err = %v", err)
+	}
+	if args := readArgs(t, argsFile); strings.Contains(args, "pulls/42/merge") {
+		t.Fatalf("own PR with change requests was merged:\n%s", args)
 	}
 }
 

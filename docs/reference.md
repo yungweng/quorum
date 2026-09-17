@@ -406,7 +406,7 @@ is stopped.
 case-insensitively. When it is set, only pull requests from those authors are
 approved and merged; a clean review of anyone else's PR is posted as usual, but
 the merge is skipped and reported as `awaiting approval`, exactly like an own
-PR. An empty list keeps the old behaviour and allows every author.
+PR that needs an approving review. An empty list keeps the old behaviour and allows every author.
 
 After a posted review with zero Blockers and zero Critical findings, quorum:
 
@@ -423,9 +423,11 @@ request that could survive a later push. Target branches that require a merge
 queue are rejected before approval. Quorum never
 disables an existing auto-merge or merge-queue request because it cannot prove
 who created it. Repositories that allow none of GitHub's merge, squash, or
-rebase methods are rejected before approval. For an own PR, quorum skips
-approval and merge, reports `awaiting approval`, and leaves a per-PR macOS
-Notification Center item that
+rebase methods are rejected before approval. GitHub does not let you approve
+your own PR, so quorum skips the approval and merges an own PR directly when
+GitHub reports no required review. When the branch requires an approving
+review, quorum skips approval and merge, reports `awaiting approval`, and
+leaves a per-PR macOS Notification Center item that
 routine completion notifications cannot replace. It does not merge a moved
 head, a branch-only run, `POST=0`, `--dry-run`, or an accepted dispute whose
 last review still contains Blockers or Critical findings.
