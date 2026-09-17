@@ -209,16 +209,19 @@ A clean posted PR review has no Blockers or Critical findings; Suggestions and
 Questions are allowed. Quorum approves the exact reviewed commit, then asks
 GitHub to merge it with a method the repository allows after its branch rules
 pass. It prefers a merge commit to preserve existing behavior, then squash,
-then rebase. It never uses administrator privileges. A non-empty
+then rebase. It never uses administrator privileges. When the target branch
+requires a merge queue, quorum adds the reviewed commit to the queue instead
+and reports `queued for merge`; GitHub owns the outcome from there, and the
+dashboard lists the PR as `auto-merge queued` until it lands. A non-empty
 `AUTO_MERGE_AUTHORS` limits merging to pull requests from those GitHub logins;
 everyone else's clean review stays posted, but the merge waits for a person.
 GitHub does not let you approve your own PR, so quorum merges it without an
 approval when the target branch requires none. If the branch requires an
 approving review, quorum skips both approval and merge, reports
 `awaiting approval`, and leaves a dedicated macOS Notification Center item. A moved head, a local report
-(`POST=0` or `--dry-run`), a branch without a PR, and a target branch that
-requires a merge queue are not merged. A repository with no supported merge
-method is rejected before approval.
+(`POST=0` or `--dry-run`), and a branch without a PR are not merged. A
+repository with no supported merge method is rejected before approval, unless
+its queue makes that choice instead.
 
 The wait for protected checks and mergeability defaults to two hours;
 set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these

@@ -195,20 +195,207 @@ esac`)
 	}
 }
 
-func TestRunRejectsMergeQueueBeforeApproval(t *testing.T) {
+// queuedPolicy is the merge-policy answer for a branch that requires a queue.
+// entry is the mergeQueueEntry JSON, or "null" when the PR is not queued yet.
+func queuedPolicy(entry string) string {
+	return `{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":` +
+		`{"id":"PR_kwexample","headRefOid":"abc123","isMergeQueueEnabled":true,"mergeQueueEntry":` + entry + `}}}}`
+}
+
+func TestRunApprovesAndEnqueuesExactHead(t *testing.T) {
 	client, argsFile := fakeGH(t, `
 case "$n" in
   1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
   2) echo 'reviewer' ;;
-  3) echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}' ;;
+  3) echo '`+queuedPolicy("null")+`' ;;
+  4) echo '[]' ;;
+  5) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"id":99,"state":"APPROVED"}' ;;
+  7) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  8) echo '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED","position":3,"headCommit":{"oid":"abc123"}}}}}' ;;
 esac`)
-	_, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
-	if err == nil || !strings.Contains(err.Error(), "requires a merge queue") {
-		t.Fatalf("err = %v", err)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ApprovalCreated || result.Status != Queued || result.QueuePosition != 3 {
+		t.Fatalf("result = %+v", result)
 	}
 	args := readArgs(t, argsFile)
-	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "pulls/42/merge") {
-		t.Fatalf("merge queue branch reached a side effect:\n%s", args)
+	for _, want := range []string{
+		"event=APPROVE",
+		"commit_id=abc123",
+		"enqueuePullRequest",
+		"pullRequestId=PR_kwexample",
+		"expectedHeadOid=abc123",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("calls are missing %q:\n%s", want, args)
+		}
+	}
+	// A queue-required branch refuses the REST merge, and --admin would step
+	// over the queue entirely.
+	for _, unwanted := range []string{"pulls/42/merge", "--admin", "--auto"} {
+		if strings.Contains(args, unwanted) {
+			t.Errorf("calls contain %q:\n%s", unwanted, args)
+		}
+	}
+}
+
+// A queue picks its own merge method, so the repository's allowed methods say
+// nothing about whether the pull request can be queued.
+func TestRunEnqueuesWithoutARepositoryMergeMethod(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '{"data":{"repository":{"mergeCommitAllowed":false,"squashMergeAllowed":false,"rebaseMergeAllowed":false,"pullRequest":{"id":"PR_kwexample","headRefOid":"abc123","isMergeQueueEnabled":true,"mergeQueueEntry":null}}}}' ;;
+  4) echo '[]' ;;
+  5) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"id":99,"state":"APPROVED"}' ;;
+  7) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  8) echo '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED","position":1,"headCommit":{"oid":"abc123"}}}}}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Queued {
+		t.Fatalf("result = %+v", result)
+	}
+	if !strings.Contains(readArgs(t, argsFile), "enqueuePullRequest") {
+		t.Fatal("the reviewed head was not queued")
+	}
+}
+
+// Re-running against a queued head is a no-op, exactly as it is for a pull
+// request GitHub has already merged.
+func TestRunReusesTheExistingQueueEntry(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '`+queuedPolicy(`{"state":"AWAITING_CHECKS","position":2,"headCommit":{"oid":"abc123"}}`)+`' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Queued || result.QueuePosition != 2 || result.ApprovalAttempted {
+		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "enqueuePullRequest") {
+		t.Fatalf("an existing queue entry reached a side effect:\n%s", args)
+	}
+}
+
+// Only a push after the review can put another commit in the queue, so an
+// entry for a different head is drift.
+func TestRunRejectsAQueueEntryForAnotherHead(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '`+queuedPolicy(`{"state":"QUEUED","position":1,"headCommit":{"oid":"def456"}}`)+`' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err == nil || !strings.Contains(err.Error(), "the merge queue holds def456") {
+		t.Fatalf("err = %v", err)
+	}
+	if !errors.Is(err, errHeadDrift) {
+		t.Fatalf("err = %v, want head drift", err)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "event=APPROVE") || strings.Contains(args, "enqueuePullRequest") {
+		t.Fatalf("a drifted queue entry reached a side effect:\n%s", args)
+	}
+}
+
+func TestRunDismissesApprovalWhenQueueingFails(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '`+queuedPolicy("null")+`' ;;
+  4) echo '[]' ;;
+  5) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"id":99,"state":"APPROVED"}' ;;
+  7) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  8) echo 'Merge queue is not enabled for this branch' >&2; exit 1 ;;
+  9) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","author":{"login":"example-user"}}' ;;
+  10) echo '`+queuedPolicy("null")+`' ;;
+  11) echo '{}' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err == nil || !strings.Contains(err.Error(), "queueing reviewed head") {
+		t.Fatalf("err = %v", err)
+	}
+	if errors.Is(err, ErrMergeNotReady) {
+		t.Fatalf("a settled refusal was reported as retryable: %v", err)
+	}
+	if !result.ApprovalCreated {
+		t.Fatalf("result = %+v", result)
+	}
+	if !strings.Contains(readArgs(t, argsFile), "pulls/42/reviews/99/dismissals") {
+		t.Fatal("the approval was left behind after queueing failed")
+	}
+}
+
+// Required checks can still be settling when GitHub refuses the enqueue, so
+// the caller may wait and try again instead of dismissing its approval.
+func TestRunRetriesQueueingWhileBranchRulesAreUnsettled(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '`+queuedPolicy("null")+`' ;;
+  4) echo '[]' ;;
+  5) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"id":99,"state":"APPROVED"}' ;;
+  7) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  8) echo 'Pull request is not mergeable' >&2; exit 1 ;;
+  9) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","author":{"login":"example-user"}}' ;;
+  10) echo '`+queuedPolicy("null")+`' ;;
+esac`)
+	_, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if !errors.Is(err, ErrMergeNotReady) {
+		t.Fatalf("err = %v, want ErrMergeNotReady", err)
+	}
+	if strings.Contains(readArgs(t, argsFile), "dismissals") {
+		t.Fatal("a retryable refusal dismissed the approval")
+	}
+}
+
+// A mutation that times out may still have reached GitHub. The reconciling
+// read, not a second enqueue, is what decides that.
+func TestRunReconcilesATimedOutEnqueue(t *testing.T) {
+	client, argsFile := fakeGH(t, `
+case "$n" in
+  1) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  2) echo 'reviewer' ;;
+  3) echo '`+queuedPolicy("null")+`' ;;
+  4) echo '[]' ;;
+  5) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  6) echo '{"id":99,"state":"APPROVED"}' ;;
+  7) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","author":{"login":"example-user"}}' ;;
+  8) echo "net/http: TLS handshake timeout" >&2; exit 1 ;;
+  9) echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","author":{"login":"example-user"}}' ;;
+  10) echo '`+queuedPolicy(`{"state":"QUEUED","position":4,"headCommit":{"oid":"abc123"}}`)+`' ;;
+esac`)
+	result, err := Run(context.Background(), client, "acme/api", 42, "abc123", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != Queued || result.QueuePosition != 4 {
+		t.Fatalf("result = %+v", result)
+	}
+	args := readArgs(t, argsFile)
+	if strings.Contains(args, "dismissals") {
+		t.Fatal("a landed enqueue dismissed its own approval")
+	}
+	if strings.Count(args, "enqueuePullRequest") != 1 {
+		t.Fatalf("the enqueue was repeated:\n%s", args)
 	}
 }
 

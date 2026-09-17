@@ -269,17 +269,34 @@ func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Detail
 	return d, nil
 }
 
+// QueueEntry is one pull request's place in its target branch's merge queue.
+// HeadOid is what makes it comparable to a reviewed head: an entry for another
+// commit belongs to a push that happened after the review.
+type QueueEntry struct {
+	State    string
+	Position int
+	HeadOid  string
+}
+
 // MergeSettings are the repository and branch rules that select a safe merge
-// path. A repository can allow more than one method.
+// path. A repository can allow more than one method. PullRequestID is the node
+// id EnqueueHead needs, and QueueEntry is non-nil only while the pull request
+// already sits in the queue.
 type MergeSettings struct {
 	QueueEnabled       bool
 	MergeCommitAllowed bool
 	SquashMergeAllowed bool
 	RebaseMergeAllowed bool
+	PullRequestID      string
+	QueueEntry         *QueueEntry
 }
 
 // MergePolicy reports the repository settings that select a safe merge path
 // and confirms that the queried pull request still has headSHA.
+//
+// The merge queue entry is read here rather than in PRDetails because
+// `gh pr view --json` exposes no mergeQueueEntry field; GraphQL is the only
+// way to ask, and this call already selects the pull request node.
 func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headSHA string) (MergeSettings, error) {
 	owner, name, ok := strings.Cut(repo, "/")
 	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || number <= 0 || headSHA == "" {
@@ -290,7 +307,12 @@ func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headS
     mergeCommitAllowed
     squashMergeAllowed
     rebaseMergeAllowed
-    pullRequest(number: $number) { headRefOid isMergeQueueEnabled }
+    pullRequest(number: $number) {
+      id
+      headRefOid
+      isMergeQueueEnabled
+      mergeQueueEntry { state position headCommit { oid } }
+    }
   }
 }`
 	out, err := c.run(ctx, "api", "graphql", "-f", "query="+query,
@@ -305,8 +327,10 @@ func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headS
 				SquashMergeAllowed bool `json:"squashMergeAllowed"`
 				RebaseMergeAllowed bool `json:"rebaseMergeAllowed"`
 				PullRequest        *struct {
-					HeadRefOid        string `json:"headRefOid"`
-					MergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
+					ID                string          `json:"id"`
+					HeadRefOid        string          `json:"headRefOid"`
+					MergeQueueEnabled bool            `json:"isMergeQueueEnabled"`
+					MergeQueueEntry   *queueEntryNode `json:"mergeQueueEntry"`
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		} `json:"data"`
@@ -326,7 +350,30 @@ func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headS
 		MergeCommitAllowed: response.Data.Repository.MergeCommitAllowed,
 		SquashMergeAllowed: response.Data.Repository.SquashMergeAllowed,
 		RebaseMergeAllowed: response.Data.Repository.RebaseMergeAllowed,
+		PullRequestID:      pr.ID,
+		QueueEntry:         pr.MergeQueueEntry.entry(),
 	}, nil
+}
+
+// queueEntryNode is the GraphQL shape of a MergeQueueEntry. Both MergePolicy
+// and EnqueueHead decode the same selection.
+type queueEntryNode struct {
+	State      string `json:"state"`
+	Position   int    `json:"position"`
+	HeadCommit *struct {
+		Oid string `json:"oid"`
+	} `json:"headCommit"`
+}
+
+func (n *queueEntryNode) entry() *QueueEntry {
+	if n == nil {
+		return nil
+	}
+	entry := QueueEntry{State: n.State, Position: n.Position}
+	if n.HeadCommit != nil {
+		entry.HeadOid = n.HeadCommit.Oid
+	}
+	return &entry
 }
 
 // Pull request states returned to dashboard callers. The first four are

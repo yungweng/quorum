@@ -203,7 +203,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	rep.Activity("preparing run", 0)
 	res, err := pipe.Run(ctx, o)
 	rep.ActivityDone()
-	mergeStatus := ""
+	var mergeResult automerge.Result
 	var mergeErr error
 	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMerge, a.cfg.Post, res.LastFindings) {
 		if res.PR.IsDraft {
@@ -218,10 +218,10 @@ func (a *app) cmdBabysit(argv []string) int {
 			rep.Info("auto-merge: skipped, the suggestion round pushed commits the final review has not seen")
 		} else {
 			rep.Activity("finishing auto-merge", 0)
-			mergeResult, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
+			finished, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
 			rep.ActivityDone()
-			mergeStatus, mergeErr = mergeResult.Status, finishErr
-			if mergeErr == nil && mergeStatus == automerge.ApprovalRequired {
+			mergeResult, mergeErr = finished, finishErr
+			if mergeErr == nil && mergeResult.Status == automerge.ApprovalRequired {
 				a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
 			}
 			if mergeErr != nil {
@@ -230,7 +230,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		}
 	}
 
-	if err == nil && res != nil && a.cfg.NotifyReadyToMerge && mergeStatus == "" &&
+	if err == nil && res != nil && a.cfg.NotifyReadyToMerge && mergeResult.Status == "" &&
 		!res.PR.IsDraft && automerge.Eligible(res.LastFindings) {
 		a.notifyReadyToMerge(rep.notify, repo, res.PR.Number, res.PR.URL)
 		rep.readySent = rep.notify
@@ -238,7 +238,7 @@ func (a *app) cmdBabysit(argv []string) int {
 
 	a.logRun(babysitHistory(repo, number, started, res, err))
 	if res != nil {
-		rep.summary(res, err, mergeStatus, mergeErr)
+		rep.summary(res, err, mergeResult, mergeErr)
 	}
 	if err != nil {
 		return a.babysitExit(err)
@@ -732,13 +732,13 @@ func (l *loopTermReporter) Notify(title, body string) {
 // summary prints the closing block of a run. Its first line is the verdict:
 // one symbol and one word say how the run ended, and the dim rest of the line
 // says why, so nothing below it has to be read to know whether to act.
-func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus string, mergeErr error) {
+func (l *loopTermReporter) summary(res *loop.Result, runErr error, merge automerge.Result, mergeErr error) {
 	o := l.out
 	l.clearActive()
 	l.flushPending()
 	o.Printf("\n")
 	o.Rule()
-	sym, word, detail := l.verdict(res, runErr, mergeStatus, mergeErr)
+	sym, word, detail := l.verdict(res, runErr, merge, mergeErr)
 	o.Printf("%s %s  %s\n", sym, o.Bold(word), o.Dim(detail))
 	switch {
 	case res.Local:
@@ -795,7 +795,7 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 	case res.Converged && res.DisputeAccepted:
 		l.Notify("Fertig", fmt.Sprintf("%s fertig; Disputes akzeptiert, bereit fuer den manuellen Test", babysitTargetLabel(res)))
 	case res.Converged:
-		if mergeStatus != automerge.ApprovalRequired && !l.readySent {
+		if merge.Status != automerge.ApprovalRequired && !l.readySent {
 			l.Notify("Fertig", fmt.Sprintf("%s ist bereit fuer den manuellen Test", babysitTargetLabel(res)))
 		}
 	case res.Divergence != nil && res.Divergence.Verdict == loop.DivergenceDiverged:
@@ -806,7 +806,7 @@ func (l *loopTermReporter) summary(res *loop.Result, runErr error, mergeStatus s
 // verdict picks the symbol, the word and the reason for the summary's first
 // line. The cases are checked in the order the old result row used, so the
 // same run ends with the same outcome, only said in one word.
-func (l *loopTermReporter) verdict(res *loop.Result, runErr error, mergeStatus string, mergeErr error) (sym, word, detail string) {
+func (l *loopTermReporter) verdict(res *loop.Result, runErr error, merge automerge.Result, mergeErr error) (sym, word, detail string) {
 	o := l.out
 	rounds := fmt.Sprintf("%d round", res.Rounds)
 	if res.Rounds != 1 {
@@ -827,9 +827,11 @@ func (l *loopTermReporter) verdict(res *loop.Result, runErr error, mergeStatus s
 		return bad("FAILED", mergeErr.Error())
 	case res.Converged && res.DisputeAccepted:
 		return ok("READY", clean+" · disputed findings accepted")
-	case res.Converged && mergeStatus == automerge.Merged:
+	case res.Converged && merge.Status == automerge.Merged:
 		return ok("MERGED", clean)
-	case res.Converged && mergeStatus == automerge.ApprovalRequired:
+	case res.Converged && merge.Status == automerge.Queued:
+		return ok("QUEUED", clean+" · added to the merge queue"+queuePosition(merge))
+	case res.Converged && merge.Status == automerge.ApprovalRequired:
 		return ok("READY", clean+" · auto-merge needs approval")
 	case res.Converged:
 		return ok("READY", clean)

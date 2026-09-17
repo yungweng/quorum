@@ -23,6 +23,10 @@ const approvalCleanupTimeout = 30 * time.Second
 const (
 	Merged           = "merged"
 	ApprovalRequired = "awaiting approval"
+	// Queued is the terminal status for a target branch that requires a merge
+	// queue. GitHub owns the outcome from there, exactly as it does for an
+	// Auto-Merge request, and the dashboard reports it as "auto-merge queued".
+	Queued = "queued for merge"
 )
 
 // ErrMergeNotReady means GitHub refused the exact-head merge because branch
@@ -34,7 +38,10 @@ type Result struct {
 	ApprovalAttempted bool
 	ApprovalCreated   bool
 	Status            string
-	approvalReviewID  int64
+	// QueuePosition is set with Queued, and is zero when GitHub reported no
+	// position for the entry.
+	QueuePosition    int
+	approvalReviewID int64
 }
 
 // Eligible is deliberately the same threshold as loop convergence. Questions
@@ -51,13 +58,16 @@ func Allowed(enabled, post bool, findings review.Findings) bool {
 }
 
 // Run binds both side effects to reviewedSHA. It is safe to repeat: an
-// existing approval for that commit is reused, and a merged PR is success.
+// existing approval for that commit is reused, and a pull request GitHub has
+// already merged or already queued at that commit is success.
 // A non-empty allowedAuthors list limits merging to those PR authors; a pull
 // request from anyone else keeps its clean review and waits for a person,
 // exactly like an own PR whose branch requires an approving review.
 func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string, allowedAuthors []string) (Result, error) {
 	var result Result
 	mergeMethod := gh.MergeMethodMerge
+	queueEnabled := false
+	pullRequestID := ""
 	if repo == "" || number <= 0 || reviewedSHA == "" {
 		return result, fmt.Errorf("auto-merge needs a repository, pull request number, and reviewed head sha")
 	}
@@ -93,13 +103,19 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		if err != nil {
 			return result, fmt.Errorf("checking merge policy: %w", err)
 		}
-		if settings.QueueEnabled {
-			return result, fmt.Errorf("refusing auto-merge: target branch %s requires a merge queue", pr.BaseRefName)
-		}
-		var ok bool
-		mergeMethod, ok = preferredMergeMethod(settings)
-		if !ok {
-			return result, fmt.Errorf("refusing auto-merge: repository %s does not allow a supported merge method", repo)
+		queueEnabled, pullRequestID = settings.QueueEnabled, settings.PullRequestID
+		// A queue picks its own merge method, so the repository's allowed
+		// methods say nothing about whether this pull request can be queued.
+		if queueEnabled {
+			if done, err := reuseQueueEntry(settings.QueueEntry, reviewedSHA, &result); done || err != nil {
+				return result, err
+			}
+		} else {
+			var ok bool
+			mergeMethod, ok = preferredMergeMethod(settings)
+			if !ok {
+				return result, fmt.Errorf("refusing auto-merge: repository %s does not allow a supported merge method", repo)
+			}
 		}
 	}
 
@@ -178,7 +194,8 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 		result.approvalReviewID = createdReview.ID
 	}
 
-	// Re-read the head after approval, then use GitHub's head-bound merge API.
+	// Re-read the head after approval, then use whichever of GitHub's
+	// head-bound APIs the target branch accepts.
 	current, err := client.PRDetails(ctx, repo, number)
 	if err != nil {
 		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, err)
@@ -199,6 +216,9 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	if latestReviewsRequestChanges(current.LatestReviews, login) {
 		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
 			fmt.Errorf("refusing auto-merge: pull request %s#%d has active change requests", repo, number))
+	}
+	if queueEnabled {
+		return enqueue(ctx, client, repo, number, pullRequestID, reviewedSHA, result)
 	}
 	if mergeErr := client.MergeHead(ctx, repo, number, reviewedSHA, mergeMethod); mergeErr != nil {
 		current, inspectErr := client.PRDetails(ctx, repo, number)
@@ -230,6 +250,70 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	return result, nil
 }
 
+// reuseQueueEntry makes Run repeatable on a queue-required branch. An entry for
+// the reviewed head means the work is already done, exactly as an already
+// merged pull request does; an entry for another commit is head drift, because
+// only a push after the review could have produced it.
+func reuseQueueEntry(entry *gh.QueueEntry, reviewedSHA string, result *Result) (bool, error) {
+	if entry == nil {
+		return false, nil
+	}
+	if entry.HeadOid != "" && entry.HeadOid != reviewedSHA {
+		return false, fmt.Errorf("%w: refusing auto-merge: reviewed head is %s but the merge queue holds %s",
+			errHeadDrift, reviewedSHA, entry.HeadOid)
+	}
+	result.Status = Queued
+	result.QueuePosition = entry.Position
+	return true, nil
+}
+
+// enqueue is the queue-required counterpart of the MergeHead block: the same
+// re-read, the same head validation, the same approval cleanup, ending in a
+// queue entry instead of a merge commit.
+func enqueue(ctx context.Context, client *gh.Client, repo string, number int, pullRequestID, reviewedSHA string, result Result) (Result, error) {
+	entry, enqueueErr := client.EnqueueHead(ctx, repo, number, pullRequestID, reviewedSHA)
+	if enqueueErr == nil {
+		result.Status = Queued
+		result.QueuePosition = entry.Position
+		return result, nil
+	}
+	current, inspectErr := client.PRDetails(ctx, repo, number)
+	if inspectErr != nil {
+		cause := errors.Join(fmt.Errorf("queueing reviewed head: %w", enqueueErr),
+			fmt.Errorf("rechecking pull request after queueing failed: %w", inspectErr))
+		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, cause)
+	}
+	merged, headErr := validateHead(current, repo, number, reviewedSHA)
+	if headErr != nil {
+		if current.HeadRefOid != reviewedSHA {
+			headErr = dismissCreatedApproval(ctx, client, repo, number, &result, headErr)
+		} else {
+			headErr = dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result, headErr)
+		}
+		return result, headErr
+	}
+	if merged {
+		result.Status = Merged
+		return result, nil
+	}
+	// A mutation that timed out may still have landed. Ask for the entry
+	// rather than retrying the enqueue, which would fail as "already queued".
+	if settings, policyErr := client.MergePolicy(ctx, repo, number, reviewedSHA); policyErr == nil {
+		done, reuseErr := reuseQueueEntry(settings.QueueEntry, reviewedSHA, &result)
+		if done {
+			return result, nil
+		}
+		if reuseErr != nil {
+			return result, dismissCreatedApproval(ctx, client, repo, number, &result, reuseErr)
+		}
+	}
+	if branchRulesUnsettled(current) {
+		return result, fmt.Errorf("%w: %v", ErrMergeNotReady, enqueueErr)
+	}
+	return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
+		fmt.Errorf("queueing reviewed head: %w", enqueueErr))
+}
+
 // preferredMergeMethod preserves merge commits where they already work, then
 // falls back to the other methods GitHub exposes. GitHub repositories record
 // which methods are allowed, but do not expose a preferred method.
@@ -251,6 +335,14 @@ func mergeReadinessPending(current gh.Details, mergeErr error) bool {
 	if !strings.Contains(message, "http 405") || !strings.Contains(message, "pull request is not mergeable") {
 		return false
 	}
+	return branchRulesUnsettled(current)
+}
+
+// branchRulesUnsettled reports the states in which GitHub's refusal can still
+// turn into an acceptance once required checks finish. The merge path reaches
+// it through an HTTP 405 body; the queue path uses it alone, because the
+// GraphQL message for a refused enqueue is not a documented contract.
+func branchRulesUnsettled(current gh.Details) bool {
 	return current.Mergeable == "MERGEABLE" && current.MergeStateStatus == "BLOCKED" ||
 		current.Mergeable == "UNKNOWN" && current.MergeStateStatus == "UNKNOWN"
 }
@@ -399,6 +491,7 @@ func combineResults(first, second Result) Result {
 		ApprovalAttempted: first.ApprovalAttempted || second.ApprovalAttempted,
 		ApprovalCreated:   first.ApprovalCreated || second.ApprovalCreated,
 		Status:            second.Status,
+		QueuePosition:     second.QueuePosition,
 		approvalReviewID:  reviewID,
 	}
 }

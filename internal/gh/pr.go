@@ -245,6 +245,48 @@ func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha str
 	return nil
 }
 
+// EnqueueHead adds one exact head to the target branch's merge queue.
+// expectedHeadOid is to this mutation what sha= is to MergeHead: GitHub refuses
+// to queue a pull request that has moved on since the review.
+func (c *Client) EnqueueHead(ctx context.Context, repo string, number int, pullRequestID, sha string) (QueueEntry, error) {
+	if pullRequestID == "" || sha == "" {
+		return QueueEntry{}, fmt.Errorf("enqueueing %s#%d needs a pull request id and a head sha", repo, number)
+	}
+	const mutation = `mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) {
+  enqueuePullRequest(input: {pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid}) {
+    mergeQueueEntry { state position headCommit { oid } }
+  }
+}`
+	// A timed-out mutation may have reached GitHub. Do not retry it blindly:
+	// a second enqueue of the same head fails as "already queued", which reads
+	// like a refusal. The caller reconciles through MergePolicy, which reports
+	// the live queue entry.
+	once := *c
+	once.Attempts = 1
+	// -f rather than -F: -F coerces anything that parses as a number, and a
+	// head sha of only digits would then be sent as an Int and rejected.
+	out, err := once.run(ctx, "api", "graphql", "-f", "query="+mutation,
+		"-f", "pullRequestId="+pullRequestID, "-f", "expectedHeadOid="+sha)
+	if err != nil {
+		return QueueEntry{}, err
+	}
+	var response struct {
+		Data struct {
+			EnqueuePullRequest struct {
+				MergeQueueEntry *queueEntryNode `json:"mergeQueueEntry"`
+			} `json:"enqueuePullRequest"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return QueueEntry{}, fmt.Errorf("gh api enqueue pull request: %w", err)
+	}
+	entry := response.Data.EnqueuePullRequest.MergeQueueEntry.entry()
+	if entry == nil {
+		return QueueEntry{}, fmt.Errorf("GitHub did not queue the reviewed head of %s#%d", repo, number)
+	}
+	return *entry, nil
+}
+
 // CheckState is the outcome of one CI observation.
 type CheckState int
 

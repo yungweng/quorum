@@ -156,6 +156,8 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		switch mergeStatus {
 		case automerge.Merged:
 			note += "; merged"
+		case automerge.Queued:
+			note += "; queued for merge"
 		case automerge.ApprovalRequired:
 			note += "; awaiting approval"
 		}

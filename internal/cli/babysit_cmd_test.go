@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/config"
 	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/gh"
@@ -392,6 +393,7 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 		name     string
 		err      error
 		result   *loop.Result
+		merge    automerge.Result
 		mergeErr error
 		want     string
 		unwanted string
@@ -419,6 +421,33 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 			unwanted: "FAILED",
 		},
 		{
+			name: "merged",
+			result: &loop.Result{
+				PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1, Converged: true,
+			},
+			merge:    automerge.Result{Status: automerge.Merged},
+			want:     "MERGED",
+			unwanted: "QUEUED",
+		},
+		{
+			name: "merge queue",
+			result: &loop.Result{
+				PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1, Converged: true,
+			},
+			merge:    automerge.Result{Status: automerge.Queued, QueuePosition: 3},
+			want:     "QUEUED  CI green · review clean after 1 round · added to the merge queue · position 3",
+			unwanted: "MERGED",
+		},
+		{
+			name: "merge queue without a position",
+			result: &loop.Result{
+				PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1, Converged: true,
+			},
+			merge:    automerge.Result{Status: automerge.Queued},
+			want:     "added to the merge queue\n",
+			unwanted: "position",
+		},
+		{
 			name:     "auto-merge failure",
 			err:      errors.New("auto-merge failed: permission denied"),
 			mergeErr: errors.New("auto-merge failed: permission denied"),
@@ -433,7 +462,7 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 			if res == nil {
 				res = &loop.Result{PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1}
 			}
-			rep.summary(res, test.err, "", test.mergeErr)
+			rep.summary(res, test.err, test.merge, test.mergeErr)
 			got := out.String()
 			if !strings.Contains(got, test.want) {
 				t.Fatalf("summary is missing %q:\n%s", test.want, got)
@@ -528,7 +557,7 @@ func TestSummaryRepeatsOnlyAnUnpostedRebuttal(t *testing.T) {
 		var out bytes.Buffer
 		w := ui.New(os.Stdout).To(&out)
 		rep := &loopTermReporter{out: w, status: w.Status()}
-		rep.summary(&res, nil, "", nil)
+		rep.summary(&res, nil, automerge.Result{}, nil)
 		return out.String()
 	}
 
@@ -563,7 +592,7 @@ func TestSummaryCommitsSitInTheRowGrid(t *testing.T) {
 			{Label: "CI fix 1", Commits: "1111111 fix: lint\n2222222 fix: format"},
 			{Label: "Push fix 1", Commits: "3333333 fix: hook"},
 		},
-	}, nil, "", nil)
+	}, nil, automerge.Result{}, nil)
 
 	want := "  commits      CI fix 1    1111111 fix: lint\n" +
 		"                           2222222 fix: format\n" +

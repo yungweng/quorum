@@ -177,11 +177,11 @@ func TestMergeHeadRejectsUnknownMethodBeforeCallingGitHub(t *testing.T) {
 
 func TestMergePolicyChecksTheExactHead(t *testing.T) {
 	bin, _ := fakeGH(t, `
-if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"mergeCommitAllowed"* || "$*" != *"squashMergeAllowed"* || "$*" != *"rebaseMergeAllowed"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
+if [[ "$*" != *"isMergeQueueEnabled"* || "$*" != *"mergeCommitAllowed"* || "$*" != *"squashMergeAllowed"* || "$*" != *"rebaseMergeAllowed"* || "$*" != *"mergeQueueEntry"* || "$*" != *"owner=acme"* || "$*" != *"name=api"* || "$*" != *"number=42"* ]]; then
   echo "unexpected arguments: $*" >&2
   exit 1
 fi
-echo '{"data":{"repository":{"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":false,"pullRequest":{"headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
+echo '{"data":{"repository":{"mergeCommitAllowed":true,"squashMergeAllowed":true,"rebaseMergeAllowed":false,"pullRequest":{"id":"PR_kwexample","headRefOid":"abc123","isMergeQueueEnabled":true}}}}'`)
 	settings, err := testClient(bin).MergePolicy(context.Background(), "acme/api", 42, "abc123")
 	if err != nil {
 		t.Fatal(err)
@@ -189,8 +189,85 @@ echo '{"data":{"repository":{"mergeCommitAllowed":true,"squashMergeAllowed":true
 	if !settings.QueueEnabled {
 		t.Fatal("required merge queue was not detected")
 	}
+	if settings.PullRequestID != "PR_kwexample" {
+		t.Fatalf("pull request id = %q", settings.PullRequestID)
+	}
+	if settings.QueueEntry != nil {
+		t.Fatalf("queue entry = %+v, want none", settings.QueueEntry)
+	}
 	if !settings.MergeCommitAllowed || !settings.SquashMergeAllowed || settings.RebaseMergeAllowed {
 		t.Fatalf("merge settings = %+v", settings)
+	}
+}
+
+func TestMergePolicyReportsTheQueueEntry(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"data":{"repository":{"mergeCommitAllowed":true,"pullRequest":{"id":"PR_kwexample","headRefOid":"abc123","isMergeQueueEnabled":true,"mergeQueueEntry":{"state":"AWAITING_CHECKS","position":3,"headCommit":{"oid":"abc123"}}}}}}'`)
+	settings, err := testClient(bin).MergePolicy(context.Background(), "acme/api", 42, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := QueueEntry{State: "AWAITING_CHECKS", Position: 3, HeadOid: "abc123"}
+	if settings.QueueEntry == nil || *settings.QueueEntry != want {
+		t.Fatalf("queue entry = %+v, want %+v", settings.QueueEntry, want)
+	}
+}
+
+func TestEnqueueHeadBindsTheExpectedHead(t *testing.T) {
+	bin, _ := fakeGH(t, `
+if [[ "$*" != *"enqueuePullRequest"* || "$*" != *"pullRequestId=PR_kwexample"* || "$*" != *"expectedHeadOid=abc123"* ]]; then
+  echo "unexpected arguments: $*" >&2
+  exit 1
+fi
+if [[ "$*" == *"--admin"* || "$*" == *"pr merge"* ]]; then
+  echo "enqueue used a merge command: $*" >&2
+  exit 1
+fi
+echo '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED","position":1,"headCommit":{"oid":"abc123"}}}}}'`)
+	entry, err := testClient(bin).EnqueueHead(context.Background(), "acme/api", 42, "PR_kwexample", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := QueueEntry{State: "QUEUED", Position: 1, HeadOid: "abc123"}
+	if entry != want {
+		t.Fatalf("entry = %+v, want %+v", entry, want)
+	}
+}
+
+// A timed-out mutation may already have queued the head, so a blind retry
+// would come back as "already queued". Reconciliation belongs to the caller.
+func TestEnqueueHeadDoesNotRetry(t *testing.T) {
+	bin, countFile := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
+	if _, err := testClient(bin).EnqueueHead(context.Background(), "acme/api", 42, "PR_kwexample", "abc123"); err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := calls(t, countFile); got != 1 {
+		t.Fatalf("gh called %d times, want 1", got)
+	}
+}
+
+func TestEnqueueHeadRejectsEmptyPayload(t *testing.T) {
+	bin, _ := fakeGH(t, `echo '{"data":{"enqueuePullRequest":{"mergeQueueEntry":null}}}'`)
+	_, err := testClient(bin).EnqueueHead(context.Background(), "acme/api", 42, "PR_kwexample", "abc123")
+	if err == nil || !strings.Contains(err.Error(), "did not queue the reviewed head") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEnqueueHeadRejectsMissingArgumentsBeforeCallingGitHub(t *testing.T) {
+	for _, test := range []struct{ name, id, sha string }{
+		{"no id", "", "abc123"},
+		{"no sha", "PR_kwexample", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin, countFile := fakeGH(t, `echo '{"data":{}}'`)
+			_, err := testClient(bin).EnqueueHead(context.Background(), "acme/api", 42, test.id, test.sha)
+			if err == nil || !strings.Contains(err.Error(), "needs a pull request id and a head sha") {
+				t.Fatalf("err = %v", err)
+			}
+			if got := calls(t, countFile); got != 0 {
+				t.Fatalf("gh called %d times, want none", got)
+			}
+		})
 	}
 }
 

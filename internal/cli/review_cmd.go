@@ -174,7 +174,7 @@ func (a *app) cmdReview(argv []string) int {
 			a.out.Printf("auto-merge: %s\n", a.out.Yellow(mergeStatus))
 			a.notifyApprovalRequired(notify, repo, number, "")
 		} else {
-			a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus))
+			a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus+queuePosition(mergeResult)))
 		}
 	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
@@ -200,6 +200,8 @@ func (a *app) cmdReview(argv []string) int {
 		switch mergeStatus {
 		case automerge.Merged:
 			body += " Merged."
+		case automerge.Queued:
+			body += " Queued for merge."
 		}
 		a.out.Notify("quorum: review complete", body)
 	}

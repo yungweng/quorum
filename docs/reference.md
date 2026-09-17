@@ -414,16 +414,26 @@ After a posted review with zero Blockers and zero Critical findings, quorum:
 2. submits an approval tied to that commit, unless the same user already
    approved it; and
 3. reads the repository's allowed merge methods and calls GitHub's merge API
-   with `sha=SHA`, preferring `merge`, then `squash`, then `rebase`.
+   with `sha=SHA`, preferring `merge`, then `squash`, then `rebase`; or, when
+   the target branch requires a merge queue, adds the reviewed commit to the
+   queue with `expectedHeadOid=SHA` instead.
 
 Suggestions and Questions do not block. GitHub branch rules and required checks
 still apply; optional check failures do not block the merge wait. The merge is
 one atomic request for the reviewed SHA, so it fails rather than leaving a new
-request that could survive a later push. Target branches that require a merge
-queue are rejected before approval. Quorum never
+request that could survive a later push. Queueing binds the same SHA the same
+way: GitHub refuses the request if the head has moved, and quorum never uses
+`gh pr merge --auto`, which would leave a request that outlives the reviewed
+head. A queued run is reported as `queued for merge` and ends there; GitHub
+merges the entry, ejects it or leaves it waiting, and the dashboard shows the
+pull request as `auto-merge queued` in the meantime. Running quorum again
+against a pull request already queued at the reviewed head reports the same
+status without approving or queueing twice; an entry for any other commit is
+treated as head drift. Quorum never
 disables an existing auto-merge or merge-queue request because it cannot prove
 who created it. Repositories that allow none of GitHub's merge, squash, or
-rebase methods are rejected before approval. GitHub does not let you approve
+rebase methods are rejected before approval; a queue-required branch skips that
+check, because the queue chooses the method. GitHub does not let you approve
 your own PR, so quorum skips the approval and merges an own PR directly when
 GitHub reports no required review. When the branch requires an approving
 review, quorum skips approval and merge, reports `awaiting approval`, and
