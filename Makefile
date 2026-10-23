@@ -35,8 +35,15 @@ deadcode:
 		exit 1; \
 	fi
 
+# Lint like CI: its pinned golangci-lint, on the Go version from go.mod. A
+# linter built for one Go release cannot type-check another release's stdlib,
+# so a newer local Go would otherwise break the check. Keep the version in sync
+# with .github/workflows/ci.yml.
+GOLANGCI_LINT_VERSION := v2.12.2
+GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
+
 lint:
-	golangci-lint run ./...
+	GOTOOLCHAIN=go$(GO_VERSION) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 check: fmt-check test build deadcode lint
 
