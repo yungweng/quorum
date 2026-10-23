@@ -9,7 +9,8 @@ import (
 )
 
 // ensureBaseCurrent merges the base branch into the head before a review runs
-// whenever the head does not contain the latest fetched base. It reports
+// whenever the head does not contain the latest fetched base, or with
+// BaseUpdateOnConflict only when that merge would conflict. It reports
 // whether the merge moved HEAD, so callers can discard a review of the old
 // commit instead of declaring that stale result ready.
 //
@@ -35,6 +36,12 @@ func (r *run) ensureBaseCurrent() (bool, error) {
 	}
 	if current {
 		return false, nil
+	}
+	if r.o.BaseUpdateOnConflict {
+		conflicts, err := r.p.Git.MergeConflicts(r.ctx, r.worktree, "HEAD", "origin/"+base)
+		if err != nil || !conflicts {
+			return false, err
+		}
 	}
 	return r.mergeOutdatedBase(base)
 }

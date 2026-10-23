@@ -92,7 +92,8 @@ credentials, a protected branch, the network - never reach a fix session.
 Draft PRs are refused unless the run says `--draft` or the config says
 `BABYSIT_DRAFTS=1`. Before the first review and before reporting ready, babysit
 fetches the base and merges it when the branch is behind. Conflicts go through
-the fix session, and the merged head is reviewed again. `RESOLVE_CONFLICTS=0`
+the fix session, and the merged head is reviewed again. `BASE_UPDATE=conflicts`
+merges only when the base would conflict. `RESOLVE_CONFLICTS=0`
 or `--no-resolve-conflicts` turns all automatic base updates off.
 
 When the final review comes back with zero Blockers and Critical findings but
@@ -373,6 +374,7 @@ DIVERGENCE_ESCALATE_TO="" # users or org/team slugs to mention, without @
 SANDBOXED=0
 BABYSIT_DRAFTS=0         # 1 lets quorum babysit work on draft PRs without --draft
 RESOLVE_CONFLICTS=1      # update from the base and resolve conflicts before reporting ready
+BASE_UPDATE="always"     # always: merge the base whenever behind; conflicts: only when it would conflict
 FIX_SUGGESTIONS=1        # after a clean final review, triage and implement leftover Suggestions once
 LOOP_MODE="offline"      # offline: iterate locally, one push and CI run at the end; online: push and CI wait every round
 

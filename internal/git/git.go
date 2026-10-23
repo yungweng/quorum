@@ -233,6 +233,22 @@ func (g G) UnmergedFiles(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "diff", "--name-only", "--diff-filter=U")
 }
 
+// MergeConflicts reports whether merging theirs into ours would conflict,
+// without touching the worktree or the index.
+func (g G) MergeConflicts(ctx context.Context, dir, ours, theirs string) (bool, error) {
+	cmd := exec.CommandContext(ctx, g.Bin, "merge-tree", "--write-tree", "--quiet", ours, theirs)
+	cmd.Dir = dir
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, fmt.Errorf("git merge-tree: %v", err)
+}
+
 // IsAncestor reports whether ancestor is reachable from descendant. It is how
 // "the local branch is merely behind origin" is told apart from "the local
 // branch carries commits of its own": a fix pipeline pushes to origin without

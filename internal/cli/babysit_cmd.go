@@ -105,6 +105,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		AllowDraft:           a.cfg.BabysitDrafts || args.boolean("draft"),
 		Local:                args.boolean("local"),
 		ResolveConflicts:     a.cfg.ResolveConflicts && !args.boolean("no-resolve-conflicts"),
+		BaseUpdateOnConflict: a.cfg.BaseUpdate == config.BaseUpdateConflicts,
 		FixSuggestions:       a.cfg.FixSuggestions && !args.boolean("no-fix-suggestions"),
 		DivergenceScan:       a.cfg.DivergenceScan || args.boolean("divergence-scan"),
 		DivergenceEscalateTo: slices.Clone(a.cfg.DivergenceEscalateTo),
@@ -372,7 +373,8 @@ the change under review, so a change cannot weaken or hijack its own gate.
 Draft PRs are refused unless you pass --draft or set BABYSIT_DRAFTS=1. Before
 the first review and before reporting ready, quorum fetches the base and merges
 it when the branch is behind. Conflicts go through the fix session, and the
-merged head is reviewed again. RESOLVE_CONFLICTS=0 or --no-resolve-conflicts
+merged head is reviewed again. BASE_UPDATE=conflicts merges only when the base
+would conflict. RESOLVE_CONFLICTS=0 or --no-resolve-conflicts
 turns all automatic base updates off.
 
 When the final review is clean but still lists Suggestions, one last fix round

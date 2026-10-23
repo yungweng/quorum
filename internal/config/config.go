@@ -78,6 +78,10 @@ type Config struct {
 	// ResolveConflicts has babysit merge the latest base before reviewing and
 	// resolve conflicts through the fix session.
 	ResolveConflicts bool
+	// BaseUpdate is when ResolveConflicts merges the base: BaseUpdateAlways
+	// (the default) whenever the branch is behind, BaseUpdateConflicts only
+	// when the merge would conflict.
+	BaseUpdate string
 	// FixSuggestions has babysit run one terminal fix round when the final
 	// review is clean but still lists Suggestions: triage each one, implement
 	// what is worth it, and end without another review.
@@ -131,6 +135,12 @@ const (
 	LoopOnline  = "online"
 )
 
+// Base update modes.
+const (
+	BaseUpdateAlways    = "always"
+	BaseUpdateConflicts = "conflicts"
+)
+
 // The engines reviews and fix sessions can run on. Defined here rather than
 // imported so config keeps its zero internal dependencies.
 const (
@@ -176,6 +186,7 @@ func Default() Config {
 		MaxCIFixes:       3,
 		FixTimeout:       2 * time.Hour,
 		ResolveConflicts: true,
+		BaseUpdate:       BaseUpdateAlways,
 		FixSuggestions:   true,
 		LoopMode:         LoopOffline,
 
@@ -396,6 +407,10 @@ func (c *Config) set(key, value string) {
 		c.BabysitDrafts = truthy(value)
 	case "RESOLVE_CONFLICTS":
 		c.ResolveConflicts = truthy(value)
+	case "BASE_UPDATE":
+		if v := strings.TrimSpace(strings.ToLower(value)); v == BaseUpdateAlways || v == BaseUpdateConflicts {
+			c.BaseUpdate = v
+		}
 	case "FIX_SUGGESTIONS":
 		c.FixSuggestions = truthy(value)
 	case "LOOP_MODE":
@@ -556,6 +571,7 @@ func (c Config) Render() string {
 	w("SANDBOXED=%s\t\t# 1 uses the engine's own sandbox/approval defaults instead of bypassing them\n", bit(c.Sandboxed))
 	w("BABYSIT_DRAFTS=%s\t# 1 lets `quorum babysit` work on draft PRs without --draft\n", bit(c.BabysitDrafts))
 	w("RESOLVE_CONFLICTS=%s\t# update from the base and resolve conflicts before reporting ready\n", bit(c.ResolveConflicts))
+	w("BASE_UPDATE=%q\t# always: merge the base whenever behind; conflicts: only when it would conflict\n", c.BaseUpdate)
 	w("FIX_SUGGESTIONS=%s\t# after a clean final review, triage and implement leftover Suggestions once\n", bit(c.FixSuggestions))
 	w("LOOP_MODE=%q\t# offline: iterate locally, one push and CI run at the end; online: push and wait for CI every round\n\n", c.LoopMode)
 

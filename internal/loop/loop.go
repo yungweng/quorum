@@ -134,6 +134,9 @@ type Options struct {
 	// updates use git directly; conflicts go through the fix session. Any
 	// update invalidates an older review of the branch head.
 	ResolveConflicts bool
+	// BaseUpdateOnConflict narrows ResolveConflicts to bases that would
+	// conflict; a branch that is merely behind is reviewed as it is.
+	BaseUpdateOnConflict bool
 	// FixSuggestions runs one terminal fix round when the final review is
 	// clean but still lists Suggestions: triage each one, implement what is
 	// worth it, and end the run without another review.

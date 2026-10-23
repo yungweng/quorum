@@ -237,6 +237,47 @@ func TestOfflineBaseUpdateDefersThePush(t *testing.T) {
 	}
 }
 
+func TestConflictOnlyModeSkipsACleanBase(t *testing.T) {
+	f := newBaseUpdateRepo(t)
+	f.advanceBase()
+	r := f.run(nil, 0)
+	r.o.BaseUpdateOnConflict = true
+	updated, err := r.ensureBaseCurrent()
+	if err != nil || updated {
+		t.Fatalf("base update = %v, %v; want none", updated, err)
+	}
+	if head := f.git(f.worktree, "rev-parse", "HEAD"); head != f.featureSHA {
+		t.Fatalf("clean base moved HEAD to %s", head)
+	}
+}
+
+func TestConflictOnlyModeStillMergesAConflictingBase(t *testing.T) {
+	bin := writeTool(t, "git", `
+case "$*" in
+  "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
+	"merge-base --is-ancestor origin/main HEAD") exit 1 ;;
+	"merge-tree --write-tree --quiet HEAD origin/main") exit 1 ;;
+	"rev-parse HEAD") echo "head-sha" ;;
+	"merge --no-ff -m Merge main into feature origin/main") echo "merge refused" >&2; exit 2 ;;
+	"diff --name-only --diff-filter=U") ;;
+  *) echo "unexpected git call: $*" >&2; exit 1 ;;
+esac`)
+	worktree := t.TempDir()
+	r := &run{
+		p:        &Pipeline{Git: git.New(bin)},
+		o:        Options{ResolveConflicts: true, BaseUpdateOnConflict: true, RepoRoot: t.TempDir()},
+		ctx:      context.Background(),
+		rep:      NopReporter{},
+		pr:       gh.FullPR{BaseRefName: "main"},
+		branch:   "feature",
+		worktree: worktree,
+		env:      envexec.Env{Worktree: worktree},
+	}
+	if _, err := r.ensureBaseCurrent(); err == nil || !strings.Contains(err.Error(), "merge refused") {
+		t.Fatalf("base update error = %v, want the merge attempt", err)
+	}
+}
+
 type reviewerFunc func(context.Context, review.Options) (*review.Result, error)
 
 func (f reviewerFunc) Run(ctx context.Context, o review.Options) (*review.Result, error) {
