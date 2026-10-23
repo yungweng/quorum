@@ -153,9 +153,10 @@ func TestBaseUpdateStopsWhenGitCannotStartTheMerge(t *testing.T) {
 	bin := writeTool(t, "git", `
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
-	"merge-base --is-ancestor origin/main HEAD") exit 1 ;;
+  "rev-parse origin/main") echo "base-sha" ;;
+	"merge-base --is-ancestor base-sha HEAD") exit 1 ;;
 	"rev-parse HEAD") echo "head-sha" ;;
-	"merge --no-ff -m Merge main into feature origin/main") echo "merge refused" >&2; exit 2 ;;
+	"merge --no-ff -m Merge main into feature base-sha") echo "merge refused" >&2; exit 2 ;;
 	"diff --name-only --diff-filter=U") ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac`)
@@ -179,7 +180,8 @@ func TestCurrentBranchNeverStartsABaseUpdate(t *testing.T) {
 	bin := writeTool(t, "git", `
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
-	"merge-base --is-ancestor origin/main HEAD") ;;
+  "rev-parse origin/main") echo "base-sha" ;;
+	"merge-base --is-ancestor base-sha HEAD") ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac`)
 	r := &run{
@@ -255,10 +257,11 @@ func TestConflictOnlyModeStillMergesAConflictingBase(t *testing.T) {
 	bin := writeTool(t, "git", `
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
-	"merge-base --is-ancestor origin/main HEAD") exit 1 ;;
-	"merge-tree --write-tree --quiet HEAD origin/main") exit 1 ;;
+  "rev-parse origin/main") echo "base-sha" ;;
+	"merge-base --is-ancestor base-sha HEAD") exit 1 ;;
+	"merge-tree --write-tree --quiet HEAD base-sha") exit 1 ;;
 	"rev-parse HEAD") echo "head-sha" ;;
-	"merge --no-ff -m Merge main into feature origin/main") echo "merge refused" >&2; exit 2 ;;
+	"merge --no-ff -m Merge main into feature base-sha") echo "merge refused" >&2; exit 2 ;;
 	"diff --name-only --diff-filter=U") ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac`)
@@ -370,9 +373,10 @@ func TestConflictSessionThatCommitsNothingStopsTheRun(t *testing.T) {
 	gitBin := writeTool(t, "git", `
 case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
-	"merge-base --is-ancestor origin/main HEAD") exit 1 ;;
+  "rev-parse origin/main") echo "base-sha" ;;
+	"merge-base --is-ancestor base-sha HEAD") exit 1 ;;
   "rev-parse HEAD") echo "same-sha" ;;
-	"merge --no-ff -m Merge main into feature origin/main") echo "CONFLICT" >&2; exit 1 ;;
+	"merge --no-ff -m Merge main into feature base-sha") echo "CONFLICT" >&2; exit 1 ;;
 	"diff --name-only --diff-filter=U") echo "shared.txt" ;;
 	"status --porcelain") echo "UU shared.txt" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
@@ -412,6 +416,38 @@ printf 'nothing to do\n' > "$out"`)
 	_, err := r.ensureBaseCurrent()
 	if !errors.Is(err, ErrConflicts) {
 		t.Fatalf("ensureBaseCurrent = %v, want ErrConflicts", err)
+	}
+}
+
+// TestBaseMovingDuringConflictSessionKeepsTheMerge covers a concurrent run
+// fetching the shared origin/main while the conflict session works: the merge
+// of the base it started from is still valid and must be published.
+func TestBaseMovingDuringConflictSessionKeepsTheMerge(t *testing.T) {
+	f := newBaseUpdateRepo(t)
+	r := conflictResolutionRun(t, f)
+	codexBin := writeTool(t, "codex", `
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+printf 'resolved\n' > feature.txt
+git add feature.txt
+git commit -q -m "Merge main into feature"
+git -C "$QUORUM_TEST_CLONE" commit -q --allow-empty -m "concurrent base change"
+git -C "$QUORUM_TEST_CLONE" push -q origin main
+git -C "$QUORUM_TEST_CLONE" fetch -q origin +refs/heads/main:refs/remotes/origin/main
+printf 'merged and resolved\n' > "$out"`)
+	r.fixer = codex.Options{Bin: codexBin}
+	t.Setenv("QUORUM_TEST_CLONE", f.clone)
+
+	if _, err := r.ensureBaseCurrent(); err != nil {
+		t.Fatal(err)
+	}
+	mergedSHA := f.git(f.worktree, "rev-parse", "HEAD")
+	if pushed := f.git(f.origin, "rev-parse", "refs/heads/feature"); pushed != mergedSHA {
+		t.Fatalf("origin/feature = %s, want the merge commit %s", pushed, mergedSHA)
 	}
 }
 

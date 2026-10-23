@@ -30,7 +30,14 @@ func (r *run) ensureBaseCurrent() (bool, error) {
 	}); err != nil {
 		return false, err
 	}
-	current, err := r.p.Git.IsAncestor(r.ctx, r.worktree, "origin/"+base, "HEAD")
+	// Pin the fetched base. origin/<base> is shared by every run in the
+	// repository, and a concurrent run may fetch it again while a conflict
+	// session works; the merge and its check must agree on one commit.
+	baseSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "origin/"+base)
+	if err != nil {
+		return false, err
+	}
+	current, err := r.p.Git.IsAncestor(r.ctx, r.worktree, baseSHA, "HEAD")
 	if err != nil {
 		return false, err
 	}
@@ -38,15 +45,15 @@ func (r *run) ensureBaseCurrent() (bool, error) {
 		return false, nil
 	}
 	if r.o.BaseUpdateOnConflict {
-		conflicts, err := r.p.Git.MergeConflicts(r.ctx, r.worktree, "HEAD", "origin/"+base)
+		conflicts, err := r.p.Git.MergeConflicts(r.ctx, r.worktree, "HEAD", baseSHA)
 		if err != nil || !conflicts {
 			return false, err
 		}
 	}
-	return r.mergeOutdatedBase(base)
+	return r.mergeOutdatedBase(base, baseSHA)
 }
 
-func (r *run) mergeOutdatedBase(base string) (bool, error) {
+func (r *run) mergeOutdatedBase(base, baseSHA string) (bool, error) {
 	preSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 	if err != nil {
 		return false, err
@@ -57,12 +64,12 @@ func (r *run) mergeOutdatedBase(base string) (bool, error) {
 	mergeErr := r.waitActivity("merging "+base, func() error {
 		return r.env.Run(r.ctx, r.o.FixTimeout, envexec.Cmd{
 			Name:   r.p.Git.Bin,
-			Args:   []string{"merge", "--no-ff", "-m", fmt.Sprintf("Merge %s into %s", base, r.branch), "origin/" + base},
+			Args:   []string{"merge", "--no-ff", "-m", fmt.Sprintf("Merge %s into %s", base, r.branch), baseSHA},
 			Stdout: &output, Stderr: &output,
 		})
 	})
 	if mergeErr == nil {
-		return r.finishBaseUpdate(base, preSHA, "", "Base update from "+base)
+		return r.finishBaseUpdate(base, baseSHA, preSHA, "", "Base update from "+base)
 	}
 
 	unmerged, err := r.p.Git.UnmergedFiles(r.ctx, r.worktree)
@@ -77,10 +84,10 @@ func (r *run) mergeOutdatedBase(base string) (bool, error) {
 		message, _, _ = strings.Cut(message, "\n")
 		return false, fmt.Errorf("merge %s into %s: %s", base, r.branch, message)
 	}
-	return r.resolveBaseConflicts(base, preSHA)
+	return r.resolveBaseConflicts(base, baseSHA, preSHA)
 }
 
-func (r *run) resolveBaseConflicts(base, preSHA string) (bool, error) {
+func (r *run) resolveBaseConflicts(base, baseSHA, preSHA string) (bool, error) {
 	r.rep.Step(fmt.Sprintf("Merge conflicts with %s", base))
 	r.enter(PhaseConflictFix)
 	r.conflictFixes++
@@ -99,7 +106,7 @@ func (r *run) resolveBaseConflicts(base, preSHA string) (bool, error) {
 		return false, err
 	}
 	label := fmt.Sprintf("Merge conflict fix %d", r.conflictFixes)
-	afterSHA, err := r.requireBaseUpdate(base, preSHA)
+	afterSHA, err := r.requireBaseUpdate(base, baseSHA, preSHA)
 	if err != nil {
 		r.rep.Notify("Konflikte", fmt.Sprintf("%s hat weiterhin ungeloeste Merge-Konflikte", r.targetLabel()))
 		return false, fmt.Errorf("%w: %v: %s", ErrConflicts, err, r.targetReference())
@@ -107,8 +114,8 @@ func (r *run) resolveBaseConflicts(base, preSHA string) (bool, error) {
 	return r.publishBaseUpdate(preSHA, afterSHA, tag, label)
 }
 
-func (r *run) finishBaseUpdate(base, preSHA, tag, label string) (bool, error) {
-	afterSHA, err := r.requireBaseUpdate(base, preSHA)
+func (r *run) finishBaseUpdate(base, baseSHA, preSHA, tag, label string) (bool, error) {
+	afterSHA, err := r.requireBaseUpdate(base, baseSHA, preSHA)
 	if err != nil {
 		return false, err
 	}
@@ -148,7 +155,7 @@ func baseUpdateTag(tag string) string {
 	return tag
 }
 
-func (r *run) requireBaseUpdate(base, preSHA string) (string, error) {
+func (r *run) requireBaseUpdate(base, baseSHA, preSHA string) (string, error) {
 	afterSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 	if err != nil {
 		return "", err
@@ -156,12 +163,12 @@ func (r *run) requireBaseUpdate(base, preSHA string) (string, error) {
 	if afterSHA == preSHA {
 		return "", fmt.Errorf("merge %s into %s did not move HEAD", base, r.branch)
 	}
-	merged, err := r.p.Git.IsAncestor(r.ctx, r.worktree, "origin/"+base, "HEAD")
+	merged, err := r.p.Git.IsAncestor(r.ctx, r.worktree, baseSHA, "HEAD")
 	if err != nil {
 		return "", err
 	}
 	if !merged {
-		return "", fmt.Errorf("merge did not include origin/%s", base)
+		return "", fmt.Errorf("merge did not include origin/%s at %s", base, baseSHA)
 	}
 	return afterSHA, nil
 }
