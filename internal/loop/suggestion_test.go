@@ -33,7 +33,8 @@ func TestSuggestionRoundDue(t *testing.T) {
 
 // No review follows the suggestion round, so the prompt has to ask for triage
 // and explicitly allow ending without any change; a session forced to produce
-// commits would invent them.
+// commits would invent them. It still leans towards implementing, because most
+// leftover Suggestions are worth taking.
 func TestSuggestionRoundPromptDemandsTriageAndAllowsNoChange(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"pr":     suggestionRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
@@ -41,7 +42,8 @@ func TestSuggestionRoundPromptDemandsTriageAndAllowsNoChange(t *testing.T) {
 	} {
 		for _, want := range []string{
 			"first decide whether it is worth implementing",
-			"Changing nothing is a perfectly fine outcome",
+			"lean towards implementing them",
+			"Changing nothing is still a valid outcome",
 			"no further review will check your work",
 			"## Summary",
 		} {

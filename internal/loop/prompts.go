@@ -190,10 +190,12 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 }
 
 // suggestionRoundPrompt hands the Suggestions of the final, otherwise clean
-// review to the session, once. No review round follows, so it demands triage
-// before code: a leftover Suggestion is often an artifact of the reviewers'
-// isolated worktree (a missing service, an unprovisioned test database), and
-// changing nothing is an explicitly allowed outcome.
+// review to the session, once. It leans towards implementing them, since a
+// Suggestion that survives a clean review is usually worth taking, but no
+// review round follows, so it still demands triage before code: a leftover
+// Suggestion can be an artifact of the reviewers' isolated worktree (a missing
+// service, an unprovisioned test database), and changing nothing stays an
+// explicitly allowed outcome.
 func suggestionRoundPrompt(number int, branch string, branchOnly, offline bool, comment string) string {
 	finish := "If you changed code: run the affected checks, commit, and push. Do not wait for CI; the pipeline watches the checks for you."
 	finishBranch := "If you changed code: run the affected checks, commit, and push."
@@ -202,9 +204,9 @@ func suggestionRoundPrompt(number int, branch string, branchOnly, offline bool, 
 		finishBranch = finish
 	}
 	if branchOnly {
-		return fmt.Sprintf(`The final external code review of branch %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so be conservative.
+		return fmt.Sprintf(`The final external code review of branch %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
 
-For each Suggestion, first decide whether it is worth implementing. Skip it when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk outweighs its value. Implement the ones that clearly improve the code. Changing nothing is a perfectly fine outcome.
+Suggestions that survive a clean review usually point at a real improvement, so lean towards implementing them. For each Suggestion, first decide whether it is worth implementing: implement it when it improves the code and you can verify the change with the affected checks. Skip it only when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk clearly outweighs its value. Changing nothing is still a valid outcome when no Suggestion holds up.
 
 %s If you changed nothing, do not commit or push, and briefly state per Suggestion why you skipped it.
 
@@ -212,9 +214,9 @@ For each Suggestion, first decide whether it is worth implementing. Skip it when
 
 %s`, branch, finishBranch, comment)
 	}
-	return fmt.Sprintf(`The final external code review of PR #%d found no Blockers and no Critical issues, but it still lists Suggestions. The full review comment follows below. This is the last step of the run and no further review will check your work, so be conservative.
+	return fmt.Sprintf(`The final external code review of PR #%d found no Blockers and no Critical issues, but it still lists Suggestions. The full review comment follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
 
-For each Suggestion, first decide whether it is worth implementing. Skip it when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk outweighs its value. Implement the ones that clearly improve the code. Changing nothing is a perfectly fine outcome.
+Suggestions that survive a clean review usually point at a real improvement, so lean towards implementing them. For each Suggestion, first decide whether it is worth implementing: implement it when it improves the code and you can verify the change with the affected checks. Skip it only when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk clearly outweighs its value. Changing nothing is still a valid outcome when no Suggestion holds up.
 
 %s Then end your final message with a line that is exactly:
 %s
