@@ -170,3 +170,20 @@ func linkedWorktree(t *testing.T) (string, string) {
 	}
 	return repo, worktree
 }
+
+func TestRunSetsTmpDirOnlyWhenGiven(t *testing.T) {
+	outer, private, worktree := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", outer)
+	for _, tc := range []struct{ tmp, want string }{{private, private}, {"", outer}} {
+		var out bytes.Buffer
+		err := (Env{Worktree: worktree, TmpDir: tc.tmp}).Run(context.Background(), 0, Cmd{
+			Name: "/bin/sh", Args: []string{"-c", `printf %s "$TMPDIR"`}, Stdout: &out,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := out.String(); got != tc.want {
+			t.Fatalf("TmpDir %q: TMPDIR = %q, want %q", tc.tmp, got, tc.want)
+		}
+	}
+}

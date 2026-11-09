@@ -31,6 +31,7 @@ import (
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runname"
+	"github.com/yungweng/quorum/internal/runtmp"
 	"github.com/yungweng/quorum/internal/target"
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
@@ -261,6 +262,14 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	defer releaseClaim()
+	// Every exit path removes the private TMPDIR, failed runs included:
+	// unlike the worktree, nothing in it is needed to resume.
+	tmpDir, removeTmp, err := runtmp.New()
+	if err != nil {
+		unlockCache()
+		return nil, fmt.Errorf("create private TMPDIR: %w", err)
+	}
+	defer removeTmp()
 	if o.ResumeRun == "" {
 		if err := writeRunTarget(run.target, newRunTarget(o, tgt, baseBranch)); err != nil {
 			return nil, fmt.Errorf("write run target metadata: %w", err)
@@ -275,6 +284,9 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	unlockCache()
 	if removed > 0 {
 		rep.Info(fmt.Sprintf("gc: removed %d old cache dir(s)", removed))
+	}
+	if n := runtmp.Sweep(); n > 0 {
+		rep.Info(fmt.Sprintf("gc: removed %d orphaned temp dir(s)", n))
 	}
 
 	rep.Header(RunHeader{
@@ -301,7 +313,7 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 
 	env := envexec.Env{
 		Worktree: run.worktree, Direnv: o.UseDirenv, DirenvBin: o.DirenvBin,
-		GitConfig: configPath, GitHooksPath: hooksPath,
+		GitConfig: configPath, GitHooksPath: hooksPath, TmpDir: tmpDir,
 	}
 	if o.UseDirenv {
 		if err := r.allowDirenv(ctx, o, run, baseRef, env, rep); err != nil {

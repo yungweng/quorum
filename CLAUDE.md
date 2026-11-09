@@ -43,6 +43,7 @@ internal/claudecli/  Claude Code CLI adapter
 internal/grokcli/    Grok CLI adapter
 internal/proc/       run with a timeout, kill the whole process group
 internal/envexec/    run a command inside the worktree, through direnv
+internal/runtmp/     a private TMPDIR per run, removed on every exit
 internal/gh/         the GitHub CLI, with one retry policy
 internal/git/        git, always against an explicit directory
 internal/config/ internal/state/ internal/paths/ internal/ui/ internal/logbook/
