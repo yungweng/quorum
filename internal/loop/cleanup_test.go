@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/runtmp"
 )
 
 func TestDirtyWorktreeErrorPreservesStatusEvidence(t *testing.T) {
@@ -116,5 +117,29 @@ func TestCleanupKeepsOnlyFailedOrRequestedWorktrees(t *testing.T) {
 					removed, test.wantRemove, call, err)
 			}
 		})
+	}
+}
+
+func TestFailedRunCleanupRemovesPrivateTmpDirButKeepsWorktree(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	tmpDir, removeTmp, err := runtmp.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := t.TempDir()
+	r := &run{
+		p:         &Pipeline{Git: git.New("false")},
+		ctx:       context.Background(),
+		worktree:  worktree,
+		removeTmp: removeTmp,
+	}
+
+	r.cleanup(false)
+
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("failed run kept its private TMPDIR: %v", err)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("failed run lost its worktree: %v", err)
 	}
 }

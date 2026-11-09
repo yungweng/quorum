@@ -608,6 +608,15 @@ cache directories together and every poll enforces it, so nothing waits for
 somebody to run `quorum gc`. The managed clones are outside the budget: one per
 repository, bounded by how many you review.
 
+Every review and babysit run also gets a private `TMPDIR`, `quorum-*` in the
+system temp directory, and every command it starts inherits it. The run
+deletes it on every exit, failed runs included, so scratch files that tools
+leave behind go with the run. `nix profile install`, which devbox runs in each
+fresh worktree, leaves thousands of files per call, enough to exhaust the inode
+limit of a tmpfs `/tmp` after a few dozen reviews. A run killed outright leaves
+its directory behind; the next run and `quorum gc` remove it once its claim
+lock is free.
+
 The run cache never keeps a repository's `main`, `development` or other branch
 checkout. Its worktrees are detached snapshots made for one run. Successful
 runs remove those snapshots immediately; the directories that remain belong to

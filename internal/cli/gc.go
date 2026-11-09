@@ -15,6 +15,7 @@ import (
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/runtmp"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
 )
@@ -33,6 +34,13 @@ func (a *app) cmdGC(args []string) int {
 	freed, removed, err := a.collect(dry)
 	if err != nil {
 		return a.die("cache collection: %v", err)
+	}
+	// Private TMPDIRs of runs that were killed outright. They live outside the
+	// cache, so they count against neither the budget nor the report below.
+	if !dry {
+		if n := runtmp.Sweep(); n > 0 {
+			a.out.Printf("removed %d orphaned temp director%s\n", n, directoryPlural(n))
+		}
 	}
 	if freed > 0 || removed > 0 {
 		verb := "removed"

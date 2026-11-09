@@ -27,6 +27,7 @@ import (
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/runname"
+	"github.com/yungweng/quorum/internal/runtmp"
 	"github.com/yungweng/quorum/internal/target"
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
@@ -276,6 +277,7 @@ type run struct {
 	logDir       string
 	msgDir       string
 	releaseClaim func()
+	removeTmp    func()
 
 	env   envexec.Env
 	fixer engine.Fixer
@@ -445,6 +447,7 @@ func (r *run) prepare() error {
 	}
 	r.gcOldRuns()
 	unlockCache()
+	runtmp.Sweep()
 
 	// The review side is reported resolved, not as configured: an empty review
 	// model becomes the engine's default here in quorum, so passing the raw
@@ -486,9 +489,14 @@ func (r *run) prepare() error {
 		return fmt.Errorf("isolate worktree config: %w", err)
 	}
 
+	tmpDir, removeTmp, err := runtmp.New()
+	if err != nil {
+		return fmt.Errorf("create private TMPDIR: %w", err)
+	}
+	r.removeTmp = removeTmp
 	r.env = envexec.Env{
 		Worktree: r.worktree, Direnv: r.o.UseDirenv, DirenvBin: r.o.DirenvBin,
-		GitConfig: configPath, GitHooksPath: r.hooksPath,
+		GitConfig: configPath, GitHooksPath: r.hooksPath, TmpDir: tmpDir,
 	}
 	fixer, err := engine.NewFixer(r.o.Engine, engine.FixerOptions{
 		Bin: r.o.engineBin(r.o.Engine), Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
@@ -1363,7 +1371,13 @@ func (r *run) cleanup(succeeded bool) {
 	r.releaseRunClaim()
 }
 
+// releaseRunClaim ends the run's ownership. The private TMPDIR goes first and
+// on every outcome: unlike a failed worktree, nothing in it is kept for later.
 func (r *run) releaseRunClaim() {
+	if r.removeTmp != nil {
+		r.removeTmp()
+		r.removeTmp = nil
+	}
 	if r.releaseClaim != nil {
 		r.releaseClaim()
 		r.releaseClaim = nil

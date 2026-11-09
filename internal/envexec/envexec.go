@@ -29,6 +29,9 @@ type Env struct {
 	// GitHooksPath keeps hook installers and agent-run git commands inside the
 	// worktree's private hook snapshot instead of the repository's shared hooks.
 	GitHooksPath string
+	// TmpDir becomes TMPDIR for every command, so the run's scratch files,
+	// including what tools leak, go away with the run. Empty keeps TMPDIR.
+	TmpDir string
 	// DirenvBin is the resolved direnv path. Empty falls back to a PATH lookup,
 	// which is wrong under launchd and right everywhere else.
 	DirenvBin string
@@ -46,7 +49,7 @@ type Cmd struct {
 // Run executes cmd in the worktree with the given timeout (0 disables it).
 func (e Env) Run(ctx context.Context, timeout time.Duration, c Cmd) error {
 	name, args := e.wrap(c.Name, c.Args)
-	env, err := commandEnv(e.GitConfig, e.GitHooksPath)
+	env, err := commandEnv(e.GitConfig, e.GitHooksPath, e.TmpDir)
 	if err != nil {
 		return err
 	}
@@ -61,8 +64,11 @@ func (e Env) Run(ctx context.Context, timeout time.Duration, c Cmd) error {
 	})
 }
 
-func commandEnv(config, hooksPath string) ([]string, error) {
+func commandEnv(config, hooksPath, tmpDir string) ([]string, error) {
 	env := goCacheEnv()
+	if tmpDir != "" {
+		env = setEnv(env, "TMPDIR", tmpDir)
+	}
 	if config != "" {
 		env = setEnv(env, "GIT_CONFIG", config)
 	}
@@ -146,7 +152,7 @@ func (e Env) Allow(ctx context.Context) error {
 	if bin == "" {
 		bin = "direnv"
 	}
-	env, err := commandEnv(e.GitConfig, e.GitHooksPath)
+	env, err := commandEnv(e.GitConfig, e.GitHooksPath, e.TmpDir)
 	if err != nil {
 		return err
 	}
