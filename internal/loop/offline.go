@@ -86,7 +86,7 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			return false, fmt.Errorf("checking the pull request head after CI: %w", err)
 		}
 	}
-	if err := r.postFinalReviewComment(res, round, findings); err != nil {
+	if err := r.postFinalReviewComment(res, round, findings, comment); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -134,18 +134,26 @@ func (r *run) flushFixComments() error {
 // public. Offline rounds review unpushed commits, so review.Runner could not
 // post at review time the way an online round does; the push barrier that just
 // completed is what guarantees GitHub now has the reviewed commit.
-func (r *run) postFinalReviewComment(res *Result, round int, findings review.Findings) error {
-	if r.target.BranchOnly || !r.o.Post || findings.CommentFile == "" {
+//
+// It posts the verified text the review returned, not the review's
+// final-pr-comment.md. The review run directory is released when the review
+// finishes, and the push and CI wait in between take long enough for cache
+// collection to remove it; the text in hand is the same validated comment.
+func (r *run) postFinalReviewComment(res *Result, round int, findings review.Findings, comment string) error {
+	if r.target.BranchOnly || !r.o.Post {
 		return nil
 	}
 	if findings.HeadSHA != r.headSHA {
 		r.rep.Info("suggestion changes moved the head past the clean review; skipping its stale comment")
 		return nil
 	}
+	if strings.TrimSpace(comment) == "" {
+		return fmt.Errorf("review round %d returned no comment text to post to PR #%d", round, r.pr.Number)
+	}
 	if err := r.requirePublishedHead(findings.HeadSHA); err != nil {
 		return fmt.Errorf("checking the pull request head before posting review round %d's comment: %w", round, err)
 	}
-	url, err := r.p.GH.Comment(r.ctx, r.o.RepoRoot, r.pr.Number, findings.CommentFile)
+	url, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, comment)
 	if err != nil {
 		return fmt.Errorf("posting review round %d's comment to PR #%d: %w", round, r.pr.Number, err)
 	}

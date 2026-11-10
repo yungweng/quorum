@@ -328,7 +328,7 @@ func (a *app) babysitExit(err error) int {
 	switch {
 	case errors.Is(err, loop.ErrGateAborted):
 		return exitGateAborted
-	case errors.Is(err, loop.ErrCIRed):
+	case errors.Is(err, loop.ErrCIRed), errors.Is(err, loop.ErrCIUnconfirmed):
 		return exitCIRed
 	case errors.Is(err, loop.ErrTestsRed):
 		// The local gate is CI's offline counterpart, so scripts that branch on
@@ -423,7 +423,8 @@ Options:
 
 Exit codes:
   2  aborted at a gate
-  3  CI or the local test command still red after --max-ci-fixes attempts
+  3  CI or the local test command still red after --max-ci-fixes attempts, or
+     GitHub never confirmed CI for the head
   4  review not converged after --max-iter rounds
   5  a fix step made no progress while its failure remains
   6  the review/fix history contains incompatible decisions

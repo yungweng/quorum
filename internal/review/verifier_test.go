@@ -187,3 +187,21 @@ func TestVerifierRejectsAnUnexpectedHead(t *testing.T) {
 		t.Fatalf("HEAD check error = %v", err)
 	}
 }
+
+// An engine that exits cleanly without writing final-pr-comment.md must not
+// count as a verified review: the run fails closed with the resumable verifier
+// error, and nothing exists that could be posted.
+func TestVerifierFailsClosedWhenTheEngineSucceedsWithoutAReport(t *testing.T) {
+	run, env, opts, g, head := fakeVerifier(t, goodComment, false)
+	if err := os.WriteFile(opts.Bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := (&Runner{Git: g}).verify(context.Background(), Options{ReviewTimeout: 5 * time.Second},
+		run, env, opts, "verify", head, nil, NopReporter{})
+	if !errors.Is(err, ErrVerifierInvalid) || !strings.Contains(err.Error(), "after 2 attempts") {
+		t.Fatalf("verify error = %v, want two-attempt ErrVerifierInvalid", err)
+	}
+	if _, statErr := os.Stat(run.comment); !os.IsNotExist(statErr) {
+		t.Fatalf("a final comment exists after a failed verification: %v", statErr)
+	}
+}

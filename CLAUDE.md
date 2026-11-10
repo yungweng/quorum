@@ -107,7 +107,15 @@ reporting without breaking the build.
   on it every three seconds.
 - **`gh pr checks` is not trustworthy right after a push.** It briefly still
   answers for the previous head, so a red commit reads as green. Never read a
-  check result before GitHub reports the pushed sha as the PR head.
+  check result before GitHub reports the pushed sha as the PR head. Even then
+  its list may still lack Actions runs GitHub has not registered yet, so a
+  green answer is only accepted after `confirmCI` checks the exact head sha:
+  required checks reported and passed, Actions runs finished.
+- **A review run directory belongs to its review only while the review runs.**
+  Its claim ends when `review.Runner.Run` returns, and cache collection may
+  remove the directory from then on. Anything the pipeline needs later, such as
+  the comment the offline loop posts after its push, comes from the returned
+  `review.Result`, never from a path into that directory.
 - **Help text, option parsing and `docs/reference.md` describe the same flags.**
   When you touch one, update all three. The README shows only the flags worth an
   example; the full table lives in the reference.

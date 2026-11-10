@@ -55,6 +55,11 @@ var (
 	// onto the same exit code: the configured test command stayed red after the
 	// allowed fix attempts.
 	ErrTestsRed = errors.New("the test command still fails after the allowed fix attempts")
+	// ErrCIUnconfirmed maps onto exit 3 as well: GitHub never confirmed CI for
+	// the head - a required check did not report, or a workflow run failed
+	// without a check a fix session could be pointed at. The run stops rather
+	// than reading as green or spending a fix session on it.
+	ErrCIUnconfirmed = errors.New("CI not confirmed green for the head")
 )
 
 // Defaults for a run.
@@ -68,9 +73,6 @@ const (
 	// headSettleTimeout is how long GitHub gets to report a pushed sha as the
 	// PR head before the pipeline treats it as a problem.
 	headSettleTimeout = 180 * time.Second
-	// noChecksTimeout is how long to keep asking before accepting that a PR
-	// genuinely has no CI.
-	noChecksTimeout = 180 * time.Second
 	// A golangci-lint process uses a shared cache lock and rejects concurrent
 	// runners. The hook itself can be expensive, so a small bounded retry is
 	// enough to outlive the competing run without handing a transient lock to a
@@ -79,6 +81,11 @@ const (
 	prePushLockRetryDelay = 5 * time.Second
 	runRetention          = 7 * 24 * time.Hour
 )
+
+// noChecksTimeout is how long GitHub gets to register the checks and Actions
+// runs of a head before the wait accepts that there are none, or stops on a
+// required check that never reported. A variable so tests can shorten it.
+var noChecksTimeout = 180 * time.Second
 
 // Options configure one pipeline run.
 type Options struct {
