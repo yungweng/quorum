@@ -202,7 +202,7 @@ func TestFinalOfflineReviewCommentSkipsAHeadMovedBySuggestions(t *testing.T) {
 	if err := r.postFinalReviewComment(res, 1, review.Findings{
 		HeadSHA:     "reviewed-head",
 		CommentFile: "review.md",
-	}); err != nil {
+	}, "## Summary\nfine\n"); err != nil {
 		t.Fatal(err)
 	}
 	if res.LastFindings.Posted {
@@ -231,11 +231,78 @@ func TestFinalOfflineReviewCommentRejectsHeadDrift(t *testing.T) {
 	err := r.postFinalReviewComment(&Result{}, 1, review.Findings{
 		HeadSHA:     "pushed-head",
 		CommentFile: "review.md",
-	})
+	}, "## Summary\nfine\n")
 	if err == nil || !strings.Contains(err.Error(), "refusing to post") {
 		t.Fatalf("err = %v", err)
 	}
 	if _, err := os.Stat(commented); !os.IsNotExist(err) {
 		t.Fatalf("head-drifted review reached the comment command: %v", err)
+	}
+}
+
+// The review run directory is released when the review returns, and the push
+// and CI wait before this post take long enough for cache collection to
+// remove it. The verified text the review handed back must still be posted,
+// exactly once, on the reviewed head.
+func TestFinalOfflineReviewCommentPostsTheVerifiedTextAfterItsRunDirectoryWasCollected(t *testing.T) {
+	dir := t.TempDir()
+	posted := filepath.Join(dir, "posted")
+	bin := filepath.Join(dir, "gh")
+	script := "#!/bin/sh\n" +
+		"if test \"$1\" = pr && test \"$2\" = view; then printf pushed-head; exit 0; fi\n" +
+		"if test \"$1 $2 $3 $4\" = 'pr comment 42 --body'; then printf '%s' \"$5\" >> '" + posted + "'; " +
+		"echo https://github.com/acme/api/pull/42#issuecomment-1; exit 0; fi\n" +
+		"echo \"unexpected: $*\" >&2; exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	collected := filepath.Join(dir, "reviews", "acme-api-pr-42", "output", "final-pr-comment.md")
+	if _, err := os.Stat(collected); !os.IsNotExist(err) {
+		t.Fatalf("the collected comment file exists: %v", err)
+	}
+	r := &run{
+		p:       &Pipeline{GH: gh.New(bin)},
+		o:       Options{RepoRoot: dir, Post: true},
+		ctx:     context.Background(),
+		rep:     NopReporter{},
+		pr:      gh.FullPR{Number: 42},
+		headSHA: "pushed-head",
+	}
+	res := &Result{}
+	const comment = "## Summary\nClean.\n\n## Blockers\n\nNone.\n"
+	if err := r.postFinalReviewComment(res, 2, review.Findings{
+		HeadSHA:     "pushed-head",
+		CommentFile: collected,
+	}, comment); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(posted)
+	if err != nil {
+		t.Fatalf("nothing was posted: %v", err)
+	}
+	if string(got) != comment {
+		t.Fatalf("posted %q, want the verified comment %q", got, comment)
+	}
+	if !res.LastFindings.Posted || res.LastFindings.CommentURL == nil {
+		t.Fatalf("findings not marked posted: %+v", res.LastFindings)
+	}
+}
+
+// Without the verified text there is nothing safe to post; the run must say
+// so instead of reporting a posted review.
+func TestFinalOfflineReviewCommentRefusesAnEmptyComment(t *testing.T) {
+	r := &run{
+		o:       Options{Post: true},
+		rep:     NopReporter{},
+		pr:      gh.FullPR{Number: 42},
+		headSHA: "pushed-head",
+	}
+	res := &Result{}
+	err := r.postFinalReviewComment(res, 1, review.Findings{HeadSHA: "pushed-head"}, " \n")
+	if err == nil || !strings.Contains(err.Error(), "no comment text") {
+		t.Fatalf("err = %v", err)
+	}
+	if res.LastFindings.Posted {
+		t.Fatal("an empty comment was marked posted")
 	}
 }

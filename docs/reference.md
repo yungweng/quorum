@@ -58,7 +58,9 @@ converged run pushes - once - which triggers a single CI run; that is what
 keeps a babysit run from billing one GitHub Actions run per fix round. During
 the offline rounds nothing is posted to the PR; after the final push quorum
 posts one consolidated fix-log comment covering all rounds plus the final
-review's comment. When CI repairs move the head after that push, one more
+review's comment. That comment is the verified text the review returned, held
+by the run; the review's run directory may already be gone by then, because
+cache collection may remove it once the review has finished. When CI repairs move the head after that push, one more
 review round checks the repaired head before the run converges. If someone
 else pushes to the branch while the loop iterates locally, the final push
 fails as non-fast-forward and the run stops instead of overwriting their work.
@@ -291,6 +293,17 @@ posting or committing something misleading.
 - After every push it waits until GitHub reports the new head before reading any
   check result, because `gh pr checks` briefly still answers for the old one and
   a red commit would read as green.
+- CI counts as green only when GitHub confirms it for the exact head sha, not
+  when `gh pr checks` first passes. Right after a push that list can hold only
+  an external app's check while the Actions runs register a moment later. Every
+  required check of the base branch (branch protection and rulesets) must have
+  reported and passed, and every Actions run of the head must have finished
+  successfully. When the repository has workflow files but the head has no
+  Actions run yet, the wait gives GitHub three minutes to register one. A
+  required check that still has not reported after that, or a workflow run that
+  failed without any failing check (a workflow file GitHub rejected, an Actions
+  outage), stops the run with exit code 3 instead of a green result or a CI fix
+  session.
 - A fix round that produces no commits while findings remain stops the run.
 
 ## Exit codes
@@ -315,7 +328,8 @@ from the tools they replace.
 0  review clean (and CI green for a PR), or remaining findings disputed and accepted
 1  any other failure
 2  aborted at a gate
-3  CI or the local test command still red after --max-ci-fixes attempts
+3  CI or the local test command still red after --max-ci-fixes attempts, or
+   GitHub never confirmed CI for the head
 4  not converged after --max-iter rounds
 5  a fix step made no progress while its failure remains
 6  the review/fix history contains incompatible decisions

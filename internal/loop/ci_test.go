@@ -72,15 +72,25 @@ func TestCIWaitPublishesItsPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	fastCIWait(t, time.Hour)
+	bin, _ := ciFixture{
+		prChecks: "test\tpass",
+		branch:   []string{noProtection},
+		rules:    []string{noRules},
+		checks:   []string{checkRunsJSON("success")},
+		statuses: []string{`{"statuses":[]}`},
+		runs:     []string{runsJSON("completed", "success")},
+	}.install(t)
 	before := time.Now()
 	r := &run{
-		p:      &Pipeline{GH: gh.New("true")},
-		o:      Options{RepoRoot: root},
-		ctx:    context.Background(),
-		rep:    NopReporter{},
-		pr:     gh.FullPR{Number: 7},
-		root:   root,
-		logDir: logDir,
+		p:       &Pipeline{GH: gh.New(bin)},
+		o:       Options{Repo: "acme/api", RepoRoot: root},
+		ctx:     context.Background(),
+		rep:     NopReporter{},
+		pr:      gh.FullPR{Number: 7, BaseRefName: "main"},
+		headSHA: "abc123",
+		root:    root,
+		logDir:  logDir,
 		prog: Progress{
 			Phase: PhaseFix,
 			Since: before.Add(-time.Hour),
@@ -107,7 +117,17 @@ func TestWatchCIRetriesTransientWatchFailure(t *testing.T) {
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
 	bin := filepath.Join(dir, "gh")
+	api, _ := ciFixture{
+		branch:   []string{noProtection},
+		rules:    []string{noRules},
+		checks:   []string{checkRunsJSON("success")},
+		statuses: []string{`{"statuses":[]}`},
+		runs:     []string{runsJSON("completed", "success")},
+	}.install(t)
+	// Only the watch is counted; the confirmation's API reads go to the
+	// fixture.
 	script := `#!/bin/sh
+if test "$1" = api; then exec '` + api + `' "$@"; fi
 n=0
 test ! -f "` + countFile + `" || n=$(cat "` + countFile + `")
 n=$((n + 1))
@@ -122,8 +142,9 @@ echo 'checks passed'
 		t.Fatal(err)
 	}
 	r := &run{
-		p: &Pipeline{GH: gh.New(bin)}, o: Options{RepoRoot: dir},
-		ctx: context.Background(), logDir: dir, pr: gh.FullPR{Number: 42},
+		p: &Pipeline{GH: gh.New(bin)}, o: Options{Repo: "acme/api", RepoRoot: dir},
+		ctx: context.Background(), logDir: dir, pr: gh.FullPR{Number: 42, BaseRefName: "main"},
+		headSHA: "abc123",
 	}
 
 	state, err := r.watchCI()

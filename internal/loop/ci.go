@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/yungweng/quorum/internal/gh"
@@ -327,13 +329,24 @@ func (r *run) awaitChecks(started time.Time) (gh.CheckState, error) {
 	}
 }
 
-// watchCI blocks until the checks settle.
+// Poll intervals of the CI wait. Variables so tests can shorten them.
+var (
+	ciPendingPoll  = 10 * time.Second
+	ciNoChecksPoll = 20 * time.Second
+)
+
+// watchCI blocks until the checks settle and GitHub confirms them for the
+// exact head.
 //
-// GitHub does not register checks the instant a commit lands, so a PR that
-// really has CI can briefly look like it has none. Only after noChecksTimeout
-// of asking is "no checks" accepted as the answer.
+// `gh pr checks` only knows the checks GitHub has registered so far. Right
+// after a push that can be a check set made only of external apps, with the
+// Actions runs still to come, and `--watch` then reports it green. So a green
+// (or empty) answer is only accepted once confirmCI, bound to the head sha,
+// agrees: every required check of the base branch reported and passed, every
+// Actions run of the head finished successfully, and Actions had its
+// registration window if no run of the head exists yet.
 func (r *run) watchCI() (gh.CheckState, error) {
-	deadline := time.Now().Add(noChecksTimeout)
+	cw := &ciWait{started: time.Now()}
 	for {
 		state, out, err := r.p.GH.WatchChecks(r.ctx, r.o.RepoRoot, r.pr.Number)
 		writeTail(filepath.Join(r.logDir, "ci-last.log"), out, 20)
@@ -348,21 +361,161 @@ func (r *run) watchCI() (gh.CheckState, error) {
 		}
 
 		switch state {
-		case gh.ChecksNone:
-			if time.Now().After(deadline) {
-				return gh.ChecksNone, nil
-			}
-			if err := r.sleep(20 * time.Second); err != nil {
-				return state, err
-			}
 		case gh.ChecksPending:
-			if err := r.sleep(10 * time.Second); err != nil {
+			if err := r.sleep(ciPendingPoll); err != nil {
 				return state, err
 			}
-		default:
+			continue
+		case gh.ChecksFail:
 			return state, nil
 		}
+
+		confirmed, err := r.confirmCI(cw)
+		if err != nil {
+			if errors.Is(err, gh.ErrTransient) {
+				if err := r.sleep(time.Second); err != nil {
+					return gh.ChecksPending, err
+				}
+				continue
+			}
+			return gh.ChecksPending, err
+		}
+		switch confirmed {
+		case gh.ChecksPending:
+			poll := ciPendingPoll
+			if state == gh.ChecksNone {
+				poll = ciNoChecksPoll
+			}
+			if err := r.sleep(poll); err != nil {
+				return confirmed, err
+			}
+		default:
+			return confirmed, nil
+		}
 	}
+}
+
+// ciWait is what one CI wait remembers between confirmations.
+type ciWait struct {
+	started time.Time
+	// required is read once per wait: branch rules do not change while CI runs.
+	required    []string
+	requiredSet bool
+	// hasWorkflows is asked only when the head has no Actions run yet.
+	hasWorkflows    bool
+	hasWorkflowsSet bool
+	announced       bool
+}
+
+// confirmCI judges the checks of the exact head sha. It answers ChecksPass,
+// ChecksFail (a reported check failed; the CI fix path takes it from there),
+// ChecksNone (after the registration window, nothing exists and nothing is
+// required), or ChecksPending. A state no fix session can repair - an Actions
+// run that failed without reporting any check, or a required check that never
+// reported - ends the wait with ErrCIUnconfirmed instead of reading as green.
+func (r *run) confirmCI(cw *ciWait) (gh.CheckState, error) {
+	sha := r.headSHA
+	if sha == "" {
+		return gh.ChecksPending, errors.New("confirming CI: the pipeline has no head sha")
+	}
+	if !cw.requiredSet {
+		required, err := r.p.GH.RequiredChecks(r.ctx, r.o.Repo, r.pr.BaseRefName)
+		if err != nil {
+			return gh.ChecksPending, fmt.Errorf("reading the required checks of %s: %w", r.pr.BaseRefName, err)
+		}
+		cw.required, cw.requiredSet = required, true
+	}
+	checks, err := r.p.GH.CommitChecks(r.ctx, r.o.Repo, sha)
+	if err != nil {
+		return gh.ChecksPending, fmt.Errorf("reading the checks of %s: %w", sha, err)
+	}
+	runs, err := r.p.GH.WorkflowRuns(r.ctx, r.o.Repo, sha)
+	if err != nil {
+		return gh.ChecksPending, fmt.Errorf("reading the workflow runs of %s: %w", sha, err)
+	}
+	inWindow := time.Since(cw.started) < noChecksTimeout
+
+	bucket := make(map[string]string, len(checks))
+	for _, ch := range checks {
+		if ch.Bucket == gh.BucketFail {
+			return gh.ChecksFail, nil
+		}
+		bucket[ch.Name] = ch.Bucket
+	}
+
+	var waiting, missing, failedRuns []string
+	for _, name := range cw.required {
+		switch b, ok := bucket[name]; {
+		case !ok:
+			missing = append(missing, name)
+		case b == gh.BucketPending:
+			waiting = append(waiting, name)
+		}
+	}
+	for _, ch := range checks {
+		if ch.Bucket == gh.BucketPending && !slices.Contains(waiting, ch.Name) {
+			waiting = append(waiting, ch.Name)
+		}
+	}
+	for _, run := range runs {
+		switch run.Bucket() {
+		case gh.BucketPending:
+			waiting = append(waiting, "workflow "+run.Name)
+		case gh.BucketFail:
+			failedRuns = append(failedRuns, fmt.Sprintf("%s (%s, %s)", run.Name, run.Conclusion, run.URL))
+		}
+	}
+
+	// A run that failed while every check it reported passed - typically one
+	// that never started a job, as with a workflow file GitHub rejected or an
+	// Actions outage - is not something a fix session can be pointed at.
+	if len(failedRuns) > 0 {
+		return gh.ChecksPending, fmt.Errorf("%w: workflow run(s) of %s failed without a failing check: %s",
+			ErrCIUnconfirmed, sha, strings.Join(failedRuns, "; "))
+	}
+	if len(waiting) > 0 {
+		return gh.ChecksPending, nil
+	}
+	if len(missing) > 0 {
+		if inWindow {
+			r.announceCIRegistration(cw, "waiting for required check(s) "+strings.Join(missing, ", ")+" to report")
+			return gh.ChecksPending, nil
+		}
+		return gh.ChecksPending, fmt.Errorf("%w: required check(s) %s of %s did not report for %s after %s",
+			ErrCIUnconfirmed, strings.Join(missing, ", "), r.pr.BaseRefName, sha, noChecksTimeout)
+	}
+	if len(runs) == 0 && inWindow && r.workflowsExpected(cw) {
+		r.announceCIRegistration(cw, "waiting for GitHub Actions to register the runs of "+sha)
+		return gh.ChecksPending, nil
+	}
+	if len(checks) == 0 && len(runs) == 0 {
+		if inWindow {
+			return gh.ChecksPending, nil
+		}
+		return gh.ChecksNone, nil
+	}
+	return gh.ChecksPass, nil
+}
+
+// workflowsExpected reports whether the repository has workflow files that
+// could start a run for the head. A failed lookup counts as yes: waiting out
+// the window is cheaper than a green that was never confirmed.
+func (r *run) workflowsExpected(cw *ciWait) bool {
+	if !cw.hasWorkflowsSet {
+		has, err := r.p.GH.HasActiveWorkflows(r.ctx, r.o.Repo)
+		cw.hasWorkflows = has || err != nil
+		cw.hasWorkflowsSet = err == nil
+		return cw.hasWorkflows
+	}
+	return cw.hasWorkflows
+}
+
+func (r *run) announceCIRegistration(cw *ciWait, msg string) {
+	if cw.announced || r.rep == nil {
+		return
+	}
+	cw.announced = true
+	r.rep.Info(msg)
 }
 
 func (r *run) sleep(d time.Duration) error {
