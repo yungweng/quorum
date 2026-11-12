@@ -53,6 +53,7 @@ const defaultUsageLimitPause = time.Hour
 // marker.
 func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, title, author, reqAt string) error {
 	r.applyPriority()
+	reqAt = r.requestAnswered(key, reqAt)
 
 	clone, err := r.ensureClone(ctx, repo)
 	if err != nil {
@@ -208,18 +209,29 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	return fmt.Errorf("%s: %s", key, reason)
 }
 
-// markHandled records which review request a finished run answered. The poll
-// passes the request that started the run. `quorum run` has none: it answers
-// the newest request the poll has seen, and where there is none it leaves the
-// recorded one alone. Storing its empty timestamp instead made every request
-// the agent had already handled look new again on the next poll.
+// markHandled records which review request a finished run answered. Without
+// one it leaves the recorded request alone: storing the empty timestamp of a
+// `quorum run` made every request the agent had already handled look new
+// again on the next poll.
 func markHandled(rec *state.Record, reqAt string) {
-	if reqAt == "" {
-		reqAt = rec.SeenReqAt
-	}
 	if reqAt != "" {
 		rec.ReqAt = reqAt
 	}
+}
+
+// requestAnswered is the review request a run answers. The poll passes the
+// one that started the run. `quorum run` has none and answers the newest the
+// poll had seen when the run began; one that arrives while it runs is not
+// covered by this review and stays open.
+func (r *Runner) requestAnswered(key, reqAt string) string {
+	if reqAt != "" {
+		return reqAt
+	}
+	st, err := state.Read(r.P.StateFile)
+	if err != nil {
+		return ""
+	}
+	return st.PRs[key].SeenReqAt
 }
 
 func (r *Runner) recordDivergenceResult(key, sha, reqAt, runDir, runLog, reportURL string,

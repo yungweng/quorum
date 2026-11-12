@@ -145,22 +145,33 @@ func TestAutoMergePendingPreservesReviewWithoutHandlingRequest(t *testing.T) {
 // be stored as the handled one, and the next poll reviewed the same pull
 // request again for a request the agent had long answered.
 func TestAManualRunDoesNotForgetTheHandledRequest(t *testing.T) {
-	const handled, newer = "2026-08-05T13:00:00Z", "2026-08-05T15:00:00Z"
-	for _, tc := range []struct {
-		name            string
-		recorded, seen  string
-		reqAt, wantReqA string
-	}{
-		{"the poll's request is recorded", handled, newer, newer, newer},
-		{"a manual run keeps the handled request", handled, handled, "", handled},
-		{"a manual run answers the newest request seen", handled, newer, "", newer},
-		{"a manual run before any poll records nothing", "", "", "", ""},
-	} {
-		rec := state.Record{ReqAt: tc.recorded, SeenReqAt: tc.seen}
-		markHandled(&rec, tc.reqAt)
-		if rec.ReqAt != tc.wantReqA {
-			t.Errorf("%s: ReqAt = %q, want %q", tc.name, rec.ReqAt, tc.wantReqA)
-		}
+	const key, handled, newer = "acme/api#42", "2026-08-05T13:00:00Z", "2026-08-05T15:00:00Z"
+	r := &Runner{P: paths.P{StateFile: filepath.Join(t.TempDir(), "state.json")}}
+	if got := r.requestAnswered(key, ""); got != "" {
+		t.Errorf("a manual run before any poll answers %q, want no request", got)
+	}
+	if err := state.Mutate(r.P.StateFile, key, func(rec *state.Record) {
+		rec.ReqAt, rec.SeenReqAt = handled, newer
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.requestAnswered(key, handled); got != handled {
+		t.Errorf("the poll's request was replaced by %q", got)
+	}
+	// The newest request seen when the run begins, read once: one that
+	// arrives while the run is going has not been reviewed by it.
+	if got := r.requestAnswered(key, ""); got != newer {
+		t.Errorf("a manual run answers %q, want the newest request seen, %q", got, newer)
+	}
+
+	rec := state.Record{ReqAt: handled, SeenReqAt: newer}
+	markHandled(&rec, "")
+	if rec.ReqAt != handled {
+		t.Errorf("a run without a request recorded %q over the handled %q", rec.ReqAt, handled)
+	}
+	markHandled(&rec, newer)
+	if rec.ReqAt != newer {
+		t.Errorf("ReqAt = %q, want %q", rec.ReqAt, newer)
 	}
 }
 
