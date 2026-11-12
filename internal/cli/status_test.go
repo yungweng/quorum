@@ -1253,3 +1253,19 @@ func TestBranchRunKeepsItsLabel(t *testing.T) {
 		t.Errorf("the branch label was cut away:\n%s", active)
 	}
 }
+
+func TestDashboardNamesTheReviewBesideACIWait(t *testing.T) {
+	a := testApp(t)
+	now := time.Now()
+	babysit(t, a, loop.Progress{
+		PID: 999999, Repo: "acme/api", Number: 42, Title: "tenant scoping",
+		StartedAt: now.Add(-20 * time.Minute), MaxIter: 6, Round: 1,
+		Phase: loop.PhaseCI, Since: now.Add(-20 * time.Minute),
+		CI: loop.CIWaiting, SideReview: loop.SideReviewPosted,
+	})
+
+	screen, _ := render(t, a, nil)
+	if !strings.Contains(ui.StripANSI(screen), "waiting for CI, review posted") {
+		t.Fatalf("the dashboard hides the review beside the CI wait:\n%s", screen)
+	}
+}

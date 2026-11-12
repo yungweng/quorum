@@ -460,6 +460,9 @@ type loopTermReporter struct {
 		elapsed time.Duration
 		shown   bool
 	}
+	// ciReview is the side review the current CI wait last printed on a
+	// terminal-less run.
+	ciReview string
 }
 
 // reviewRoundLabel matches exactly the step labels that a RoundResult follows.
@@ -669,17 +672,23 @@ func (l *loopTermReporter) RoundResult(round int, f review.Findings, clean bool)
 }
 
 // CIWait keeps the wait on the transient status line; only a terminal-less run
-// records it as a permanent line, once per wait.
-func (l *loopTermReporter) CIWait(pr int, elapsed time.Duration) {
+// records it as a permanent line, once per wait and once per change of the
+// review beside it.
+func (l *loopTermReporter) CIWait(pr int, elapsed time.Duration, review string) {
 	if elapsed == 0 {
 		l.flushPending()
 	}
 	if l.out.Color {
-		l.setActive(fmt.Sprintf("waiting for CI on PR #%d", pr), elapsed)
+		label := fmt.Sprintf("waiting for CI on PR #%d", pr)
+		if review != "" {
+			label += " · " + review
+		}
+		l.setActive(label, elapsed)
 		return
 	}
-	if elapsed == 0 {
-		l.out.Printf("waiting for CI on PR #%d...\n", pr)
+	if elapsed == 0 || review != l.ciReview {
+		l.ciReview = review
+		l.out.Printf("waiting for CI on PR #%d...%s\n", pr, loop.CIWaitNote(review))
 	}
 }
 

@@ -601,3 +601,32 @@ func TestSummaryCommitsSitInTheRowGrid(t *testing.T) {
 		t.Errorf("commit rows are not aligned, want:\n%s\ngot:\n%s", want, got)
 	}
 }
+
+// The first review posts its comment while the run still waits for CI. The
+// wait line has to say so, or the run looks stuck after it posted.
+func TestCIWaitLineNamesTheReviewBesideIt(t *testing.T) {
+	var out bytes.Buffer
+	w := (&ui.Writer{Out: os.Stdout, Color: true, Width: 100}).To(&out)
+	rep := &loopTermReporter{out: w, status: w.Status()}
+
+	rep.CIWait(42, 20*time.Minute, "review round 1 posted")
+
+	got := ui.StripANSI(out.String())
+	if !strings.Contains(got, "waiting for CI on PR #42 · review round 1 posted · 20m") {
+		t.Fatalf("the CI wait hides the review beside it: %q", got)
+	}
+
+	out.Reset()
+	plain := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+	plain.CIWait(42, 0, "review round 1 running")
+	plain.CIWait(42, time.Second, "review round 1 running")
+	plain.CIWait(42, 2*time.Second, "review round 1 posted")
+	plain.CIWait(42, 3*time.Second, "review round 1 posted")
+	plain.CIWait(42, 0, "")
+	want := "waiting for CI on PR #42... (review round 1 running)\n" +
+		"waiting for CI on PR #42... (review round 1 posted)\n" +
+		"waiting for CI on PR #42...\n"
+	if out.String() != want {
+		t.Fatalf("plain CI wait lines = %q, want %q", out.String(), want)
+	}
+}

@@ -86,6 +86,8 @@ func (l *logReporter) Done(res review.Result) {
 type loopLogReporter struct {
 	mu sync.Mutex
 	w  io.Writer
+	// ciReview is the side review the current CI wait last logged.
+	ciReview string
 }
 
 func (l *loopLogReporter) printf(format string, args ...any) {
@@ -139,11 +141,13 @@ func (l *loopLogReporter) RoundResult(round int, f review.Findings, clean bool) 
 	l.printf("review round %d: %s (%s)", round, f.Summary(), verdict)
 }
 
-// CIWait logs only the start of a wait: the per-second ticks exist to animate
-// a terminal status line and would fill a log with identical lines.
-func (l *loopLogReporter) CIWait(pr int, elapsed time.Duration) {
-	if elapsed == 0 {
-		l.printf("waiting for CI on PR #%d...", pr)
+// CIWait logs the start of a wait and each change of the review beside it:
+// the per-second ticks exist to animate a terminal status line and would fill
+// a log with identical lines.
+func (l *loopLogReporter) CIWait(pr int, elapsed time.Duration, review string) {
+	if elapsed == 0 || review != l.ciReview {
+		l.ciReview = review
+		l.printf("waiting for CI on PR #%d...%s", pr, loop.CIWaitNote(review))
 	}
 }
 
