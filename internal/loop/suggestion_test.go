@@ -37,8 +37,8 @@ func TestSuggestionRoundDue(t *testing.T) {
 // leftover Suggestions are worth taking.
 func TestSuggestionRoundPromptDemandsTriageAndAllowsNoChange(t *testing.T) {
 	for name, prompt := range map[string]string{
-		"pr":     suggestionRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
-		"branch": suggestionRoundPrompt(0, "feature/crumb-tray", true, false, "## Summary\n\nfine"),
+		"pr":     suggestionRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: false}, "## Summary\n\nfine"),
+		"branch": suggestionRoundPrompt(promptTarget{number: 0, branch: "feature/crumb-tray", branchOnly: true, offline: false}, "## Summary\n\nfine"),
 	} {
 		for _, want := range []string{
 			"first decide whether it is worth implementing",
@@ -55,8 +55,8 @@ func TestSuggestionRoundPromptDemandsTriageAndAllowsNoChange(t *testing.T) {
 }
 
 func TestSuggestionRoundBranchPromptDoesNotInventAPROrCIWatcher(t *testing.T) {
-	got := suggestionRoundPrompt(0, "feature/crumb-tray", true, false, "## Summary\n\nfine")
-	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", MarkerComment} {
+	got := suggestionRoundPrompt(promptTarget{number: 0, branch: "feature/crumb-tray", branchOnly: true, offline: false}, "## Summary\n\nfine")
+	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", markerComment} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("branch suggestion prompt contains %q", unwanted)
 		}

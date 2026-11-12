@@ -114,7 +114,6 @@ func (a *app) refreshAgent() error {
 	return nil
 }
 
-// writeAgentPlist renders and stores the job file without talking to launchd.
 func (a *app) writeAgentPlist() error {
 	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
 		return err
@@ -179,7 +178,6 @@ func agentPathDirs() []string {
 	}
 }
 
-// agentPATH is the PATH baked into the launchd job.
 func agentPATH() string {
 	return strings.Join(agentPathDirs(), ":")
 }
@@ -202,7 +200,6 @@ func (a *app) plistStale() bool {
 	return !bytes.Equal(installed, want)
 }
 
-// agentLoaded reports whether launchd knows the job.
 func (a *app) agentLoaded() bool {
 	if runtime.GOOS != "darwin" {
 		return false

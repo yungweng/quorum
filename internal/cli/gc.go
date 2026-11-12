@@ -14,13 +14,11 @@ import (
 	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/proc"
-	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/rundir"
 	"github.com/yungweng/quorum/internal/runtmp"
-	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
-// cmdGC trims the cache to its budget.
 func (a *app) cmdGC(args []string) int {
 	dry := false
 	for _, arg := range args {
@@ -39,7 +37,7 @@ func (a *app) cmdGC(args []string) int {
 	// cache, so they count against neither the budget nor the report below.
 	if !dry {
 		if n := runtmp.Sweep(); n > 0 {
-			a.out.Printf("removed %d orphaned temp director%s\n", n, directoryPlural(n))
+			a.out.Printf("removed %d orphaned temp director%s\n", n, plural(n, "y", "ies"))
 		}
 	}
 	if freed > 0 || removed > 0 {
@@ -47,7 +45,7 @@ func (a *app) cmdGC(args []string) int {
 		if dry {
 			verb = "would remove"
 		}
-		a.out.Printf("%s %d run director%s, %s\n", verb, removed, directoryPlural(removed), ui.Bytes(freed))
+		a.out.Printf("%s %d run director%s, %s\n", verb, removed, plural(removed, "y", "ies"), ui.Bytes(freed))
 		return 0
 	}
 	size, limit := a.cacheSize(), a.budgetBytes()
@@ -64,15 +62,6 @@ func (a *app) cmdGC(args []string) int {
 	return 0
 }
 
-// directoryPlural is the tail of "director-y"/"director-ies".
-func directoryPlural(n int) string {
-	if n == 1 {
-		return "y"
-	}
-	return "ies"
-}
-
-// budgetBytes is the cache budget in bytes, or 0 when none is set.
 func (a *app) budgetBytes() int64 {
 	return int64(a.cfg.CacheBudgetGB * 1024 * 1024 * 1024)
 }
@@ -108,16 +97,10 @@ func (a *app) setCacheSize(n int64) {
 // use from filling the disk, does not notice.
 const rememberedSizeTTL = 6 * time.Hour
 
-func (a *app) rememberedSizePath() string {
-	return filepath.Join(a.p.StateDir, "cache-size")
-}
-
-// rememberCacheSize keeps a measurement for this process and writes it down
-// for the next one.
 func (a *app) rememberCacheSize(n int64) {
 	a.setCacheSize(n)
 	line := time.Now().Format(time.RFC3339) + " " + strconv.FormatInt(n, 10) + "\n"
-	if err := os.WriteFile(a.rememberedSizePath(), []byte(line), 0o644); err != nil {
+	if err := os.WriteFile(a.p.CacheSizeFile(), []byte(line), 0o644); err != nil {
 		a.log.Printf("could not remember the cache size: %v", err)
 	}
 }
@@ -126,7 +109,7 @@ func (a *app) rememberCacheSize(n int64) {
 // is one recent enough to trust. Anything unreadable counts as absent: the
 // answer to a broken file is a fresh walk, not an error.
 func (a *app) rememberedCacheSize() (int64, bool) {
-	data, err := os.ReadFile(a.rememberedSizePath())
+	data, err := os.ReadFile(a.p.CacheSizeFile())
 	if err != nil {
 		return 0, false
 	}
@@ -152,12 +135,11 @@ func (a *app) rememberedCacheSize() (int64, bool) {
 // walks the cache as it is now.
 func (a *app) forgetCacheSize() {
 	a.cacheBytes, a.cacheAt = 0, time.Time{}
-	os.Remove(a.rememberedSizePath())
+	os.Remove(a.p.CacheSizeFile())
 }
 
-// measureCache walks everything the budget covers.
 func (a *app) measureCache() int64 {
-	roots := []string{a.p.ReviewRuns, a.p.BabysitRuns, a.p.DepsCache, a.trashDir()}
+	roots := append(a.p.RunRoots(), a.p.DepsCache, a.trashDir())
 	sizes := make(chan int64, len(roots))
 	for _, root := range roots {
 		go func() { sizes <- dirSize(root) }()
@@ -169,7 +151,6 @@ func (a *app) measureCache() int64 {
 	return total
 }
 
-// dirSize adds up a directory tree, ignoring anything it cannot read.
 func dirSize(root string) int64 {
 	var total int64
 	filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
@@ -197,17 +178,10 @@ type runEntry struct {
 	output   int64
 }
 
-// legacyRunGrace matches the ordinary run retention. Runs created before
-// claims existed have no other liveness signal when started from a terminal,
-// so recent claimless directories stay protected during the upgrade window.
-const legacyRunGrace = 7 * 24 * time.Hour
-
 // runDirs lists every review and babysit run directory, oldest first.
 func (a *app) runDirs() []runEntry {
-	legacyLive, protectAllLegacy := a.legacyLiveRuns()
-	legacyCutoff := time.Now().Add(-legacyRunGrace)
 	var runs []runEntry
-	for _, root := range []string{a.p.ReviewRuns, a.p.BabysitRuns} {
+	for _, root := range a.p.RunRoots() {
 		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
@@ -222,13 +196,8 @@ func (a *app) runDirs() []runEntry {
 			}
 			path := filepath.Join(root, e.Name())
 			worktree, output := runSizes(path)
-			_, claimErr := os.Stat(filepath.Join(path, proc.ClaimFile))
-			recentLegacy := os.IsNotExist(claimErr) &&
-				!info.ModTime().Before(legacyCutoff)
-			live := proc.Claimed(path) || recentLegacy || protectAllLegacy ||
-				legacyLive[filepath.Clean(path)]
 			runs = append(runs, runEntry{
-				path: path, mod: info.ModTime(), live: live,
+				path: path, mod: info.ModTime(), live: proc.Claimed(path),
 				worktree: worktree, output: output,
 			})
 		}
@@ -238,7 +207,7 @@ func (a *app) runDirs() []runEntry {
 }
 
 func (a *app) trashDir() string {
-	return filepath.Join(filepath.Dir(a.p.DepsCache), "trash")
+	return filepath.Join(rundir.CacheDir(a.p.DepsCache), "trash")
 }
 
 type cacheSnapshot struct {
@@ -247,13 +216,13 @@ type cacheSnapshot struct {
 }
 
 // scanCache gets the eviction inventory and its total in one pass over every
-// run. The old collector measured all runs and then walked all of them again
-// to split worktrees from output, keeping startup behind the cache lock for
-// both walks.
+// run.
 func (a *app) scanCache() cacheSnapshot {
 	runs := a.runDirs()
-	total := dirSize(a.p.DepsCache) + dirSize(a.trashDir()) +
-		directFileSize(a.p.ReviewRuns) + directFileSize(a.p.BabysitRuns)
+	total := dirSize(a.p.DepsCache) + dirSize(a.trashDir())
+	for _, root := range a.p.RunRoots() {
+		total += directFileSize(root)
+	}
 	for _, run := range runs {
 		total += run.worktree + run.output
 	}
@@ -271,39 +240,11 @@ func directFileSize(root string) int64 {
 	return total
 }
 
-// legacyLiveRuns preserves the marker/state liveness contract used before run
-// claims existed. It can be removed after upgrades from v1.0.1 no longer need
-// to coexist with reviews started by that version.
-func (a *app) legacyLiveRuns() (map[string]bool, bool) {
-	markers := runner.Live(a.p.RunningDir)
-	if len(markers) == 0 {
-		return nil, false
-	}
-	file, err := state.Read(a.p.StateFile)
-	if err != nil {
-		// A live legacy process with unreadable state cannot be mapped safely.
-		// Preserve all runs until its marker goes away.
-		return nil, true
-	}
-	live := make(map[string]bool, len(markers))
-	protectAll := false
-	for _, marker := range markers {
-		rec, ok := file.PRs[marker.Key]
-		if !ok || rec.RunDir == "" {
-			protectAll = true
-			continue
-		}
-		path := filepath.Clean(rec.RunDir)
-		live[path] = true
-	}
-	return live, protectAll
-}
-
 // runSizes splits a run directory into its worktree and everything else, in one
 // walk. Two calls to dirSize would descend the worktree twice, and the worktree
 // is nearly every file a run has.
 func runSizes(dir string) (worktree, output int64) {
-	prefix := filepath.Join(dir, "worktree") + string(filepath.Separator)
+	prefix := rundir.Worktree(dir) + string(filepath.Separator)
 	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil //nolint:nilerr // an unreadable subtree is not worth failing over
@@ -322,8 +263,6 @@ func runSizes(dir string) (worktree, output int64) {
 	return worktree, output
 }
 
-// collect trims the cache to its budget.
-//
 // Below the budget it does nothing on purpose. A worktree that outlived its run
 // belongs to a review that failed, and --resume-run needs it; clearing those on
 // sight would take the resume with it, which is what the seven-day sweep at the
@@ -335,8 +274,7 @@ func runSizes(dir string) (worktree, output int64) {
 // only then shared dependency trees, which cost a full install to rebuild.
 func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	limit := a.budgetBytes()
-	cacheRoot := filepath.Dir(a.p.DepsCache)
-	if _, err := os.Stat(cacheRoot); err != nil {
+	if _, err := os.Stat(rundir.CacheDir(a.p.DepsCache)); err != nil {
 		if os.IsNotExist(err) {
 			if !dry {
 				a.setCacheSize(0)
@@ -394,7 +332,7 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	// made outside the lock, then each candidate is rechecked and atomically
 	// renamed to trash while holding it. Actual recursive deletion happens
 	// after unlock, so a large cache never freezes command startup for minutes.
-	unlock, err := proc.LockDir(cacheRoot)
+	unlock, err := rundir.LockCache(a.p.DepsCache)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -455,9 +393,9 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 		if r.live || proc.Claimed(r.path) {
 			continue
 		}
-		if err := stage(filepath.Join(r.path, "worktree"), r.worktree, false); err != nil {
+		if err := stage(rundir.Worktree(r.path), r.worktree, false); err != nil {
 			unlock()
-			return freed, removed, fmt.Errorf("stage %s for removal: %w", filepath.Join(r.path, "worktree"), err)
+			return freed, removed, fmt.Errorf("stage %s for removal: %w", rundir.Worktree(r.path), err)
 		}
 	}
 	// Only the output is still there to free: the round above ends by returning,
@@ -476,9 +414,11 @@ func (a *app) collect(dry bool) (freed int64, removed int, err error) {
 	}
 	// A run that is still going owns its worktree, and through the symlinks in
 	// that worktree it owns shared trees this cannot tell apart from the rest.
-	live := slices.ContainsFunc(snapshot.runs, func(r runEntry) bool {
-		return r.live || proc.Claimed(r.path)
-	}) || a.claimedRunOutsideSnapshot(snapshot.runs)
+	// Rereading the run roots catches a run that started while the collector
+	// was walking the cache; startup cannot pass the lock while this check and
+	// any dependency staging happen.
+	live := slices.ContainsFunc(snapshot.runs, func(r runEntry) bool { return r.live }) ||
+		slices.ContainsFunc(a.p.RunRoots(), rundir.AnyClaimed)
 	if !live {
 		for _, tree := range (deps.Cache{Root: a.p.DepsCache}).Trees() {
 			if total <= limit {
@@ -527,34 +467,5 @@ func (a *app) cacheRemoveAll(path string) error {
 
 func (a *app) invalidateRememberedCacheSize(size int64) {
 	a.setCacheSize(size)
-	os.Remove(a.rememberedSizePath())
-}
-
-// claimedRunOutsideSnapshot catches a run that started while the collector was
-// walking the cache. Startup cannot pass the lock while this check and any
-// dependency staging happen.
-func (a *app) claimedRunOutsideSnapshot(snapshot []runEntry) bool {
-	known := make(map[string]bool, len(snapshot))
-	for _, run := range snapshot {
-		known[filepath.Clean(run.path)] = true
-	}
-	for _, root := range []string{a.p.ReviewRuns, a.p.BabysitRuns} {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				return true
-			}
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			path := filepath.Join(root, entry.Name())
-			if !known[filepath.Clean(path)] && proc.Claimed(path) {
-				return true
-			}
-		}
-	}
-	return false
+	os.Remove(a.p.CacheSizeFile())
 }

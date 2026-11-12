@@ -74,28 +74,29 @@ The listed users cannot be searched either because the users do not exist or you
 	}
 }
 
-func TestRunRetriesTransientAndSucceeds(t *testing.T) {
+// A read survives a flaky connection: it is retried until it answers.
+func TestReadRetriesTransientAndSucceeds(t *testing.T) {
 	bin, countFile := fakeGH(t, `
 if [ "$n" -lt 3 ]; then
   echo "net/http: TLS handshake timeout" >&2
   exit 1
 fi
-echo -n "yungweng"`)
-	out, err := testClient(bin).run(context.Background(), "api", "user")
+echo '[{"state":"APPROVED","commit_id":"head-1","user":{"login":"example-user"}}]'`)
+	reviews, err := testClient(bin).Reviews(context.Background(), "acme/api", 42)
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("Reviews: %v", err)
 	}
-	if string(out) != "yungweng" {
-		t.Errorf("stdout = %q", out)
+	if len(reviews) != 1 || reviews[0].CommitID != "head-1" {
+		t.Errorf("reviews = %+v", reviews)
 	}
 	if got := calls(t, countFile); got != 3 {
 		t.Errorf("gh called %d times, want 3", got)
 	}
 }
 
-func TestRunGivesUpAsTransient(t *testing.T) {
+func TestReadGivesUpAsTransient(t *testing.T) {
 	bin, countFile := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
-	_, err := testClient(bin).run(context.Background(), "api", "user")
+	_, err := testClient(bin).Reviews(context.Background(), "acme/api", 42)
 	if !errors.Is(err, ErrTransient) {
 		t.Fatalf("err = %v, want ErrTransient", err)
 	}
@@ -104,9 +105,9 @@ func TestRunGivesUpAsTransient(t *testing.T) {
 	}
 }
 
-func TestRunDoesNotRetryPermanentFailure(t *testing.T) {
+func TestReadDoesNotRetryPermanentFailure(t *testing.T) {
 	bin, countFile := fakeGH(t, `echo "gh: Not Found (HTTP 404)" >&2; exit 1`)
-	_, err := testClient(bin).run(context.Background(), "pr", "view", "9999")
+	_, err := testClient(bin).Reviews(context.Background(), "acme/api", 9999)
 	if err == nil {
 		t.Fatal("a 404 was reported as success")
 	}
@@ -351,11 +352,11 @@ func TestSearchEmptyArrayIsAnEmptyResult(t *testing.T) {
 
 func TestSearchParsesResult(t *testing.T) {
 	bin, _ := fakeGH(t, `cat <<'JSON'
-[{"author":{"id":"U_1","is_bot":false,"login":"theitger","type":"User"},
-  "isDraft":false,"number":2017,
-  "repository":{"name":"toaster-api","nameWithOwner":"crumbtray/toaster-api"},
-  "title":"Zeiterfassungs-Export","updatedAt":"2026-07-26T21:43:16Z",
-  "url":"https://github.com/crumbtray/toaster-api/pull/2017"}]
+[{"author":{"id":"U_1","is_bot":false,"login":"example-author","type":"User"},
+  "isDraft":false,"number":42,
+  "repository":{"name":"api","nameWithOwner":"acme/api"},
+  "title":"Add the export","updatedAt":"2026-07-26T21:43:16Z",
+  "url":"https://github.com/acme/api/pull/42"}]
 JSON`)
 	prs, err := testClient(bin).SearchReviewRequested(context.Background(), nil)
 	if err != nil {
@@ -365,10 +366,10 @@ JSON`)
 		t.Fatalf("got %d pull requests", len(prs))
 	}
 	p := prs[0]
-	if p.Key() != "crumbtray/toaster-api#2017" {
+	if p.Key() != "acme/api#42" {
 		t.Errorf("Key = %q", p.Key())
 	}
-	if p.Author.Login != "theitger" || p.Author.IsBot {
+	if p.Author.Login != "example-author" || p.Author.IsBot {
 		t.Errorf("author = %+v", p.Author)
 	}
 	if p.UpdatedAt != "2026-07-26T21:43:16Z" || p.IsDraft {
@@ -381,21 +382,21 @@ const timelinePage = `[
   {"event":"review_requested","created_at":"2026-07-21T10:00:00Z",
    "requested_reviewer":{"login":"somebody-else"}},
   {"event":"review_requested","created_at":"2026-07-22T10:00:00Z",
-   "requested_reviewer":{"login":"yungweng"}},
+   "requested_reviewer":{"login":"example-user"}},
   {"event":"review_requested","created_at":"2026-07-23T10:00:00Z",
    "requested_team":{"slug":"other-team"}}
 ]`
 
 const timelinePage2 = `[
   {"event":"review_requested","created_at":"2026-07-24T10:00:00Z",
-   "requested_team":{"slug":"bread-council"}},
+   "requested_team":{"slug":"reviewers"}},
   {"event":"closed","created_at":"2026-07-25T10:00:00Z"}
 ]`
 
 func TestLatestReviewRequestPicksNewestForMeOrMyTeam(t *testing.T) {
 	bin, _ := fakeGH(t, "cat <<'JSON'\n"+timelinePage+"\nJSON")
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"crumbtray/toaster-api", 2017, "yungweng", []string{"bread-council"})
+		"acme/api", 42, "example-user", []string{"reviewers"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +411,7 @@ func TestLatestReviewRequestPicksNewestForMeOrMyTeam(t *testing.T) {
 func TestLatestReviewRequestReadsConcatenatedPages(t *testing.T) {
 	bin, _ := fakeGH(t, "cat <<'JSON'\n"+timelinePage+"\n"+timelinePage2+"\nJSON")
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"crumbtray/toaster-api", 2017, "yungweng", []string{"bread-council"})
+		"acme/api", 42, "example-user", []string{"reviewers"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +423,7 @@ func TestLatestReviewRequestReadsConcatenatedPages(t *testing.T) {
 func TestLatestReviewRequestNoneIsNotAnError(t *testing.T) {
 	bin, _ := fakeGH(t, "cat <<'JSON'\n"+timelinePage+"\nJSON")
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"crumbtray/toaster-api", 2017, "nobody", nil)
+		"acme/api", 42, "nobody", nil)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -436,7 +437,7 @@ func TestLatestReviewRequestNoneIsNotAnError(t *testing.T) {
 func TestLatestReviewRequestReportsFailure(t *testing.T) {
 	bin, _ := fakeGH(t, `echo "net/http: TLS handshake timeout" >&2; exit 1`)
 	got, err := testClient(bin).LatestReviewRequest(context.Background(),
-		"crumbtray/toaster-api", 2014, "yungweng", nil)
+		"acme/api", 42, "example-user", nil)
 	if err == nil {
 		t.Fatal("a failed timeline call looked like an empty timeline")
 	}
@@ -462,9 +463,9 @@ func TestReviewsReadsConcatenatedPages(t *testing.T) {
 }
 
 func TestTeamSlugsFor(t *testing.T) {
-	teams := []string{"crumbtray/bread-council", "Crumb-GmbH/dev-admins"}
-	got := TeamSlugsFor("crumbtray", teams)
-	if len(got) != 1 || got[0] != "bread-council" {
+	teams := []string{"acme/reviewers", "other-org/admins"}
+	got := TeamSlugsFor("acme", teams)
+	if len(got) != 1 || got[0] != "reviewers" {
 		t.Errorf("got %v", got)
 	}
 	if len(TeamSlugsFor("unrelated", teams)) != 0 {
@@ -503,23 +504,22 @@ echo '{"baseRefName":"main","headRefOid":"abc123","state":"OPEN","mergeable":"CO
 
 func TestPRStatesReadsABatch(t *testing.T) {
 	// One call, one alias per pull request, three different outcomes.
-	bin, countFile := fakeGH(t, `echo "$@" > `+t.TempDir()+`/args
-cat <<'JSON'
+	bin, countFile := fakeGH(t, `cat <<'JSON'
 {"data":{
   "p0":{"pullRequest":{"state":"MERGED"}},
   "p1":{"pullRequest":{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-07-31T08:00:00Z"},"mergeQueueEntry":null}},
   "p2":{"pullRequest":{"state":"CLOSED"}}
 }}
 JSON`)
-	keys := []string{"crumbtray/toaster-api#2035", "crumbtray/bagel-bot#392", "acme/api#7"}
+	keys := []string{"acme/api#41", "acme/web#43", "acme/api#7"}
 	got, err := testClient(bin).PRStates(context.Background(), keys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"crumbtray/toaster-api#2035": StateMerged,
-		"crumbtray/bagel-bot#392":    StateAutoMerge,
-		"acme/api#7":                 StateClosed,
+		"acme/api#41": StateMerged,
+		"acme/web#43": StateAutoMerge,
+		"acme/api#7":  StateClosed,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -631,5 +631,54 @@ exit 1`)
 	}
 	if got["acme/api#2170"] != StateMerged {
 		t.Errorf("acme/api#2170 = %q, want MERGED", got["acme/api#2170"])
+	}
+}
+
+func TestCommentFeedsTheBodyVerbatimOnStdin(t *testing.T) {
+	for _, body := range []string{"## Summary\nClean.\n", "no trailing newline", "  leading space\n\n"} {
+		posted := filepath.Join(t.TempDir(), "posted")
+		bin, _ := fakeGH(t, `test "$*" = 'pr comment 42 --body-file -' || exit 1
+cat > '`+posted+`'
+echo https://example.invalid/acme/api/pull/42#issuecomment-1`)
+		url, err := testClient(bin).Comment(context.Background(), t.TempDir(), 42, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if url != "https://example.invalid/acme/api/pull/42#issuecomment-1" {
+			t.Errorf("url = %q", url)
+		}
+		got, err := os.ReadFile(posted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != body {
+			t.Errorf("posted %q, want %q", got, body)
+		}
+	}
+}
+
+// A comment that ran out of time may have been posted, and trying again would
+// post it twice. A read in a checkout retries the same timeout.
+func TestCommentDoesNotRetryATimeoutButAReadDoes(t *testing.T) {
+	bin, countFile := fakeGH(t, `exec sleep 30`)
+	c := testClient(bin)
+	c.Timeout = time.Second
+	_, err := c.Comment(context.Background(), t.TempDir(), 42, "body")
+	if err == nil || errors.Is(err, ErrTransient) {
+		t.Fatalf("err = %v, want a permanent failure", err)
+	}
+	if got := calls(t, countFile); got != 1 {
+		t.Fatalf("comment ran %d times, want 1", got)
+	}
+
+	bin, countFile = fakeGH(t, `exec sleep 30`)
+	c = testClient(bin)
+	c.Timeout = time.Second
+	_, err = c.HeadSHA(context.Background(), t.TempDir(), 42)
+	if !errors.Is(err, ErrTransient) || !strings.Contains(err.Error(), "timed out after 1s") {
+		t.Fatalf("err = %v, want a transient timeout", err)
+	}
+	if got := calls(t, countFile); got != 3 {
+		t.Fatalf("read ran %d times, want 3", got)
 	}
 }

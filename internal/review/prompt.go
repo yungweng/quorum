@@ -11,7 +11,7 @@ import (
 // Two groups of rules matter here and neither is decoration. The execution
 // rules keep the aggregator from posting anything itself: it runs read-only,
 // but a model that believes it should call `gh` produces narration instead of a
-// comment, which ValidateComment then rejects and the run has paid for twice.
+// comment, which validateComment then rejects and the run has paid for twice.
 // The structure rules are the contract findings.json is counted from.
 func aggregatorPrompt(m promptMeta) string {
 	drift := m.BaseDriftNote
@@ -59,9 +59,9 @@ Important execution rules:
 - Deduplicate overlapping findings.
 - Do not invent findings that are not present in the reviewer outputs.
 - Keep only findings grounded in reviewer evidence.
-- Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- Use exactly these five sections, in this order, as level-2 headings: `+sectionHeadings+`.
 - The very first line of your answer must be exactly "## Summary", including both leading # characters. Every section heading keeps its leading "## ". These headings are parsed by a machine; a heading without them counts as missing.
-- List every finding in Blockers, Critical, Suggestions, and Questions as a top-level bullet line starting with "- ".
+- List every finding in `+findingSections+` as a top-level bullet line starting with "- ".
 - Suggestions are for changes the author should actually make. Drop polish, taste, naming, and hypothetical improvements even when a reviewer mentioned them; "None." is the right content for a clean change, not a weak bullet list.
 - If a section has no items, write "None." as its only content.
 - Do not mention internal reviewer count, Codex sessions, or automation details.
@@ -73,9 +73,9 @@ Important execution rules:
 - Deduplicate overlapping findings.
 - Do not invent findings that are not present in the reviewer outputs.
 - Keep only findings grounded in reviewer evidence.
-- Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- Use exactly these five sections, in this order, as level-2 headings: `+sectionHeadings+`.
 - The very first line of your answer must be exactly "## Summary", including both leading # characters. Every section heading keeps its leading "## ". These headings are parsed by a machine; a heading without them counts as missing.
-- List every finding in Blockers, Critical, Suggestions, and Questions as a top-level bullet line starting with "- ".
+- List every finding in `+findingSections+` as a top-level bullet line starting with "- ".
 - Suggestions are for changes the author should actually make. Drop polish, taste, naming, and hypothetical improvements even when a reviewer mentioned them; "None." is the right content for a clean change, not a weak bullet list.
 - If a section has no items, write "None." as its only content.
 - Do not mention internal reviewer count, Codex sessions, or automation details.
@@ -105,7 +105,7 @@ func verifierPrompt(m promptMeta) string {
 
 %sThe candidate report contains claims that require checking. Some may be true positives, some may be false positives, and some may identify a real issue imprecisely. Do not aim for any predetermined outcome or proportion. Judge each finding on the repository evidence, independent of reviewer agreement or wording.
 
-Inspect the local diff and relevant code for every bullet under Blockers, Critical, Suggestions, and Questions. Trace the actual control and error paths. Use read-only inspection first. You may run focused commands or tests when they materially help verify a claim. Do not edit source, tests, configuration, generated files, or repository metadata. Do not stage or commit anything. Put any disposable artifact you intentionally create under $TMPDIR or /tmp, outside the repository.
+Inspect the local diff and relevant code for every bullet under `+findingSections+`. Trace the actual control and error paths. Use read-only inspection first. You may run focused commands or tests when they materially help verify a claim. Do not edit source, tests, configuration, generated files, or repository metadata. Do not stage or commit anything. Put any disposable artifact you intentionally create under $TMPDIR or /tmp, outside the repository.
 
 For each candidate finding:
 - Preserve it unchanged when it is accurate, sufficiently specific, and correctly rated.
@@ -117,7 +117,7 @@ Do not favor keeping, changing, adding, or removing findings. Apply the same evi
 
 Output rules:
 - Return only the complete final Markdown report body. Do not wrap it in a code fence.
-- Use exactly these five sections, in this order, as level-2 headings: ## Summary, ## Blockers, ## Critical, ## Suggestions, ## Questions.
+- Use exactly these five sections, in this order, as level-2 headings: `+sectionHeadings+`.
 - The very first line of your answer must be exactly "## Summary", including both leading # characters. Every section heading keeps its leading "## ". These headings are parsed by a machine; a heading without them counts as missing.
 - Do not write any preamble, plan, status update, or tool narration before, between, or after the five sections. Tool use and reasoning stay off the answer; the answer is only the report body.
 - List every final finding as a top-level bullet beginning with "- ". If a section has no findings, write "None." as its only content.
@@ -145,7 +145,8 @@ A finding that reports a violation of one of these rules is a real, in-scope fin
 `, rules)
 }
 
-// promptMeta is what the aggregator needs to know about the run.
+// promptMeta is what the aggregator and verifier prompts need to know about the
+// run.
 type promptMeta struct {
 	URL           string
 	Title         string

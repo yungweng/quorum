@@ -1,49 +1,73 @@
 package codex
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yungweng/quorum/internal/envexec"
 )
 
-// Codex silently ignores an unknown effort instead of failing, so a typo would
-// run every reviewer at the wrong setting and only show up in the bill.
-func TestEffortValidation(t *testing.T) {
-	for _, ok := range []string{"", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} {
-		if !ValidEffort(ok) {
-			t.Errorf("%q was rejected", ok)
-		}
+// argv runs call against a fake codex that records its arguments, one per
+// line, and returns them.
+func argv(t *testing.T, call func(o Options, env envexec.Env, out string) error, o Options) []string {
+	t.Helper()
+	dir := t.TempDir()
+	record := filepath.Join(dir, "argv")
+	o.Bin = fakeCodex(t, `for a in "$@"; do printf '%s\n' "$a"; done > "`+record+`"`)
+	if err := call(o, testEnv(t), filepath.Join(dir, "out.md")); err != nil {
+		t.Fatalf("codex call: %v", err)
 	}
-	for _, bad := range []string{"maximum", "Medium", "hi", "0"} {
-		if ValidEffort(bad) {
-			t.Errorf("%q was accepted", bad)
-		}
+	b, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+}
+
+func review(baseRef, rules string) func(Options, envexec.Env, string) error {
+	return func(o Options, env envexec.Env, out string) error {
+		return o.Review(context.Background(), env, 0, baseRef, rules, out, io.Discard)
+	}
+}
+
+func resume(o Options, env envexec.Env, out string) error {
+	return o.Resume(context.Background(), env, 0, "sid", "prompt", out, io.Discard)
+}
+
+func prompt(o Options, env envexec.Env, out string) error {
+	return o.Prompt(context.Background(), env, 0, "instruction", out, nil, io.Discard)
 }
 
 // Codex has a review-specific model setting that takes precedence over -m. Both
 // have to be set, or a user's own config could silently select a different
 // model for the reviewers than the one that was asked for and paid for.
-func TestReviewFlagsOverrideBothModelSettings(t *testing.T) {
-	got := strings.Join(Options{Model: "gpt-5.6-terra", Effort: "medium"}.reviewFlags(), " ")
-	if !strings.Contains(got, "-m gpt-5.6-terra") {
+func TestReviewSetsBothModelSettings(t *testing.T) {
+	got := strings.Join(argv(t, review("origin/main", ""), Options{Model: "gpt-test", Effort: "medium"}), " ")
+	if !strings.Contains(got, "-m gpt-test") {
 		t.Errorf("the plain model flag is missing: %s", got)
 	}
-	if !strings.Contains(got, `review_model="gpt-5.6-terra"`) {
+	if !strings.Contains(got, `review_model="gpt-test"`) {
 		t.Errorf("the review model override is missing: %s", got)
+	}
+	if !strings.Contains(got, "model_reasoning_effort=medium") {
+		t.Errorf("the effort is missing: %s", got)
 	}
 }
 
 // The reviewers get no value from Serena, and its per-reviewer server spawns
 // have deadlocked runs before.
 func TestSerenaIsDisabledWhenAsked(t *testing.T) {
-	with := strings.Join(Options{DisableSerena: true}.flags(), " ")
+	with := strings.Join(argv(t, review("origin/main", ""), Options{DisableSerena: true}), " ")
 	if !strings.Contains(with, "mcp_servers.serena.enabled=false") {
 		t.Errorf("serena was not disabled: %s", with)
 	}
-	without := strings.Join(Options{}.flags(), " ")
+	without := strings.Join(argv(t, review("origin/main", ""), Options{}), " ")
 	if strings.Contains(without, "serena") {
 		t.Errorf("serena was disabled without being asked: %s", without)
 	}
@@ -54,23 +78,27 @@ func TestSerenaIsDisabledWhenAsked(t *testing.T) {
 // the read-only sandbox.
 func TestBypassOnlyWhenRequested(t *testing.T) {
 	const bypass = "--dangerously-bypass-approvals-and-sandbox"
-	if !strings.Contains(strings.Join(Options{Bypass: true}.flags(), " "), bypass) {
+	if !strings.Contains(strings.Join(argv(t, resume, Options{Bypass: true}), " "), bypass) {
 		t.Error("the bypass flag was not set although it was requested")
 	}
-	if strings.Contains(strings.Join(Options{}.flags(), " "), bypass) {
+	if strings.Contains(strings.Join(argv(t, resume, Options{}), " "), bypass) {
 		t.Error("the bypass flag appeared without being requested")
 	}
-	if strings.Contains(strings.Join(Options{Model: "m"}.reviewFlags(), " "), bypass) {
+	if strings.Contains(strings.Join(argv(t, review("origin/main", ""), Options{Model: "m"}), " "), bypass) {
 		t.Error("a review run carried the sandbox bypass")
+	}
+	got := strings.Join(argv(t, prompt, Options{}), " ")
+	if strings.Contains(got, bypass) || !strings.Contains(got, "--sandbox read-only") {
+		t.Errorf("a read-only pass left the read-only sandbox: %s", got)
 	}
 }
 
 // An empty model or effort has to mean "leave the user's codex defaults alone",
 // rather than passing an empty value to -m.
 func TestEmptySettingsProduceNoFlags(t *testing.T) {
-	got := Options{}.flags()
-	if len(got) != 0 {
-		t.Errorf("empty options produced flags: %v", got)
+	got := argv(t, resume, Options{})
+	if len(got) != 6 || strings.Join(got[:3], " ") != "exec resume sid" || got[3] != "-o" || got[5] != "prompt" {
+		t.Errorf("empty options produced flags: %q", got)
 	}
 }
 
@@ -81,8 +109,8 @@ func TestTOMLStringEscaping(t *testing.T) {
 		`back\side`: `"back\\side"`,
 		"tab\there": `"tab\there"`,
 	} {
-		if got := TOMLString(in); got != want {
-			t.Errorf("TOMLString(%q) = %s, want %s", in, got, want)
+		if got := tomlString(in); got != want {
+			t.Errorf("tomlString(%q) = %s, want %s", in, got, want)
 		}
 	}
 }
@@ -119,15 +147,15 @@ func TestFindSessionMatchesOnTheWorktreePath(t *testing.T) {
 	writeRollout(t, today, "aaaaaaaa-1111-2222-3333-444444444444", "/somewhere/else", now.Add(-time.Minute))
 	writeRollout(t, today, "bbbbbbbb-1111-2222-3333-444444444444", ours, now)
 
-	got, err := FindSession(ours)
+	got, err := findSession(ours)
 	if err != nil {
-		t.Fatalf("FindSession: %v", err)
+		t.Fatalf("findSession: %v", err)
 	}
 	if got != "bbbbbbbb-1111-2222-3333-444444444444" {
 		t.Errorf("session = %s, want the one whose cwd is our worktree", got)
 	}
 
-	if _, err := FindSession("/a/worktree/that/never/ran"); err == nil {
+	if _, err := findSession("/a/worktree/that/never/ran"); err == nil {
 		t.Error("a worktree with no session was matched to one anyway")
 	}
 }
@@ -143,9 +171,9 @@ func TestFindSessionLooksAtYesterday(t *testing.T) {
 	worktree := "/cache/quorum/babysit/acme-api-pr-12/worktree"
 	writeRollout(t, dir, "cccccccc-1111-2222-3333-444444444444", worktree, yesterday)
 
-	got, err := FindSession(worktree)
+	got, err := findSession(worktree)
 	if err != nil {
-		t.Fatalf("FindSession: %v", err)
+		t.Fatalf("findSession: %v", err)
 	}
 	if got != "cccccccc-1111-2222-3333-444444444444" {
 		t.Errorf("session = %s", got)
@@ -165,7 +193,7 @@ func TestFindSessionPrefersTheNewest(t *testing.T) {
 	writeRollout(t, dir, "dddddddd-1111-2222-3333-444444444444", worktree, now.Add(-time.Hour))
 	writeRollout(t, dir, "eeeeeeee-1111-2222-3333-444444444444", worktree, now)
 
-	got, err := FindSession(worktree)
+	got, err := findSession(worktree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +218,7 @@ func TestFindSessionSkipsUnreadableRollouts(t *testing.T) {
 	worktree := "/cache/quorum/babysit/acme-api-pr-12/worktree"
 	writeRollout(t, dir, "ffffffff-1111-2222-3333-444444444444", worktree, now)
 
-	got, err := FindSession(worktree)
+	got, err := findSession(worktree)
 	if err != nil {
 		t.Fatalf("a broken rollout file broke the lookup: %v", err)
 	}
@@ -203,19 +231,19 @@ func TestFindSessionSkipsUnreadableRollouts(t *testing.T) {
 // rules it cannot be: codex rejects --base next to the positional
 // custom-instructions argument, so the rules ride in a custom prompt that
 // carries the base-diff task itself.
-func TestReviewArgsSwapBaseForCustomInstructionsWhenRulesExist(t *testing.T) {
-	plain := (Options{}).reviewArgs("origin/main", "", "out.md")
+func TestReviewSwapsBaseForCustomInstructionsWhenRulesExist(t *testing.T) {
+	plain := argv(t, review("origin/main", ""), Options{})
 	if got := strings.Join(plain, " "); !strings.Contains(got, "--base origin/main") {
 		t.Errorf("--base missing without rules: %s", got)
 	}
 
 	rules := "- UI changes must be mobile responsive (Critical)."
-	withRules := (Options{}).reviewArgs("origin/main", rules, "out.md")
-	joined := strings.Join(withRules, " ")
-	if strings.Contains(joined, "--base") {
-		t.Errorf("--base conflicts with custom instructions and must not appear: %s", joined)
+	withRules := argv(t, review("origin/main", rules), Options{})
+	if slices.Contains(withRules, "--base") {
+		t.Errorf("--base conflicts with custom instructions and must not appear: %q", withRules)
 	}
-	prompt := withRules[len(withRules)-1]
+	// The prompt spans several lines, so it is everything after the last flag.
+	prompt := strings.Join(withRules[slices.Index(withRules, "-o")+2:], "\n")
 	for _, want := range []string{"origin/main", "git merge-base HEAD origin/main", "full general review", rules} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("custom review prompt is missing %q", want)

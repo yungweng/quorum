@@ -43,7 +43,7 @@ func TestClassifyRefreshesAuthorWithoutCreatingAHistoryRun(t *testing.T) {
 	if got.Title != "new title" || got.Author != "example-user" {
 		t.Errorf("stored metadata = title %q, author %q", got.Title, got.Author)
 	}
-	if runs := history.Read(a.p.HistoryFile, 0); len(runs) != 0 {
+	if runs := history.Read(a.p.HistoryFile); len(runs) != 0 {
 		t.Errorf("metadata refresh created history: %+v", runs)
 	}
 }

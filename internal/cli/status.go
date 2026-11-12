@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -14,13 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
-	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
 )
@@ -48,7 +46,7 @@ func (a *app) endsOnce() map[string]string {
 	if err != nil {
 		return cached
 	}
-	runs := history.Read(a.p.HistoryFile, 0)
+	runs := history.Read(a.p.HistoryFile)
 	keys := recentReviewedPRKeys(reviewedPRs(file, runs), time.Now())
 	if len(keys) == 0 {
 		return cached
@@ -59,10 +57,7 @@ func (a *app) endsOnce() map[string]string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client := gh.New(t.GH)
-	client.Attempts = 1
-	client.Timeout = 5 * time.Second
-	client.Log = nil
+	client := gh.NewDecoration(t.GH, 5*time.Second)
 	states, err := client.PRStates(ctx, keys)
 	if err != nil {
 		return cached
@@ -110,9 +105,9 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	if err != nil {
 		w.Printf("%s\n", w.Red("state file unreadable: "+err.Error()))
 	}
-	historyRuns := history.Read(a.p.HistoryFile, 0)
-	live := map[string]runner.Marker{}
-	liveMarkers := runner.Live(a.p.RunningDir)
+	historyRuns := history.Read(a.p.HistoryFile)
+	live := map[string]agentstate.Marker{}
+	liveMarkers := agentstate.Live(a.p.RunningDir)
 	for _, m := range liveMarkers {
 		live[m.Key] = m
 	}
@@ -181,9 +176,6 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 	sort.SliceStable(queued, func(i, j int) bool { return queued[i].SeenReqAt < queued[j].SeenReqAt })
 
 	if w.Color {
-		// The header panel is what the old header line and status bar said,
-		// framed together: the binary and version name the panel, the live
-		// counts and the agent heartbeat are its content.
 		boxed(w, strings.TrimSpace("quorum "+a.version), w.Cyan, func(iw *ui.Writer) {
 			a.statusLine(iw, len(live), len(babysits), len(queued))
 			iw.Printf("  %s\n", iw.Dim(a.agentLine()))
@@ -216,12 +208,6 @@ func (a *app) dashboard(w *ui.Writer, ends map[string]string) []string {
 
 	// What is running gets as much room as it needs and no more, and the log of
 	// finished runs gets the rest.
-	//
-	// The four fixed sections this replaced spent ten lines saying "nothing"
-	// four times over, which is what an idle machine looks like almost all of
-	// the time, while the runs that had actually happened were squeezed in
-	// underneath. The counts that used to justify those headings are on the
-	// status bar, so nothing is lost by collapsing them.
 	limit := a.cfg.History
 	if limit <= 0 {
 		limit = config.Default().History
@@ -348,7 +334,7 @@ func (a *app) header(w *ui.Writer) {
 		w.Printf("%s%s%s\n", w.Bold(left), strings.Repeat(" ", gap), w.Dim(right))
 	}
 	// A config the parser choked on changes what every number below means, so
-	// it sits above them rather than in the system section.
+	// it sits above them rather than in the footer.
 	if a.configErr != nil {
 		w.Printf("%s\n", w.Yellow("config: "+a.configErr.Error()))
 	}
@@ -389,7 +375,7 @@ func panel(w *ui.Writer, title string, count, total int, style func(string) stri
 
 // statusbar answers "what is this machine doing right now" in one line, before
 // any section has to be read. Everything on it is live state; the settings that
-// produced it live in the system section.
+// produced it live in the footer.
 func (a *app) statusbar(w *ui.Writer, reviewing, fixing, queued int) {
 	fmt.Fprintln(w.Out)
 	a.statusLine(w, reviewing, fixing, queued)
@@ -410,7 +396,7 @@ func (a *app) statusLine(w *ui.Writer, reviewing, fixing, queued int) {
 		metric(w, fixing, "fix", w.Magenta),
 		metric(w, queued, "queued", w.Yellow),
 	}
-	if load, ok := runner.LoadAvg1(); ok {
+	if load, ok := agentstate.LoadAvg1(); ok {
 		text := fmt.Sprintf("%.1f", load)
 		if a.cfg.LoadLimit > 0 && load > a.cfg.LoadLimit {
 			text = w.Yellow(text)
@@ -431,7 +417,6 @@ func (a *app) statusLine(w *ui.Writer, reviewing, fixing, queued int) {
 	w.Printf("%s\n", line)
 }
 
-// metric renders one "3 fix" pair, coloured only when the number is not zero.
 func metric(w *ui.Writer, n int, label string, style func(string) string) string {
 	count := strconv.Itoa(n)
 	if n > 0 {
@@ -451,7 +436,7 @@ func (a *app) agentLine() string {
 		return "agent not installed, run: quorum install"
 	}
 	every := fmt.Sprintf("every %s", ui.Duration(time.Duration(a.cfg.PollInterval)*time.Second))
-	at, _, ok := a.lastPoll()
+	at, _, ok := agentstate.ReadHeartbeat(a.p.LastPollFile())
 	if !ok {
 		return "agent loaded, " + every + ", no poll yet"
 	}
@@ -575,7 +560,7 @@ func (a *app) sectionOpen(w *ui.Writer, g grid, open []state.Entry, checking int
 		return
 	}
 	if len(open) == 0 {
-		w.Printf("  %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d reviewed PR%s", checking, plural(checking))))
+		w.Printf("  %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d reviewed PR%s", checking, plural(checking, "", "s"))))
 		return
 	}
 	now := time.Now()
@@ -584,15 +569,15 @@ func (a *app) sectionOpen(w *ui.Writer, g grid, open []state.Entry, checking int
 		w.Printf("      %s\n", openDetail(w, e, now))
 	}
 	if checking > 0 {
-		w.Printf("      %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d more reviewed PR%s", checking, plural(checking))))
+		w.Printf("      %s\n", w.Dim(fmt.Sprintf("checking GitHub for %d more reviewed PR%s", checking, plural(checking, "", "s"))))
 	}
 }
 
-func plural(n int) string {
+func plural(n int, one, many string) string {
 	if n == 1 {
-		return ""
+		return one
 	}
-	return "s"
+	return many
 }
 
 // openMark colours the bullet by what the review found, so the pull request
@@ -649,7 +634,7 @@ func (a *app) sectionActive(
 	manual []review.LiveRun,
 	babysits []loop.Progress,
 	queued []state.Entry,
-	live map[string]runner.Marker,
+	live map[string]agentstate.Marker,
 	ends map[string]string,
 ) {
 	if len(running)+len(manual)+len(babysits)+len(queued) == 0 {
@@ -717,7 +702,7 @@ func (a *app) sectionActive(
 func manualTrack(w *ui.Writer, run review.LiveRun) string {
 	line := "review · manual · " + ui.Duration(time.Since(run.StartedAt)) +
 		" · " + reviewProgress(run.RunDir, run.Reviewers)
-	if tag := run.Model.Tag(); run.Model != (engine.Model{}) {
+	if tag := run.Model.Tag(); run.Model != (spec.Model{}) {
 		line += " · " + tag
 	}
 	return w.Dim(line)
@@ -725,14 +710,14 @@ func manualTrack(w *ui.Writer, run review.LiveRun) string {
 
 func reviewProgress(runDir string, requested int) string {
 	progress := "starting up"
-	if p, ok := runner.ReadProgress(runDir, requested); ok {
+	if p, ok := review.ReadProgress(runDir, requested); ok {
 		progress = fmt.Sprintf("%d/%d reviewers done", p.Done, p.Requested)
 		if p.Failed > 0 {
 			progress += fmt.Sprintf(", %d failed", p.Failed)
 		}
-		if p.Phase == "verify" {
+		if p.Phase == review.PhaseVerify {
 			progress = "verifying findings"
-		} else if p.Phase == "aggregate" || p.Done+p.Failed >= p.Requested {
+		} else if p.Phase == review.PhaseAggregate || p.Done+p.Failed >= p.Requested {
 			progress = "aggregating"
 		}
 	}
@@ -838,7 +823,6 @@ func reviewSegment(w *ui.Writer, p loop.Progress) (string, string) {
 	return text, w.Yellow(text)
 }
 
-// phaseSegment says what the run is doing now and since when.
 func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string) {
 	var what string
 	switch p.Phase {
@@ -883,7 +867,7 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 // at least its engine - so the empty one says nothing rather than guessing.
 func modelSegment(w *ui.Writer, p loop.Progress) (string, string) {
 	m, ok := p.StepModel()
-	if !ok || m == (engine.Model{}) {
+	if !ok || m == (spec.Model{}) {
 		return "", ""
 	}
 	tag := m.Tag()
@@ -892,11 +876,6 @@ func modelSegment(w *ui.Writer, p loop.Progress) (string, string) {
 
 // sectionHistory lists finished runs, newest first, and returns the pull
 // requests it drew so watch knows whose merge state is worth looking up.
-//
-// The log is one entry per run, which is the difference that makes this
-// section worth reading: the state file keeps one record per pull request, so
-// four reviews of the same one used to collapse into a single line showing
-// only the last, and a review started in a terminal never reached it at all.
 //
 // fallback is what the state file still holds. It is used only while the log
 // is empty, so upgrading to a build that keeps a log does not start on a blank
@@ -1239,8 +1218,7 @@ func printTable(w *ui.Writer, rows [][]ui.Cell) {
 }
 
 // footer is the configuration the numbers above were produced under, on one
-// dim line. It used to be a section of its own, which gave four settings that
-// change once a month the same weight as the work in flight.
+// dim line.
 func (a *app) footer(w *ui.Writer) {
 	scope := "every repo that asks you"
 	if len(a.cfg.Orgs) > 0 || len(a.cfg.Repos) > 0 {
@@ -1275,8 +1253,6 @@ func runLabelText(run history.Run) string {
 	return fmt.Sprintf("%s #%d", run.Name(), run.Number())
 }
 
-// findingsText is the one line summary of a finished review from the state
-// file.
 func findingsText(w *ui.Writer, e state.Entry) (string, func(string) string) {
 	counts := fmt.Sprintf("%d blockers, %d critical, %d suggestions", e.Blockers, e.Critical, e.Suggestions)
 	if e.Blockers == 0 && e.Critical == 0 && e.Suggestions == 0 && e.Questions == 0 {
@@ -1295,10 +1271,7 @@ func findingsText(w *ui.Writer, e state.Entry) (string, func(string) string) {
 // number a line is found by, and the author beside it.
 //
 // It is measured once from every row the frame is about to draw, and it is the
-// whole reason the screen reads as a table. The widths used to be two constants
-// picked per line, one for a row with an author and a wider one for a row
-// without, so every result and every title on the screen sat at one of two
-// offsets depending on whether GitHub had told us who opened the pull request.
+// whole reason the screen reads as a table.
 type grid struct {
 	label  int
 	author int
@@ -1432,27 +1405,6 @@ func prCells(w *ui.Writer, g grid, mark, label, url, author, title, end string) 
 // that identify it.
 const titleFloor = 12
 
-// lastPoll reads the heartbeat the poll writes when it finishes.
-func (a *app) lastPoll() (time.Time, int, bool) {
-	b, err := os.ReadFile(filepath.Join(a.p.StateDir, "last-poll"))
-	if err != nil {
-		return time.Time{}, 0, false
-	}
-	parts := strings.Fields(string(b))
-	if len(parts) == 0 {
-		return time.Time{}, 0, false
-	}
-	t, err := time.Parse(time.RFC3339, parts[0])
-	if err != nil {
-		return time.Time{}, 0, false
-	}
-	open := 0
-	if len(parts) > 1 {
-		open, _ = strconv.Atoi(parts[1])
-	}
-	return t, open, true
-}
-
 // endStates caches how the pull requests on screen ended, so the redraw never
 // has to wait for GitHub.
 type endStates struct {
@@ -1514,14 +1466,9 @@ func (e *endStates) store(states map[string]string) {
 // network and earn a rate limit for a fact that only changes when somebody
 // presses a button. One batched query covers every tracked pull request.
 func (a *app) trackEnds(ctx context.Context, ghBin string, e *endStates) {
-	client := gh.New(ghBin)
 	// No retries and a short deadline: this is decoration, and the next pass is
 	// thirty seconds away, which is sooner than a retried call would answer.
-	// Logging is off as well, because the logger echoes to the screen this is
-	// drawing on.
-	client.Attempts = 1
-	client.Timeout = 20 * time.Second
-	client.Log = nil
+	client := gh.NewDecoration(ghBin, 20*time.Second)
 
 	for {
 		select {

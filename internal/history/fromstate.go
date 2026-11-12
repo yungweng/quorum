@@ -4,14 +4,34 @@ import (
 	"github.com/yungweng/quorum/internal/state"
 )
 
-// FromState turns a state file change into a history entry and reports whether
-// it is one worth recording.
+// Record applies fn to the state record for key and adds the change to the
+// history log when it is one the log wants. Every agent write goes through
+// here, which is what keeps the two stores from drifting apart and makes it
+// impossible to add an outcome later that quietly never gets logged.
 //
-// This is the only place history knows about the state file. It lives here
-// rather than in the two agent call sites so that both go through the same
-// rule, because the interesting part is not the conversion but which changes
-// count, and getting that wrong in one of the two is invisible until the log
-// is missing runs.
+// The two errors are separate because they cost differently: a lost state
+// write loses the outcome of a review that has already been paid for, while a
+// history log that could not be extended is worth a line, not a failure.
+func Record(statePath, historyPath, key, source string, fn func(*state.Record)) (stateErr, historyErr error) {
+	var before, after state.Record
+	capture := func(rec *state.Record) {
+		before = *rec
+		fn(rec)
+		after = *rec
+	}
+	if err := state.Mutate(statePath, key, capture); err != nil {
+		return err, nil
+	}
+	if run, ok := fromState(key, before, after, source); ok {
+		return nil, Append(historyPath, run)
+	}
+	return nil, nil
+}
+
+// fromState turns a state file change into a history entry and reports whether
+// it is one worth recording. The interesting part is not the conversion but
+// which changes count, and getting that wrong is invisible until the log is
+// missing runs.
 //
 // A finished or failed review is recorded once per run, and two reviews of the
 // same pull request stay two entries, which is exactly what the state file
@@ -28,7 +48,7 @@ import (
 // them on every pass, so they are recorded only when the decision itself is
 // new. Everything else is a stage of a run in progress and belongs on the
 // dashboard, not in the log.
-func FromState(key string, before, after state.Record, source string) (Run, bool) {
+func fromState(key string, before, after state.Record, source string) (Run, bool) {
 	switch after.Status {
 	case state.OK, state.Failed:
 		if before.Status == after.Status && before.At == after.At {

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,20 +16,20 @@ func TestReadShellEraState(t *testing.T) {
 	legacy := `{
   "schema": 1,
   "prs": {
-    "Crumb-GmbH/waffle-iron#103": {
+    "acme/api#42": {
       "day": "2026-07-25",
       "count": "1",
-      "sha": "9bce811de6eed61345735d2b278b21670af46cf5",
+      "sha": "0123456789abcdef0123456789abcdef01234567",
       "status": "ok",
       "at": "2026-07-25T15:43:21",
-      "comment_url": "https://github.com/Crumb-GmbH/waffle-iron/pull/103#issuecomment-5078706902",
+      "comment_url": "https://github.com/acme/api/pull/42#issuecomment-1",
       "blockers": "0",
       "critical": "4",
-      "runlog": "/Users/x/.local/state/prbot/runs/waffle-iron.log",
+      "runlog": "/tmp/example-user/prbot/runs/api.log",
       "req_at": "2026-07-16T12:50:30Z",
       "fails": "0"
     },
-    "crumbtray/toaster-api#1993": {
+    "acme/web#43": {
       "status": "failed",
       "at": "2026-07-25T22:49:25",
       "fails": "2"
@@ -43,14 +44,14 @@ func TestReadShellEraState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	waffle := f.PRs["Crumb-GmbH/waffle-iron#103"]
-	if waffle.Critical != 4 || waffle.Blockers != 0 || waffle.Fails != 0 {
-		t.Errorf("string numbers did not parse: %+v", waffle)
+	api := f.PRs["acme/api#42"]
+	if api.Critical != 4 || api.Blockers != 0 || api.Fails != 0 {
+		t.Errorf("string numbers did not parse: %+v", api)
 	}
-	if waffle.Status != OK {
-		t.Errorf("status = %q", waffle.Status)
+	if api.Status != OK {
+		t.Errorf("status = %q", api.Status)
 	}
-	if f.PRs["crumbtray/toaster-api#1993"].Fails != 2 {
+	if f.PRs["acme/web#43"].Fails != 2 {
 		t.Error("fails did not parse")
 	}
 
@@ -59,7 +60,7 @@ func TestReadShellEraState(t *testing.T) {
 		t.Fatalf("got %d entries", len(entries))
 	}
 	// Newest change first.
-	if entries[0].Key != "crumbtray/toaster-api#1993" {
+	if entries[0].Key != "acme/web#43" {
 		t.Errorf("wrong order: %s first", entries[0].Key)
 	}
 	// The zone-less timestamps of the old file still have to parse.
@@ -69,17 +70,17 @@ func TestReadShellEraState(t *testing.T) {
 }
 
 func TestEntryKeyParts(t *testing.T) {
-	e := Entry{Key: "crumbtray/toaster-api#2017"}
-	if e.Repo() != "crumbtray/toaster-api" {
+	e := Entry{Key: "acme/api#42"}
+	if e.Repo() != "acme/api" {
 		t.Errorf("Repo = %q", e.Repo())
 	}
-	if e.Name() != "toaster-api" {
+	if e.Name() != "api" {
 		t.Errorf("Name = %q", e.Name())
 	}
-	if e.Number() != 2017 {
+	if e.Number() != 42 {
 		t.Errorf("Number = %d", e.Number())
 	}
-	if e.URL() != "https://github.com/crumbtray/toaster-api/pull/2017" {
+	if e.URL() != "https://github.com/acme/api/pull/42" {
 		t.Errorf("URL = %q", e.URL())
 	}
 }
@@ -143,7 +144,9 @@ func TestMutateClearsLegacyLockDirectory(t *testing.T) {
 	}
 }
 
-func TestWriteTrimsToNewest(t *testing.T) {
+// Every write trims the file to the newest records, so it cannot grow without
+// bound across months of polling.
+func TestMutateTrimsToNewest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	f := File{Schema: 1, PRs: map[string]Record{}}
 	base := time.Now().Add(-time.Duration(keep+50) * time.Hour)
@@ -153,7 +156,14 @@ func TestWriteTrimsToNewest(t *testing.T) {
 			At:     base.Add(time.Duration(i) * time.Hour).Format(time.RFC3339),
 		}
 	}
-	if err := write(path, f); err != nil {
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Mutate(path, "acme/web#7", func(r *Record) { r.Mark(Running, "") }); err != nil {
 		t.Fatal(err)
 	}
 	got, err := Read(path)
@@ -163,9 +173,11 @@ func TestWriteTrimsToNewest(t *testing.T) {
 	if len(got.PRs) != keep {
 		t.Errorf("kept %d records, want %d", len(got.PRs), keep)
 	}
-	// The newest record must be among the survivors, the oldest must not.
-	if _, ok := got.PRs[key(keep+49)]; !ok {
-		t.Error("newest record was trimmed")
+	// The record just written and the newest old one survive, the oldest does not.
+	for _, k := range []string{"acme/web#7", key(keep + 49)} {
+		if _, ok := got.PRs[k]; !ok {
+			t.Errorf("newest record %s was trimmed", k)
+		}
 	}
 	if _, ok := got.PRs[key(0)]; ok {
 		t.Error("oldest record survived the trim")

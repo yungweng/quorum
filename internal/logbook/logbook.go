@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// MaxBytes is the size at which the log is rotated to <name>.1.
-const MaxBytes = 1 << 20
+// maxBytes is the size at which the log is rotated to <name>.1.
+const maxBytes = 1 << 20
 
 // Logger appends timestamped lines to a file, and to a terminal when one is
 // attached.
@@ -55,11 +55,11 @@ func (l *Logger) Printf(format string, args ...any) {
 	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
 }
 
-// rotate moves the log aside once it grows past MaxBytes, keeping exactly one
+// rotate moves the log aside once it grows past maxBytes, keeping exactly one
 // previous file. The caller holds the mutex.
 func (l *Logger) rotate() {
 	fi, err := os.Stat(l.Path)
-	if err != nil || fi.Size() < MaxBytes {
+	if err != nil || fi.Size() < maxBytes {
 		return
 	}
 	os.Rename(l.Path, l.Path+".1")

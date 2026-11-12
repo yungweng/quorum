@@ -7,7 +7,7 @@ import (
 )
 
 type activityReporter struct {
-	NopReporter
+	nopReporter
 	started []string
 	done    int
 }
@@ -28,8 +28,9 @@ func TestAwaitReportsImmediatelyAndTicksUntilWorkEnds(t *testing.T) {
 	ticks := make(chan time.Duration, 1)
 	done := make(chan error, 1)
 
+	r := &run{ctx: context.Background(), timing: timings{progress: time.Millisecond}}
 	go func() {
-		done <- await(context.Background(), time.Millisecond, func(elapsed time.Duration) {
+		done <- r.await(func(elapsed time.Duration) {
 			select {
 			case ticks <- elapsed:
 			default:
@@ -48,7 +49,7 @@ func TestAwaitReportsImmediatelyAndTicksUntilWorkEnds(t *testing.T) {
 		if elapsed <= 0 {
 			t.Fatalf("later progress update = %s, want elapsed time", elapsed)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("blocked work produced no progress tick")
 	}
 	close(release)

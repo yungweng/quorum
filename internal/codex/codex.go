@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"slices"
 	"strings"
 	"time"
 
@@ -16,21 +15,9 @@ import (
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
-// Efforts is the set of reasoning-effort values Codex accepts. Validating this
-// before spawning anything is deliberate: Codex silently ignores an unknown
-// effort instead of failing, so a typo would quietly run every reviewer at the
-// wrong setting and only show up in the bill.
-var Efforts = []string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
-
-// ValidEffort reports whether e is one of Efforts. The empty string is allowed
-// and means "leave the user's Codex default alone".
-func ValidEffort(e string) bool {
-	return e == "" || slices.Contains(Efforts, e)
-}
-
 // Options are the model settings for one Codex invocation.
 type Options struct {
-	Bin    string // resolved codex binary; empty falls back to a PATH lookup
+	Bin    string // the codex binary to run
 	Model  string // empty leaves the user's Codex default
 	Effort string // empty leaves the user's Codex default
 
@@ -47,14 +34,6 @@ type Options struct {
 	DisableSerena bool
 }
 
-func (o Options) bin() string {
-	if o.Bin == "" {
-		return "codex"
-	}
-	return o.Bin
-}
-
-// flags builds the shared part of every invocation.
 func (o Options) flags() []string {
 	var f []string
 	if o.Model != "" {
@@ -79,16 +58,13 @@ func (o Options) flags() []string {
 func (o Options) reviewFlags() []string {
 	f := o.flags()
 	if o.Model != "" {
-		f = append(f, "-c", "review_model="+TOMLString(o.Model))
+		f = append(f, "-c", "review_model="+tomlString(o.Model))
 	}
 	return f
 }
 
-// TOMLString quotes s as a TOML basic string for `codex -c key=value`.
-// The shell version delegated this to `jq -Rn '$model'`; the escape rules that
-// matter here (quote, backslash, control characters) are identical between
-// JSON and TOML basic strings.
-func TOMLString(s string) string {
+// tomlString quotes s as a TOML basic string for `codex -c key=value`.
+func tomlString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
 	for _, r := range s {
@@ -131,10 +107,10 @@ var usageLimitLine = "hit your usage limit"
 func (o Options) run(ctx context.Context, env envexec.Env, timeout time.Duration, args []string, stdin io.Reader, log io.Writer) error {
 	var tail usagelimit.Tail
 	// One writer value for both streams, so os/exec merges them into a single
-	// pipe exactly as the previous Stdout=Stderr=log wiring did.
+	// pipe.
 	w := io.MultiWriter(log, &tail)
 	err := env.Run(ctx, timeout, envexec.Cmd{
-		Name: o.bin(), Args: args, Stdin: stdin, Stdout: w, Stderr: w,
+		Name: o.Bin, Args: args, Stdin: stdin, Stdout: w, Stderr: w,
 	})
 	if err == nil {
 		return nil
@@ -181,27 +157,13 @@ In addition, this repository defines its own review rules below. A violation of 
 %s`, baseRef, baseRef, rules)
 }
 
-// Aggregate runs the aggregator pass: read-only, ephemeral, prompt as the
-// argument and the collected reviewer outputs on stdin.
-func (o Options) Aggregate(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
-	args := append([]string{"exec"}, o.flags()...)
-	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
-	return o.run(ctx, env, timeout, args, stdin, log)
-}
-
-// Verify runs the independent evidence pass in the same read-only sandbox as
-// aggregation. The candidate report arrives on stdin and the verified report
-// is the final message written to outFile.
-func (o Options) Verify(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
-	args := append([]string{"exec"}, o.flags()...)
-	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
-	return o.run(ctx, env, timeout, args, stdin, log)
-}
-
-// DescribePR writes a final-state pull request description. It is separate
-// from the resumable fix session so the output describes the finished diff
+// Prompt runs a read-only, ephemeral pass: prompt as the argument and the
+// material it works on - the reviewer outputs, the candidate report, the
+// final diff - on stdin. Aggregation, verification, the PR description and
+// the divergence analysis all run here; the description in particular runs
+// outside the resumable fix session, so it describes the finished diff
 // without inheriting the round-by-round conversation.
-func (o Options) DescribePR(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
+func (o Options) Prompt(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, stdin io.Reader, log io.Writer) error {
 	args := append([]string{"exec"}, o.flags()...)
 	args = append(args, "--sandbox", "read-only", "--ephemeral", "-o", outFile, prompt)
 	return o.run(ctx, env, timeout, args, stdin, log)
@@ -209,14 +171,14 @@ func (o Options) DescribePR(ctx context.Context, env envexec.Env, timeout time.D
 
 // Exec starts a new resumable session, writes the final message to outFile
 // and returns the session id recovered from ~/.codex/sessions. The lookup is
-// keyed on the worktree path, which is unique per run; see FindSession.
+// keyed on the worktree path, which is unique per run; see findSession.
 func (o Options) Exec(ctx context.Context, env envexec.Env, timeout time.Duration, prompt, outFile string, log io.Writer) (string, error) {
 	args := append([]string{"exec"}, o.flags()...)
 	args = append(args, "-o", outFile, prompt)
 	if err := o.run(ctx, env, timeout, args, nil, log); err != nil {
 		return "", err
 	}
-	id, err := FindSession(env.Worktree)
+	id, err := findSession(env.Worktree)
 	if err != nil {
 		return "", fmt.Errorf("could not find the Codex session for %s: %w", env.Worktree, err)
 	}

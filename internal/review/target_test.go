@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,49 +75,24 @@ func TestResumeRefusesTargetOverrides(t *testing.T) {
 	}
 }
 
-func TestLegacyResumeOnlyAcceptsItsGeneratedPRName(t *testing.T) {
-	pr := targetForTest(42, false)
-	for _, test := range []struct {
-		name string
-		root string
-		tgt  target.Target
-		want bool
-	}{
-		{
-			name: "matching PR",
-			root: "/tmp/acme-api-pr-42-20260730-220000",
-			tgt:  pr,
-			want: true,
-		},
-		{
-			name: "different PR",
-			root: "/tmp/acme-api-pr-41-20260730-220000",
-			tgt:  pr,
-		},
-		{
-			name: "branch",
-			root: "/tmp/acme-api-branch-feature-crumb-tray-20260730-220000",
-			tgt:  targetForTest(0, true),
-		},
-		{
-			name: "branch name resembles PR target",
-			root: "/tmp/acme-api-branch-pr-42-20260730-220000",
-			tgt: target.Target{PR: gh.FullPR{
-				Number:      42,
-				HeadRefName: "pr-42",
-			}},
-		},
-		{
-			name: "renamed directory",
-			root: "/tmp/recovered-review",
-			tgt:  pr,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := legacyPRRunMatches(test.root, test.tgt); got != test.want {
-				t.Fatalf("legacyPRRunMatches() = %v, want %v", got, test.want)
-			}
-		})
+// A run directory without current target metadata cannot prove what it
+// reviewed, so resuming it fails as unusable and callers start a fresh run.
+func TestResumeRefusesMissingOrOutdatedTargetMetadata(t *testing.T) {
+	missing := Options{Repo: "acme/api", RepoRoot: t.TempDir(), ResumeRun: t.TempDir(), Number: 42}
+	if _, _, err := (&Runner{}).resolveRunTarget(context.Background(), &missing); !errors.Is(err, ErrResumeUnusable) {
+		t.Fatalf("missing metadata: err = %v, want ErrResumeUnusable", err)
+	}
+
+	root := t.TempDir()
+	pr := gh.FullPR{Number: 42}
+	old := runTarget{Schema: 1, Repo: "acme/api", Number: 42,
+		Branch: "feature/crumb-tray", BaseBranch: "main", PR: &pr}
+	if err := writeRunTarget(filepath.Join(root, "target.json"), old); err != nil {
+		t.Fatal(err)
+	}
+	outdated := Options{Repo: "acme/api", RepoRoot: t.TempDir(), ResumeRun: root, Number: 42}
+	if _, _, err := (&Runner{}).resolveRunTarget(context.Background(), &outdated); !errors.Is(err, ErrResumeUnusable) {
+		t.Fatalf("schema 1: err = %v, want ErrResumeUnusable", err)
 	}
 }
 
@@ -213,19 +189,6 @@ func TestRunTargetMetadataPinsALocalHead(t *testing.T) {
 		t.Fatalf("resume lost PR metadata: %+v", tgt)
 	}
 
-	legacyPRMeta := runTarget{Schema: legacyRunTargetSchema, Repo: "acme/api", Number: 42,
-		Branch: "feature/crumb-tray", BaseBranch: "main", LocalHead: "abc123"}
-	legacyResume := Options{Repo: "acme/api", RepoRoot: t.TempDir(), Number: 42, LocalHead: true}
-	if err := applyRunTarget(&legacyResume, legacyPRMeta); err != nil {
-		t.Fatalf("a schema-1 local PR head did not resume: %v", err)
-	}
-	tgt, _, err = (&Runner{}).resolveRunTarget(context.Background(), &legacyResume)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tgt.BranchOnly || tgt.PR.Number != legacyPRMeta.Number {
-		t.Fatalf("schema-1 resume lost PR identity: %+v", tgt)
-	}
 }
 
 func TestResolveLocalHeadKeepsProvidedPRMetadata(t *testing.T) {

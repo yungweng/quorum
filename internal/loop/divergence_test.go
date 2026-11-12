@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
@@ -17,15 +17,15 @@ import (
 	"github.com/yungweng/quorum/internal/target"
 )
 
-func sampleDivergenceTrace() DivergenceTrace {
-	return DivergenceTrace{
+func sampleDivergenceTrace() divergenceTrace {
+	return divergenceTrace{
 		Schema: 1, PR: 42, Title: "Choose a retry policy", Description: "Keep retries bounded.",
 		InitialHead: "aaaaaaaa", FinalHead: "cccccccc",
-		Rounds: []DivergenceRoundTrace{
+		Rounds: []divergenceRoundTrace{
 			{Round: 1, ReviewedSHA: "aaaaaaaa", ReviewComment: "Preserve the request.",
-				Critical: 1, Fix: &FixTrace{BeforeSHA: "aaaaaaaa", AfterSHA: "bbbbbbbb"}},
+				Critical: 1, Fix: &fixTrace{BeforeSHA: "aaaaaaaa", AfterSHA: "bbbbbbbb"}},
 			{Round: 2, ReviewedSHA: "bbbbbbbb", ReviewComment: "Cancel the request.",
-				Critical: 1, Fix: &FixTrace{BeforeSHA: "bbbbbbbb", AfterSHA: "cccccccc"}},
+				Critical: 1, Fix: &fixTrace{BeforeSHA: "bbbbbbbb", AfterSHA: "cccccccc"}},
 		},
 	}
 }
@@ -40,9 +40,9 @@ func TestDivergenceTimeoutSurvivesDefaults(t *testing.T) {
 }
 
 func TestCIFixTraceJSONIncludesRound(t *testing.T) {
-	b, err := json.Marshal(CIFixTrace{
+	b, err := json.Marshal(ciFixTrace{
 		AfterRound: 2,
-		FixTrace:   FixTrace{BeforeSHA: "old", AfterSHA: "new"},
+		fixTrace:   fixTrace{BeforeSHA: "old", AfterSHA: "new"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -82,9 +82,9 @@ func TestValidateDivergenceReportRequiresConcreteEvidence(t *testing.T) {
 
 func TestValidateDivergenceReportAcceptsCIFixEvidenceForItsRound(t *testing.T) {
 	trace := sampleDivergenceTrace()
-	trace.CIFixes = []CIFixTrace{{
+	trace.CIFixes = []ciFixTrace{{
 		AfterRound: 2,
-		FixTrace: FixTrace{
+		fixTrace: fixTrace{
 			BeforeSHA: "cccccccc",
 			AfterSHA:  "dddddddd",
 			Commits:   "dddddddd restore seed allowlist",
@@ -113,9 +113,9 @@ func TestValidateDivergenceReportAcceptsCIFixEvidenceForItsRound(t *testing.T) {
 
 func TestValidateDivergenceReportAcceptsCIFixEvidenceBeforeFirstRound(t *testing.T) {
 	trace := sampleDivergenceTrace()
-	trace.CIFixes = []CIFixTrace{{
+	trace.CIFixes = []ciFixTrace{{
 		AfterRound: 0,
-		FixTrace:   FixTrace{BeforeSHA: "initial", AfterSHA: "before-first-review"},
+		fixTrace:   fixTrace{BeforeSHA: "initial", AfterSHA: "before-first-review"},
 	}}
 	report := DivergenceReport{
 		Schema: 1, Verdict: DivergenceDiverged, Summary: "The policies conflict.",
@@ -133,7 +133,7 @@ func TestValidateDivergenceReportAcceptsCIFixEvidenceBeforeFirstRound(t *testing
 
 func TestValidateNonDivergedReportRejectsInventedConflicts(t *testing.T) {
 	report := DivergenceReport{
-		Schema: 1, Verdict: DivergenceCumulative, Summary: "Findings are compatible.",
+		Schema: 1, Verdict: divergenceCumulative, Summary: "Findings are compatible.",
 		Recommendation: "Review the remaining failures.",
 		Conflicts:      []DivergenceConflict{{Title: "invented"}},
 	}
@@ -159,7 +159,7 @@ func TestDivergenceReportControlsMentions(t *testing.T) {
 	}
 
 	report := DivergenceReport{
-		Schema: 1, Verdict: DivergenceCumulative, Summary: "The findings are cumulative.",
+		Schema: 1, Verdict: divergenceCumulative, Summary: "The findings are cumulative.",
 		Recommendation: "Inspect the latest fix.",
 	}
 	body := renderDivergenceReport(report, 12, nil)
@@ -202,7 +202,7 @@ func TestAnalyzeDivergenceUsesStrictJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &run{
-		o:    Options{CodexBin: bin},
+		o:    Options{Bins: spec.Bins{spec.Codex: bin}},
 		ctx:  context.Background(),
 		root: dir, logDir: dir,
 		env:             envexec.Env{Worktree: dir},
@@ -212,7 +212,7 @@ func TestAnalyzeDivergenceUsesStrictJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Verdict != DivergenceCumulative {
+	if report.Verdict != divergenceCumulative {
 		t.Fatalf("verdict = %q", report.Verdict)
 	}
 	script = strings.Replace(script, result, result+" trailing", 1)
@@ -224,14 +224,32 @@ func TestAnalyzeDivergenceUsesStrictJSON(t *testing.T) {
 	}
 }
 
-func TestAnalyzeDivergenceHonorsTimeout(t *testing.T) {
-	dir := t.TempDir()
+// slowAnalyst writes a valid analysis, but only after five seconds: an
+// analysis that ignores its deadline or its context succeeds, one that honors
+// them fails long before.
+func slowAnalyst(t *testing.T, dir string) string {
+	t.Helper()
 	bin := filepath.Join(dir, "codex")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+	result := `{"schema":1,"verdict":"cumulative","summary":"Findings are compatible.","conflicts":[],"recommendation":"Inspect the latest fix."}`
+	script := "#!/bin/sh\n" +
+		"out=''\n" +
+		"while test $# -gt 0; do\n" +
+		"  if test \"$1\" = -o; then shift; out=$1; fi\n" +
+		"  shift\n" +
+		"done\n" +
+		"sleep 5\n" +
+		"printf '%s' '" + result + "' > \"$out\"\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return bin
+}
+
+func TestAnalyzeDivergenceHonorsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	bin := slowAnalyst(t, dir)
 	r := &run{
-		o:    Options{CodexBin: bin, DivergenceTimeout: 10 * time.Millisecond},
+		o:    Options{Bins: spec.Bins{spec.Codex: bin}, DivergenceTimeout: 10 * time.Millisecond},
 		ctx:  context.Background(),
 		root: dir, logDir: dir,
 		env:             envexec.Env{Worktree: dir},
@@ -244,14 +262,11 @@ func TestAnalyzeDivergenceHonorsTimeout(t *testing.T) {
 
 func TestAnalyzeDivergenceHonorsCancellation(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "codex")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := slowAnalyst(t, dir)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	r := &run{
-		o:    Options{CodexBin: bin, DivergenceTimeout: time.Minute},
+		o:    Options{Bins: spec.Bins{spec.Codex: bin}, DivergenceTimeout: time.Minute},
 		ctx:  ctx,
 		root: dir, logDir: dir,
 		env:             envexec.Env{Worktree: dir},
@@ -278,9 +293,9 @@ func TestRunDivergenceScanWritesLocalArtifactsWithoutPosting(t *testing.T) {
 	}
 	r := &run{
 		p:               &Pipeline{Git: git.New("git")},
-		o:               Options{CodexBin: bin, DivergenceScan: true, Post: false},
+		o:               Options{Bins: spec.Bins{spec.Codex: bin}, DivergenceScan: true, Post: false},
 		ctx:             context.Background(),
-		rep:             NopReporter{},
+		rep:             nopReporter{},
 		root:            dir,
 		logDir:          dir,
 		env:             envexec.Env{Worktree: dir},
@@ -291,10 +306,10 @@ func TestRunDivergenceScanWritesLocalArtifactsWithoutPosting(t *testing.T) {
 	if err := r.runDivergenceScan(res); err != nil {
 		t.Fatal(err)
 	}
-	if res.Divergence == nil || res.Divergence.Verdict != DivergenceUncertain {
+	if res.Divergence == nil || res.Divergence.Verdict != divergenceUncertain {
 		t.Fatalf("result = %+v", res.Divergence)
 	}
-	for _, name := range []string{DivergenceResultFile, DivergenceReportFile, "divergence.log"} {
+	for _, name := range []string{divergenceResultFile, divergenceReportFile, "divergence.log"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("%s was not written: %v", name, err)
 		}
@@ -310,11 +325,11 @@ func TestTraceMarksTheFinalFixAsUnreviewed(t *testing.T) {
 	r := &run{
 		p: &Pipeline{Git: git.New(gitBin)}, o: Options{DivergenceScan: true},
 		ctx: context.Background(), root: dir, worktree: dir,
-		divergenceTrace: DivergenceTrace{Schema: 1, InitialHead: "old", FinalHead: "old"},
+		divergenceTrace: divergenceTrace{Schema: 1, InitialHead: "old", FinalHead: "old"},
 	}
 	r.traceReview(1, review.Findings{HeadSHA: "old", Critical: 1}, "Finding")
 	r.lastMsg = "Fixed it."
-	r.traceFix(1, "old", "new", "fix-round-1")
+	r.traceFix(1, "old", "new", "")
 	if got := r.divergenceTrace.Rounds[0].Fix.AfterSHA; got != "new" {
 		t.Fatalf("final fix = %q", got)
 	}
@@ -332,10 +347,10 @@ func TestTraceRecordsCIFixAndAdvancesFinalHead(t *testing.T) {
 	r := &run{
 		p: &Pipeline{Git: git.New(gitBin)}, o: Options{DivergenceScan: true},
 		ctx: context.Background(), root: dir, worktree: dir,
-		divergenceTrace: DivergenceTrace{Schema: 1, InitialHead: "old", FinalHead: "old"},
+		divergenceTrace: divergenceTrace{Schema: 1, InitialHead: "old", FinalHead: "old"},
 	}
 	r.lastMsg = "Repaired the failing check."
-	r.traceCIFix("old", "new", "ci-fix-1")
+	r.traceCIFix("old", "new", "")
 
 	if len(r.divergenceTrace.CIFixes) != 1 {
 		t.Fatalf("CI fixes = %d, want 1", len(r.divergenceTrace.CIFixes))
@@ -349,7 +364,7 @@ func TestTraceRecordsCIFixAndAdvancesFinalHead(t *testing.T) {
 	}
 
 	r.traceReview(1, review.Findings{HeadSHA: "new"}, "Finding")
-	r.traceCIFix("new", "newer", "ci-fix-2")
+	r.traceCIFix("new", "newer", "")
 	if fix := r.divergenceTrace.CIFixes[1]; fix.AfterRound != 1 {
 		t.Fatalf("CI fix after round 1 recorded after_round = %d", fix.AfterRound)
 	}
@@ -360,7 +375,7 @@ func TestDisabledDivergenceScanHasNoArtifactsOrValidation(t *testing.T) {
 	r := &run{o: Options{DivergenceScan: false}, root: dir}
 	r.divergenceTrace = sampleDivergenceTrace()
 	r.writeDivergenceTrace()
-	if _, err := os.Stat(filepath.Join(dir, DivergenceTraceFile)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, divergenceTraceFile)); !os.IsNotExist(err) {
 		t.Fatalf("disabled scan wrote an artifact: %v", err)
 	}
 	if err := (Options{
@@ -398,15 +413,15 @@ func TestDivergenceScanReportsTheReviewModel(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:               &Pipeline{Git: git.New("git")},
-		o:               Options{CodexBin: codexBin, DivergenceScan: true, Post: false, RepoRoot: dir},
+		o:               Options{Bins: spec.Bins{spec.Codex: codexBin}, DivergenceScan: true, Post: false, RepoRoot: dir},
 		ctx:             context.Background(),
 		rep:             rep,
 		root:            dir,
 		logDir:          dir,
 		env:             envexec.Env{Worktree: dir},
 		pr:              gh.FullPR{Number: 42},
-		reviewModel:     engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"},
-		fixModel:        engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"},
+		reviewModel:     spec.Model{Engine: spec.Codex, Name: "gpt-5.6-terra", Effort: "max"},
+		fixModel:        spec.Model{Engine: spec.Claude, Name: "opus", Effort: "high"},
 		divergenceTrace: sampleDivergenceTrace(),
 	}
 	if err := r.runDivergenceScan(&Result{}); err != nil {
@@ -443,7 +458,7 @@ func TestDivergenceReportIsNotPostedAfterHeadDrift(t *testing.T) {
 	rep := &warningReporter{}
 	r := &run{
 		p:               &Pipeline{GH: gh.New(ghBin), Git: git.New("git")},
-		o:               Options{CodexBin: codexBin, DivergenceScan: true, Post: true, RepoRoot: dir},
+		o:               Options{Bins: spec.Bins{spec.Codex: codexBin}, DivergenceScan: true, Post: true, RepoRoot: dir},
 		ctx:             context.Background(),
 		rep:             rep,
 		root:            dir,
@@ -481,17 +496,17 @@ func TestUncertainDivergenceReportPostsConfiguredEscalation(t *testing.T) {
 	ghBin := filepath.Join(dir, "gh")
 	ghScript := "#!/bin/sh\n" +
 		"if test \"$1\" = pr && test \"$2\" = view; then printf '%s' cccccccc; exit 0; fi\n" +
-		"if test \"$1\" = pr && test \"$2\" = comment; then printf '%s' \"$5\" > '" + commentBody + "'; printf '%s' https://example.invalid/report; fi\n"
+		"if test \"$1\" = pr && test \"$2\" = comment; then cat > '" + commentBody + "'; printf '%s' https://example.invalid/report; fi\n"
 	if err := os.WriteFile(ghBin, []byte(ghScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	r := &run{
 		p: &Pipeline{GH: gh.New(ghBin), Git: git.New("git")},
 		o: Options{
-			CodexBin: codexBin, DivergenceScan: true, Post: true, RepoRoot: dir,
+			Bins: spec.Bins{spec.Codex: codexBin}, DivergenceScan: true, Post: true, RepoRoot: dir,
 			DivergenceEscalateTo: []string{"acme/platform"},
 		},
-		ctx: context.Background(), rep: NopReporter{},
+		ctx: context.Background(), rep: nopReporter{},
 		root: dir, logDir: dir, env: envexec.Env{Worktree: dir},
 		pr: gh.FullPR{Number: 42, Author: struct {
 			Login string `json:"login"`

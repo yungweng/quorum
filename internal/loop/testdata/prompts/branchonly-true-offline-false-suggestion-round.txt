@@ -1,0 +1,11 @@
+The final external code review of branch feature/crumb-tray found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
+
+Suggestions that survive a clean review usually point at a real improvement, so lean towards implementing them. For each Suggestion, first decide whether it is worth implementing: implement it when it improves the code and you can verify the change with the affected checks. Skip it only when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk clearly outweighs its value. Changing nothing is still a valid outcome when no Suggestion holds up.
+
+If you changed code: run the affected checks, commit, and push. If you changed nothing, do not commit or push, and briefly state per Suggestion why you skipped it.
+
+---
+
+## Summary
+
+fine

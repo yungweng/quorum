@@ -47,15 +47,25 @@ func TestGCPreservesDependenciesForAResumedRun(t *testing.T) {
 				}
 			}
 
+			// The current run holds its own claim while it collects, and its
+			// own root is among the run roots: that claim must not count as
+			// another live run.
+			release, err := proc.Claim(current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+
 			runner := Runner{Git: git.G{Bin: "true"}}
 			runner.gc(t.Context(), Options{
 				RepoRoot:  root,
 				RunsDir:   runs,
+				RunRoots:  []string{runs},
 				DepsDir:   depsRoot,
 				ResumeRun: tc.resumeRun,
 			}, current)
 
-			_, err := os.Stat(tree)
+			_, err = os.Stat(tree)
 			if err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
@@ -104,10 +114,10 @@ func TestGCPreservesDependenciesForALiveRunInASharedRoot(t *testing.T) {
 
 	runner := Runner{Git: git.G{Bin: "true"}}
 	runner.gc(t.Context(), Options{
-		RepoRoot:       root,
-		RunsDir:        reviewRuns,
-		SharedRunsDirs: []string{babysitRuns},
-		DepsDir:        depsRoot,
+		RepoRoot: root,
+		RunsDir:  reviewRuns,
+		RunRoots: []string{reviewRuns, babysitRuns},
+		DepsDir:  depsRoot,
 	}, current)
 
 	if _, err := os.Stat(tree); err != nil {

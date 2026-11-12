@@ -4,10 +4,10 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-One Go binary that reviews pull requests with a panel of Codex reviewers
-(`quorum review`), drives a PR to green through review-fix rounds
-(`quorum babysit`), and does either of those unattended from a launchd agent
-(`quorum`, `quorum install`).
+One Go binary that reviews pull requests with a panel of reviewers on Codex,
+Claude Code or Grok (`quorum review`), drives a PR to green through review-fix
+rounds (`quorum babysit`), and does either of those unattended from a launchd
+agent (`quorum`, `quorum install`).
 
 It is a port of three separate tools: `pr-codex-review` 1.6.0, `babysit` 0.6.2
 (both Bash) and `prbot` 0.5.1 (Go). The safety stops that carried over are the
@@ -32,28 +32,53 @@ internal/cli/        the command line
   status.go          the dashboard, and the merge-state tracker `watch` runs
   run.go             run, logs, watch
   gc.go              the cache collector and everything that measures the cache
+  end_cache.go       the on-disk cache of the dashboard's last known GitHub states
+  automerge.go       the queue-position suffix of an auto-merge result
+  notify.go          action notices, with a terminal fallback
   doctor.go setup.go configui.go agent.go
 
 internal/review/     the reviewer panel: worktree, fan-out, aggregation, findings
 internal/loop/       the review-fix pipeline: CI, fix sessions, gates
 internal/deps/       shared dependency trees, keyed by lock file hash
-internal/engine/     seam between the pipeline and the CLIs (Reviewer/Fixer)
+internal/cachefs/    removing cache entries, read-only trees included
+internal/target/     resolving a manual run's target: a pull request or a pushed branch
+internal/engine/     seam between the pipeline and the CLIs: Reviewer/Fixer and their
+                     constructors
+  spec/              the engine table: names, binaries, efforts, review defaults;
+                     the Model and Bins values
 internal/codex/      codex exec wrapper, flag construction, session recovery
 internal/claudecli/  Claude Code CLI adapter
 internal/grokcli/    Grok CLI adapter
-internal/proc/       run with a timeout, kill the whole process group
+internal/headless/   what the Claude Code and Grok adapters share
+internal/usagelimit/ the engines' usage-limit error and its reset time
+internal/proc/       run with a timeout, kill the whole process group; run claims,
+                     file and directory locks
 internal/envexec/    run a command inside the worktree, through direnv
 internal/runtmp/     a private TMPDIR per run, removed on every exit
+internal/rundir/     a run directory: name, layout, live claim, age sweep, isolated
+                     environment, the .envrc refusal
 internal/gh/         the GitHub CLI, with one retry policy
 internal/git/        git, always against an explicit directory
 internal/config/ internal/state/ internal/paths/ internal/ui/ internal/logbook/
-internal/runner/     what the agent does per pull request
+internal/runner/     what the agent does per pull request, Tools and the option builders
+internal/automerge/  approving and merging one reviewed head
+internal/history/    the log of finished runs, written beside the state file
+internal/notify/     macOS notifications through terminal-notifier
+internal/prkey/      the owner/repo#number key every store uses, and the repository slug
+                     run directories and the dependency cache are named by
+internal/firstline/  the one line of command output an error message quotes
+internal/atomicfile/ replacing small files in one rename
+internal/agentstate/ markers of runs in flight, the usage-limit pause, the poll
+                     heartbeat, load average
 ```
 
-The dependency direction is one way: `cli` uses everything, `runner` uses `loop`
-and `review`, `loop` uses `review`, and `review` uses `engine` (which builds
-codex/claudecli/grokcli), `deps`, `envexec`, `gh`, `git`. Keep it that way; a
-cycle here usually means a piece of policy ended up in the wrong layer.
+The dependency direction is one way: `cli` uses everything except `engine`,
+`runner` uses `loop`, `review` and `automerge`, `loop` uses `review`, and
+`review` and `loop` are the only users of `engine` (which builds
+codex/claudecli/grokcli); everything else reaches the engine table and the
+`Model`/`Bins` values through the leaf `engine/spec`. `review` also uses `deps`,
+`envexec`, `gh`, `git`, `rundir` and `target`. Keep it that way; a cycle here
+usually means a piece of policy ended up in the wrong layer.
 
 `Version` lives in `main.go` rather than in `internal/cli` and is passed to
 `cli.Run`. Both the Homebrew formula (`-ldflags "-X main.Version=..."`) and the
@@ -76,7 +101,7 @@ reporting without breaking the build.
   counting bullets under `## Blockers`, `## Critical`, `## Suggestions` and
   `## Questions`. A renamed heading or a finding written as prose counts as
   zero, which turns a PR with real blockers into a clean one. That is why
-  `ValidateComment` fails the run instead of posting.
+  `validateComment` fails the run instead of posting.
 - **Only Blockers and Critical keep the loop alive.** Suggestions and Questions
   go to each fix round once. Making either of them blocking prevents
   convergence. The one terminal exception: after a clean final review,
@@ -96,15 +121,17 @@ reporting without breaking the build.
   descendant. Codex spawns MCP servers and toolchains below itself. Do not
   replace `internal/proc` with a plain `exec.CommandContext`; its kill only
   reaches the direct child.
-- **The dashboard may only read small files.** It repaints every three seconds,
-  so what it reads per frame has to stay cheap. Fix loops report themselves
+- **The dashboard may only read small files.** `watch` rebuilds it every second
+  (`watchInterval`) and paints only a frame that changed, so what it reads per
+  frame has to stay cheap; its one subprocess, `launchctl list` for the agent's
+  state, runs at most every 30 seconds (`agentTTL`). Fix loops report themselves
   through `progress.json`, which is rewritten whole on every phase change;
   reviewers report through `output/events.log`. Neither the Codex logs nor the
   run's message files are ever parsed for progress: `fix-round-1.log` passes a
   megabyte within minutes. GitHub is asked outside the frame as well: `watch`
   polls merge states in a goroutine beside the redraw, and `status` asks once
   before it draws. A network call inside `dashboard` would make the screen wait
-  on it every three seconds.
+  on it every second.
 - **`gh pr checks` is not trustworthy right after a push.** It briefly still
   answers for the previous head, so a red commit reads as green. Never read a
   check result before GitHub reports the pushed sha as the PR head. Even then
@@ -117,8 +144,9 @@ reporting without breaking the build.
   the comment the offline loop posts after its push, comes from the returned
   `review.Result`, never from a path into that directory.
 - **Help text, option parsing and `docs/reference.md` describe the same flags.**
-  When you touch one, update all three. The README shows only the flags worth an
-  example; the full table lives in the reference.
+  When you touch one, update all three; `internal/cli/flags_doc_test.go` fails
+  when they disagree. The README shows only the flags worth an example; the full
+  table lives in the reference.
 
 ## Local development
 

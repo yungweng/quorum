@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/logbook"
 	"github.com/yungweng/quorum/internal/paths"
+	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
@@ -39,7 +41,6 @@ const (
 	exitUsageLimit = 8
 )
 
-// app carries what every command needs.
 type app struct {
 	version string
 	cfg     config.Config
@@ -70,12 +71,9 @@ type app struct {
 	removeAll func(string) error // replaced by gc tests that need deterministic failures
 }
 
-// logRun adds a finished terminal run to the history log.
-//
 // Runs started from a terminal are the reason the log exists: they never touch
 // the state file, so without this they leave nothing behind and the dashboard
-// can only ever show what the agent did. A run with no key could not be
-// identified afterwards and is dropped rather than logged as a blank line.
+// can only ever show what the agent did.
 func (a *app) logRun(run history.Run) {
 	if run.Key == "" {
 		return
@@ -162,70 +160,63 @@ func newApp(version string) *app {
 	}
 }
 
-// tools resolves the external binaries quorum drives. launchd starts jobs with
-// a minimal environment and never reads a shell profile, so PATH is widened
-// with the usual install locations before anything is looked up.
-//
-// pr-codex-review is deliberately absent: the reviewer panel is part of this
-// binary now, which also retires the version coupling the fix loop had to it.
-type tools struct {
-	GH    string
-	Git   string
-	Codex string
-	// Claude and Grok are optional: each is only needed when an engine
-	// setting selects it, which engineBinary checks at that point.
-	Claude string
-	Grok   string
-	// Direnv is optional: repositories without an .envrc never need it.
-	Direnv string
-}
-
-// engineBinary resolves the binary for a selected engine, or a clear error
-// naming the flag or config key to fix.
-func engineBinary(name string, t tools, hint string) (string, error) {
-	switch name {
-	case config.EngineClaude:
-		if t.Claude == "" {
-			return "", fmt.Errorf("engine claude is selected (%s) but no claude binary was found on PATH; install Claude Code or switch back to codex", hint)
-		}
-		return t.Claude, nil
-	case config.EngineGrok:
-		if t.Grok == "" {
-			return "", fmt.Errorf("engine grok is selected (%s) but no grok binary was found on PATH; install the Grok CLI or switch back to codex", hint)
-		}
-		return t.Grok, nil
-	default:
-		return t.Codex, nil
+func engineBinary(name string, bins spec.Bins, hint string) error {
+	e := spec.Get(name)
+	if e.Name == spec.Codex || bins.For(name) != "" {
+		return nil
 	}
+	return fmt.Errorf("engine %s is selected (%s) but no %s binary was found on PATH; install %s or switch back to %s",
+		e.Name, hint, e.Bin, e.Install, spec.Codex)
 }
 
-func (a *app) findTools() (tools, error) {
+// findTools resolves the external binaries quorum drives. launchd starts jobs
+// with a minimal environment and never reads a shell profile, so PATH is
+// widened with the usual install locations before anything is looked up.
+//
+// gh, git and codex are required. The other engines are only needed when an
+// engine setting selects them, which engineBinary checks at that point, and
+// direnv only for repositories with an .envrc.
+func (a *app) findTools() (runner.Tools, error) {
 	widenPath()
-	var t tools
+	t := runner.Tools{Engines: spec.Bins{}}
 	var missing []string
-	for _, spec := range []struct {
+	for _, req := range []struct {
 		name string
 		dst  *string
 	}{
 		{"gh", &t.GH},
 		{"git", &t.Git},
-		{"codex", &t.Codex},
 	} {
-		path, err := exec.LookPath(spec.name)
+		path, err := exec.LookPath(req.name)
 		if err != nil {
-			missing = append(missing, spec.name)
+			missing = append(missing, req.name)
 			continue
 		}
-		*spec.dst = path
+		*req.dst = path
 	}
-	t.Claude, _ = exec.LookPath("claude")
-	t.Grok, _ = exec.LookPath("grok")
+	for _, e := range spec.All {
+		path, err := exec.LookPath(e.Bin)
+		if err != nil {
+			if e.Name == spec.Codex {
+				missing = append(missing, e.Bin)
+			}
+			continue
+		}
+		t.Engines[e.Name] = path
+	}
 	t.Direnv, _ = exec.LookPath("direnv")
 
 	if len(missing) > 0 {
 		return t, fmt.Errorf("missing required tools: %s", strings.Join(missing, ", "))
 	}
 	return t, nil
+}
+
+func (a *app) newRunner(t runner.Tools, client *gh.Client) *runner.Runner {
+	return &runner.Runner{
+		Cfg: a.cfg, P: a.p, Log: a.log,
+		GH: client, Git: git.New(t.Git), Tools: t,
+	}
 }
 
 func widenPath() {
@@ -238,8 +229,12 @@ func widenPath() {
 	// so a setup missing one pays the one subprocess rather than losing the
 	// tool. The launchd job does not bake this prefix (see agentPathDirs);
 	// only the live process path is widened.
+	names := []string{"gh", "git"}
+	for _, e := range spec.All {
+		names = append(names, e.Bin)
+	}
 	allResolved := true
-	for _, name := range []string{"gh", "git", "codex", "claude", "grok", "direnv"} {
+	for _, name := range append(names, "direnv") {
 		if _, err := exec.LookPath(name); err != nil {
 			allResolved = false
 			break
@@ -275,8 +270,6 @@ func (a *app) newGH(bin string) *gh.Client {
 	c.Log = func(format string, args ...any) { a.log.Printf(format, args...) }
 	return c
 }
-
-func (a *app) newGit(bin string) git.G { return git.New(bin) }
 
 func (a *app) usage() {
 	a.out.Printf(`%s
@@ -317,7 +310,6 @@ Config: %s
 		a.cfg.PollInterval, a.p.Config)
 }
 
-// die prints to stderr and returns the exit code, so callers can `return a.die(...)`.
 func (a *app) die(format string, args ...any) int {
 	fmt.Fprintf(os.Stderr, "quorum: "+format+"\n", args...)
 	return exitError

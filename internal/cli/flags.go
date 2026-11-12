@@ -10,8 +10,6 @@ import (
 	"github.com/yungweng/quorum/internal/config"
 )
 
-// args holds a parsed command line.
-//
 // Go's flag package stops at the first non-flag argument, which would reject
 // `quorum babysit 1811 --effort high "focus on the calendar"` even though both
 // shell tools accepted exactly that shape. This parser keeps that freedom:
@@ -22,10 +20,20 @@ type args struct {
 	pos  []string
 }
 
-// parseArgs splits argv. boolFlags names the options that take no value, which
-// is what makes `--dry-run 123` parse as a flag plus a positional rather than
-// as a flag with the value "123".
-func parseArgs(argv []string, boolFlags map[string]bool) (*args, error) {
+// flagSet is one command's options: the name without dashes, and whether the
+// option takes a value. It is the single list the parser, the unknown-option
+// check and the test that compares help text and reference against it share.
+type flagSet map[string]bool
+
+const (
+	noValue    = false
+	takesValue = true
+)
+
+// parseArgs splits argv. Knowing which options take no value is what makes
+// `--dry-run 123` parse as a flag plus a positional rather than as a flag with
+// the value "123".
+func parseArgs(argv []string, flags flagSet) (*args, error) {
 	a := &args{opts: map[string]string{}}
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
@@ -41,7 +49,7 @@ func parseArgs(argv []string, boolFlags map[string]bool) (*args, error) {
 			a.opts[key] = value
 			continue
 		}
-		if boolFlags[name] {
+		if takes, known := flags[name]; known && !takes {
 			a.opts[name] = "1"
 			continue
 		}
@@ -54,7 +62,6 @@ func parseArgs(argv []string, boolFlags map[string]bool) (*args, error) {
 	return a, nil
 }
 
-// has reports whether an option was given at all.
 func (a *args) has(names ...string) bool {
 	for _, n := range names {
 		if _, ok := a.opts[n]; ok {
@@ -64,7 +71,6 @@ func (a *args) has(names ...string) bool {
 	return false
 }
 
-// str returns the first of names that was given, or fallback.
 func (a *args) str(fallback string, names ...string) string {
 	for _, n := range names {
 		if v, ok := a.opts[n]; ok {
@@ -74,7 +80,6 @@ func (a *args) str(fallback string, names ...string) string {
 	return fallback
 }
 
-// boolean reports whether a flag was set.
 func (a *args) boolean(names ...string) bool { return a.has(names...) }
 
 func (a *args) intVal(fallback int, names ...string) (int, error) {
@@ -107,12 +112,12 @@ func (a *args) duration(fallback time.Duration, names ...string) (time.Duration,
 	return fallback, nil
 }
 
-// unknown returns the options that are not in the allowed set, so a typo fails
-// loudly instead of being silently ignored.
-func (a *args) unknown(allowed map[string]bool) []string {
+// unknown returns the options that are not in the command's set, so a typo
+// fails loudly instead of being silently ignored.
+func (a *args) unknown(flags flagSet) []string {
 	var out []string
 	for k := range a.opts {
-		if !allowed[k] {
+		if _, ok := flags[k]; !ok {
 			out = append(out, k)
 		}
 	}

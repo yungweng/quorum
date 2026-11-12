@@ -3,8 +3,6 @@
 // Both the review core and the fix pipeline have to run every command in the
 // project's own environment: a repository that installs its toolchain from a
 // direnv or devbox hook has no usable node, python or test runner without it.
-// The shell tools each carried their own `cd "$WORKTREE" && direnv exec ...`
-// wrapper; this is that wrapper, once.
 package envexec
 
 import (

@@ -1,6 +1,6 @@
 // Package loop drives a pull request from "implementation pushed" to "ready
 // for manual testing": wait for CI, review, feed the findings into a resumable
-// Codex session that fixes them, push, repeat until a review comes back with no
+// fix session that fixes them, push, repeat until a review comes back with no
 // Blockers and no Critical findings.
 //
 // Deliberately out of scope: picking issues, planning, and the first
@@ -19,14 +19,14 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/review"
-	"github.com/yungweng/quorum/internal/runname"
+	"github.com/yungweng/quorum/internal/rundir"
 	"github.com/yungweng/quorum/internal/runtmp"
 	"github.com/yungweng/quorum/internal/target"
 	"github.com/yungweng/quorum/internal/usagelimit"
@@ -64,9 +64,9 @@ var (
 
 // Defaults for a run.
 const (
-	DefaultMaxIter    = 12
-	DefaultMaxCIFixes = 3
-	DefaultFixTimeout = 2 * time.Hour
+	defaultMaxIter    = 12
+	defaultMaxCIFixes = 3
+	defaultFixTimeout = 2 * time.Hour
 	// maxQuestionBounces is how often autonomous mode sends questions back
 	// before giving up rather than looping forever.
 	maxQuestionBounces = 3
@@ -79,15 +79,43 @@ const (
 	// fix session as though it were a code defect.
 	prePushLockAttempts   = 3
 	prePushLockRetryDelay = 5 * time.Second
-	runRetention          = 7 * 24 * time.Hour
 )
 
-// noChecksTimeout is how long GitHub gets to register the checks and Actions
-// runs of a head before the wait accepts that there are none, or stops on a
-// required check that never reported. A variable so tests can shorten it.
-var noChecksTimeout = 180 * time.Second
+// timings are the waits of one run. The zero value is production's: every
+// field left zero falls back to its default, and tests shorten them per run.
+type timings struct {
+	// progress is how often blocking work reports its elapsed time.
+	progress time.Duration
+	// ciPendingPoll and ciNoChecksPoll space the CI wait's polls while checks
+	// are pending, and while GitHub reports none at all.
+	ciPendingPoll  time.Duration
+	ciNoChecksPoll time.Duration
+	// noChecksTimeout is how long GitHub gets to register the checks and
+	// Actions runs of a head before the wait accepts that there are none, or
+	// stops on a required check that never reported.
+	noChecksTimeout time.Duration
+	// prePushRetry is the pause before pre-push verification is retried after
+	// losing the golangci-lint lock.
+	prePushRetry time.Duration
+}
 
-// Options configure one pipeline run.
+func orDefault(d, def time.Duration) time.Duration {
+	if d == 0 {
+		return def
+	}
+	return d
+}
+
+func (t timings) progressTick() time.Duration { return orDefault(t.progress, time.Second) }
+func (t timings) ciPending() time.Duration    { return orDefault(t.ciPendingPoll, 10*time.Second) }
+func (t timings) ciNoChecks() time.Duration   { return orDefault(t.ciNoChecksPoll, 20*time.Second) }
+func (t timings) noChecksWindow() time.Duration {
+	return orDefault(t.noChecksTimeout, 180*time.Second)
+}
+func (t timings) prePushRetryDelay() time.Duration {
+	return orDefault(t.prePushRetry, prePushLockRetryDelay)
+}
+
 type Options struct {
 	Repo     string
 	RepoRoot string
@@ -103,10 +131,14 @@ type Options struct {
 	Model  string
 	Effort string
 
-	Reviewers    int
-	ReviewEngine string // review-round engine: codex, claude or grok; empty means codex
-	ReviewModel  string
-	ReviewEffort string
+	// Review is the template every review round starts from. It carries the
+	// rounds' own settings: panel size, engine, model, effort, timeout, run
+	// root and concurrency. Everything a round shares with the loop or that
+	// changes per round (repository, checkout, target, head, base, rules,
+	// posting, direnv, the dependency cache, binaries, resume and worktree
+	// retention) is set from the loop's own state and overrides whatever the
+	// template holds.
+	Review review.Options
 
 	MaxIter    int
 	MaxCIFixes int
@@ -155,8 +187,8 @@ type Options struct {
 	// never seen.
 	ResumeRun string
 
-	// Bypass runs the fix sessions with --dangerously-bypass-approvals-and-
-	// sandbox. They must run tests, use gh and push, unattended, and a
+	// Bypass runs the fix sessions with the engine's sandbox and approval
+	// bypass. They must run tests, use gh and push, unattended, and a
 	// sandboxed exec would silently skip exactly those commands.
 	Bypass      bool
 	Interactive bool
@@ -165,31 +197,17 @@ type Options struct {
 	AllowEnvrcChange bool
 	KeepWorktree     bool
 
-	// Verbose streams the full Codex output instead of only the status line.
+	// Verbose streams the full fix-session output instead of only the status
+	// line.
 	// The logs are written either way; this decides what reaches the terminal.
 	Verbose bool
 	// Out is where verbose output goes. Nil discards it.
 	Out io.Writer
 
-	RunsDir       string
-	ReviewRunsDir string
-	DepsDir       string
-	CodexBin      string
-	ClaudeBin     string
-	GrokBin       string
-	DirenvBin     string
-}
-
-// engineBin picks the resolved binary for name.
-func (o Options) engineBin(name string) string {
-	switch name {
-	case engine.Claude:
-		return o.ClaudeBin
-	case engine.Grok:
-		return o.GrokBin
-	default:
-		return o.CodexBin
-	}
+	RunsDir   string
+	DepsDir   string
+	Bins      spec.Bins
+	DirenvBin string
 }
 
 // RoundEntry is one round's commit list, for the closing summary.
@@ -198,7 +216,6 @@ type RoundEntry struct {
 	Commits string
 }
 
-// Result is what a finished pipeline run produced.
 type Result struct {
 	PR         gh.FullPR
 	BranchOnly bool
@@ -232,7 +249,6 @@ type Result struct {
 	PRDescriptionUpdated bool
 }
 
-// Pipeline runs the review-fix cycle.
 type Pipeline struct {
 	GH     *gh.Client
 	Git    git.G
@@ -243,7 +259,6 @@ type Pipeline struct {
 	In io.Reader
 }
 
-// Run drives the pipeline to completion.
 func (p *Pipeline) Run(ctx context.Context, o Options) (*Result, error) {
 	started := time.Now()
 	o = o.withDefaults()
@@ -267,7 +282,6 @@ func (p *Pipeline) Run(ctx context.Context, o Options) (*Result, error) {
 	return res, err
 }
 
-// run holds the state of one pipeline run.
 type run struct {
 	p   *Pipeline
 	o   Options
@@ -294,11 +308,15 @@ type run struct {
 	// The two models this run works with, resolved once in prepare. Every step
 	// reports one of them, and the review side is also what the divergence scan
 	// and the final PR description run on.
-	reviewModel engine.Model
-	fixModel    engine.Model
+	reviewModel spec.Model
+	fixModel    spec.Model
+
+	// prompt is what every fix prompt says about the target, fixed in prepare.
+	prompt promptTarget
+	timing timings
 
 	// The fix session, shared across every CI fix and review round, so context
-	// carries through the whole run.
+	// carries through the whole run. lastMsg is its latest final message.
 	sessionID string
 	lastMsg   string
 
@@ -320,9 +338,7 @@ type run struct {
 	pushFixTotal    int
 	testRuns        int
 	conflictFixes   int
-	disputeAccepted bool
-	disputeText     string
-	divergenceTrace DivergenceTrace
+	divergenceTrace divergenceTrace
 
 	// suggestionDone keeps the terminal suggestion round terminal in offline
 	// mode, where a CI repair after the push can send the run through another
@@ -337,13 +353,11 @@ type run struct {
 	prog Progress
 }
 
-// prepare resolves the PR or current pushed branch, checks the preconditions
-// and sets up the worktree.
 func (r *run) prepare() error {
 	var tgt target.Target
 	var err error
 	if r.o.Local {
-		tgt, err = target.ResolveLocal(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot, "")
+		tgt, err = target.ResolveLocal(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot)
 	} else {
 		tgt, err = target.Resolve(r.ctx, r.p.GH, r.p.Git, r.o.RepoRoot, r.o.Number, "", "")
 	}
@@ -351,7 +365,7 @@ func (r *run) prepare() error {
 		return err
 	}
 	pr := tgt.PR
-	if !tgt.BranchOnly && pr.State != "OPEN" {
+	if !tgt.BranchOnly && pr.State != gh.StateOpen {
 		return fmt.Errorf("PR is %s, expected an open PR", pr.State)
 	}
 	if err := refuseDraft(pr, tgt.BranchOnly, r.o.AllowDraft); err != nil {
@@ -384,8 +398,7 @@ func (r *run) prepare() error {
 		}
 	}
 
-	if err := r.p.Git.Fetch(r.ctx, r.o.RepoRoot, "origin",
-		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", r.branch, r.branch)); err != nil {
+	if err := r.p.Git.FetchBranch(r.ctx, r.o.RepoRoot, r.branch); err != nil {
 		return err
 	}
 	headSHA, err := r.p.Git.RevParse(r.ctx, r.o.RepoRoot, "origin/"+r.branch)
@@ -424,36 +437,20 @@ func (r *run) prepare() error {
 		}
 	}
 
-	stamp := time.Now().Format("20060102-150405")
-	targetName := fmt.Sprintf("pr-%d", pr.Number)
+	number := pr.Number
 	if tgt.BranchOnly {
-		targetName = "branch-" + runname.BranchPart(r.branch)
+		number = 0
 	}
-	r.root = filepath.Join(r.o.RunsDir, fmt.Sprintf("%s-%s-%s",
-		strings.ReplaceAll(r.o.Repo, "/", "-"), targetName, stamp))
-	r.worktree = filepath.Join(r.root, "worktree")
-	r.logDir = filepath.Join(r.root, "logs")
-	r.msgDir = filepath.Join(r.root, "messages")
-	// Cache collection takes this same lock from its liveness check through
-	// dependency eviction. Create and claim the run while holding it so
-	// collection must happen wholly before this startup or see this run as live.
-	unlockCache, err := proc.LockDir(filepath.Dir(r.o.DepsDir))
+	r.root = rundir.New(r.o.RunsDir, r.o.Repo, number, r.branch)
+	r.worktree = rundir.Worktree(r.root)
+	r.logDir = filepath.Join(r.root, logsSubdir)
+	r.msgDir = filepath.Join(r.root, messagesSubdir)
+	r.releaseClaim, err = rundir.Start(r.o.DepsDir, r.root, []string{logsSubdir, messagesSubdir}, func() {
+		rundir.Sweep(r.ctx, r.p.Git, r.o.RepoRoot, r.o.RunsDir, r.root)
+	})
 	if err != nil {
 		return err
 	}
-	for _, d := range []string{r.logDir, r.msgDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			unlockCache()
-			return err
-		}
-	}
-	r.releaseClaim, err = proc.Claim(r.root)
-	if err != nil {
-		unlockCache()
-		return err
-	}
-	r.gcOldRuns()
-	unlockCache()
 	runtmp.Sweep()
 
 	// The review side is reported resolved, not as configured: an empty review
@@ -461,10 +458,10 @@ func (r *run) prepare() error {
 	// value on would announce "engine default" for a run that is about to use a
 	// model this code already picked. The fix side stays as configured, because
 	// an empty one really is the CLI's own choice and quorum never learns it.
-	reviewEngine, reviewModel, reviewEffort := review.ReviewEngineDefaults(
-		r.o.ReviewEngine, r.o.ReviewModel, r.o.ReviewEffort)
-	r.reviewModel = engine.Model{Engine: reviewEngine, Name: reviewModel, Effort: reviewEffort}
-	r.fixModel = engine.Model{Engine: r.o.Engine, Name: r.o.Model, Effort: r.o.Effort}
+	reviewEngine, reviewModel, reviewEffort := spec.ReviewDefaults(
+		r.o.Review.Engine, r.o.Review.Model, r.o.Review.Effort)
+	r.reviewModel = spec.Model{Engine: reviewEngine, Name: reviewModel, Effort: reviewEffort}
+	r.fixModel = spec.Model{Engine: r.o.Engine, Name: r.o.Model, Effort: r.o.Effort}
 
 	// Published before the worktree and its dependencies are prepared, which on
 	// a cold cache is minutes: a run has to appear on the dashboard when it
@@ -487,32 +484,23 @@ func (r *run) prepare() error {
 	if err := r.p.Git.WorktreeAdd(r.ctx, r.o.RepoRoot, r.worktree, headSHA); err != nil {
 		return err
 	}
-	r.hooksPath, err = r.p.Git.IsolateHooks(r.ctx, r.worktree)
-	if err != nil {
-		return fmt.Errorf("isolate worktree hooks: %w", err)
-	}
-	configPath, err := r.p.Git.IsolateConfig(r.ctx, r.worktree)
-	if err != nil {
-		return fmt.Errorf("isolate worktree config: %w", err)
-	}
-
 	tmpDir, removeTmp, err := runtmp.New()
 	if err != nil {
 		return fmt.Errorf("create private TMPDIR: %w", err)
 	}
 	r.removeTmp = removeTmp
-	r.env = envexec.Env{
-		Worktree: r.worktree, Direnv: r.o.UseDirenv, DirenvBin: r.o.DirenvBin,
-		GitConfig: configPath, GitHooksPath: r.hooksPath, TmpDir: tmpDir,
+	r.env, err = rundir.Isolate(r.ctx, r.p.Git, r.worktree, tmpDir, r.o.UseDirenv, r.o.DirenvBin)
+	if err != nil {
+		return err
 	}
-	fixer, err := engine.NewFixer(r.o.Engine, engine.FixerOptions{
-		Bin: r.o.engineBin(r.o.Engine), Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
-	})
+	r.hooksPath = r.env.GitHooksPath
+	fixer, err := engine.NewFixer(r.fixModel, r.o.Bins, r.o.Bypass)
 	if err != nil {
 		return err
 	}
 	r.fixer = fixer
-	r.rules = standingRules(r.branch, !r.o.Interactive, tgt.BranchOnly, r.o.Offline, r.o.Rules)
+	r.prompt = promptTarget{number: pr.Number, branch: r.branch, branchOnly: tgt.BranchOnly, offline: r.o.Offline}
+	r.rules = standingRules(r.prompt, !r.o.Interactive, r.o.Rules)
 	if tgt.BranchOnly {
 		r.prCtx = branchContext(r.branch, pr.BaseRefName, r.o.Context)
 	} else {
@@ -543,12 +531,12 @@ func (r *run) prepare() error {
 		Repo: r.o.Repo, Number: pr.Number, Title: pr.Title, URL: pr.URL,
 		Branch: r.branch, Base: pr.BaseRefName, BranchOnly: tgt.BranchOnly,
 		Draft: pr.IsDraft, Local: r.o.Local,
-		Engine: r.o.Engine, Model: r.o.Model, Effort: r.o.Effort, Bypass: r.o.Bypass,
-		ReviewEngine: r.o.ReviewEngine, ReviewModel: reviewModel, ReviewEffort: reviewEffort,
+		Fix: r.fixModel, Bypass: r.o.Bypass,
+		Review:      spec.Model{Engine: r.o.Review.Engine, Name: reviewModel, Effort: reviewEffort},
 		Interactive: r.o.Interactive, Offline: r.o.Offline, TestCmd: r.o.TestCmd, TestCmdNote: testCmdNote,
 		MaxIter: r.o.MaxIter, MaxCIFixes: r.o.MaxCIFixes,
 		DivergenceScan: r.o.DivergenceScan,
-		FixTimeout:     r.o.FixTimeout, RunDir: r.root, Worktree: r.worktree, HeadSHA: headSHA,
+		FixTimeout:     r.o.FixTimeout, RunDir: r.root, HeadSHA: headSHA,
 	})
 	switch {
 	case r.o.Local:
@@ -569,7 +557,6 @@ func refuseDraft(pr gh.FullPR, branchOnly, allow bool) error {
 	return fmt.Errorf("PR #%d is a draft; rerun with --draft, or set BABYSIT_DRAFTS=1 to always allow drafts", pr.Number)
 }
 
-// execute is the main loop.
 func (r *run) execute() (*Result, error) {
 	res := &Result{PR: r.pr, BranchOnly: r.target.BranchOnly, Local: r.o.Local, RunDir: r.root}
 	if r.o.DivergenceScan {
@@ -647,9 +634,7 @@ func (r *run) execute() (*Result, error) {
 				// CI repairs moved the head past the reviewed commit, so the
 				// clean review no longer describes what is on the branch. The
 				// next round reviews the repaired head.
-				if iteration < r.o.MaxIter {
-					r.startReview(iteration + 1)
-				}
+				r.reviewNext(iteration, "")
 				continue
 			}
 			baseUpdated, err := r.ensureBaseCurrent()
@@ -675,126 +660,49 @@ func (r *run) execute() (*Result, error) {
 
 		r.enter(PhaseFix)
 		preFixSHA := currentSHA
-		tag := fmt.Sprintf("fix-round-%d", iteration)
-
-		if err := r.codexCall(tag, fixRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, r.o.Offline, comment)); err != nil {
-			return res, err
-		}
-		if err := r.questionGate(tag); err != nil {
-			return res, err
-		}
-		if err := r.ensureCommitted(tag); err != nil {
-			return res, err
-		}
-
-		afterSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+		step, err := r.fixStep(fmt.Sprintf("fix-round-%d", iteration), fixRoundPrompt(r.prompt, comment))
 		if err != nil {
 			return res, err
 		}
+		afterSHA := step.head
 		if afterSHA == preFixSHA {
-			if !hasMarker(r.lastMsg, MarkerDisputed) {
+			if !hasMarker(step.last, markerDisputed) {
 				r.rep.Notify("Festgefahren", fmt.Sprintf("Fix-Runde %d hat nichts geaendert", iteration))
 				return res, fmt.Errorf("%w: round %d, a human is needed: %s",
 					ErrNoProgress, iteration, r.targetReference())
 			}
-			if err := r.disputeGate(tag, preFixSHA); err != nil {
-				return res, err
-			}
-			if r.disputeAccepted {
-				if r.o.DivergenceScan {
-					r.traceFix(iteration, preFixSHA, afterSHA, tag)
-				}
-				// An offline run may hold unpushed commits from earlier rounds.
-				// Its local gate must pass before those commits or a branch-only
-				// disputed head is accepted without its configured test command.
-				if r.o.Offline {
-					if err := r.ensureTestsGreen(); err != nil {
-						return res, err
-					}
-					afterTestsSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
-					if err != nil {
-						return res, err
-					}
-					if afterTestsSHA != afterSHA {
-						r.rep.Info("local test fixes moved the head past the disputed review; reviewing the repaired head")
-						if iteration < r.o.MaxIter {
-							r.startReview(iteration + 1)
-						}
-						continue
-					}
-					baseUpdated, err := r.ensureBaseCurrent()
-					if err != nil {
-						return res, err
-					}
-					if baseUpdated {
-						r.rep.Info("base branch update moved the head past the disputed review; reviewing the updated head")
-						if iteration < r.o.MaxIter {
-							r.startReview(iteration + 1)
-						}
-						continue
-					}
-					if err := r.pushBranchWithFixes(); err != nil {
-						return res, err
-					}
-					if err := r.flushFixComments(); err != nil {
-						return res, err
-					}
-				}
-				if r.o.Offline && !r.target.BranchOnly {
-					preCISHA := r.headSHA
-					if err := r.ensureCIGreen(); err != nil {
-						return res, err
-					}
-					if r.headSHA != preCISHA {
-						r.rep.Info("CI repairs moved the head past the disputed review; reviewing the repaired head")
-						if iteration < r.o.MaxIter {
-							r.startReview(iteration + 1)
-						}
-						continue
-					}
-				}
-				baseUpdated, err := r.ensureBaseCurrent()
-				if err != nil {
-					return res, err
-				}
-				if baseUpdated {
-					if err := r.prepareReviewAfterBaseUpdate(iteration, "disputed"); err != nil {
-						return res, err
-					}
-					continue
-				}
-				commentURL, commentPosted, err := r.postDisputeComment(
-					iteration, findingsCommentURL(findings), r.disputeText, findings.HeadSHA)
-				if err != nil {
-					return res, err
-				}
-				res.Converged = true
-				res.DisputeAccepted = true
-				res.DisputeText = r.disputeText
-				res.DisputeCommentURL = commentURL
-				res.DisputeCommentPosted = commentPosted
-				break
-			}
-			// The dispute gate only returns unaccepted once new commits exist.
-			afterSHA, err = r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+			dispute, err := r.disputeGate(step, preFixSHA)
 			if err != nil {
 				return res, err
 			}
+			if dispute.accepted {
+				converged, err := r.acceptDispute(res, iteration, findings, step, preFixSHA, dispute.text)
+				if err != nil {
+					return res, err
+				}
+				if converged {
+					break
+				}
+				continue
+			}
+			// The dispute gate only returns unaccepted once new commits exist.
+			// The re-check that made them describes them.
+			afterSHA, step.last = dispute.head, dispute.last
 		}
 		if r.o.DivergenceScan {
-			r.traceFix(iteration, preFixSHA, afterSHA, tag)
+			r.traceFix(iteration, preFixSHA, afterSHA, step.first)
 		}
 
 		r.recordRound(fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
 		if r.o.Offline {
 			// The commits stay local: the comment is queued for the final
 			// push, and the test gate replaces this round's CI wait.
-			r.queueFixComment(tag, fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
+			r.queueFixComment(step, fmt.Sprintf("Review fix round %d", iteration), preFixSHA)
 		} else {
 			if err := r.pushBranchWithFixes(); err != nil {
 				return res, err
 			}
-			if err := r.postFixComment(tag, fmt.Sprintf("Review fix round %d", iteration),
+			if err := r.postFixComment(step, fmt.Sprintf("Review fix round %d", iteration),
 				fmt.Sprintf("Review round %d", iteration), findingsCommentURL(findings), preFixSHA); err != nil {
 				return res, err
 			}
@@ -817,9 +725,7 @@ func (r *run) execute() (*Result, error) {
 		}
 
 		// Overlap the next review with this round's CI wait.
-		if iteration < r.o.MaxIter {
-			r.startReview(iteration + 1)
-		}
+		r.reviewNext(iteration, "")
 		if !r.target.BranchOnly && !r.o.Offline {
 			if err := r.ensureCIGreen(); err != nil {
 				r.killReview()
@@ -848,11 +754,86 @@ func (r *run) execute() (*Result, error) {
 	return res, nil
 }
 
-func (r *run) prepareReviewAfterBaseUpdate(round int, reviewed string) error {
-	r.rep.Info("base branch update moved the head past the " + reviewed + " review; reviewing the updated head")
-	if round < r.o.MaxIter {
-		r.startReview(round + 1)
+// acceptDispute finishes a round whose rebuttal survived the dispute gate. It
+// reports whether the run converged on it; false means the head moved past the
+// disputed review and the next round's review has been started.
+func (r *run) acceptDispute(res *Result, round int, findings review.Findings, step fixOutcome, preSHA, dispute string) (bool, error) {
+	if r.o.DivergenceScan {
+		r.traceFix(round, preSHA, step.head, step.first)
 	}
+	// An offline run may hold unpushed commits from earlier rounds. Its local
+	// gate must pass before those commits or a branch-only disputed head is
+	// accepted without its configured test command.
+	if r.o.Offline {
+		if err := r.ensureTestsGreen(); err != nil {
+			return false, err
+		}
+		afterTestsSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+		if err != nil {
+			return false, err
+		}
+		if afterTestsSHA != step.head {
+			r.reviewNext(round, "local test fixes moved the head past the disputed review; reviewing the repaired head")
+			return false, nil
+		}
+		baseUpdated, err := r.ensureBaseCurrent()
+		if err != nil {
+			return false, err
+		}
+		if baseUpdated {
+			r.reviewNext(round, "base branch update moved the head past the disputed review; reviewing the updated head")
+			return false, nil
+		}
+		if err := r.pushBranchWithFixes(); err != nil {
+			return false, err
+		}
+		if err := r.flushFixComments(); err != nil {
+			return false, err
+		}
+	}
+	if r.o.Offline && !r.target.BranchOnly {
+		preCISHA := r.headSHA
+		if err := r.ensureCIGreen(); err != nil {
+			return false, err
+		}
+		if r.headSHA != preCISHA {
+			r.reviewNext(round, "CI repairs moved the head past the disputed review; reviewing the repaired head")
+			return false, nil
+		}
+	}
+	baseUpdated, err := r.ensureBaseCurrent()
+	if err != nil {
+		return false, err
+	}
+	if baseUpdated {
+		return false, r.prepareReviewAfterBaseUpdate(round, "disputed")
+	}
+	commentURL, commentPosted, err := r.postDisputeComment(
+		round, findingsCommentURL(findings), dispute, findings.HeadSHA)
+	if err != nil {
+		return false, err
+	}
+	res.Converged = true
+	res.DisputeAccepted = true
+	res.DisputeText = dispute
+	res.DisputeCommentURL = commentURL
+	res.DisputeCommentPosted = commentPosted
+	return true, nil
+}
+
+// reviewNext starts the review of the next round, if the run has one left.
+// why, when not empty, says why the current round's review no longer counts.
+func (r *run) reviewNext(round int, why string) {
+	if why != "" {
+		r.rep.Info(why)
+	}
+	if round < r.o.MaxIter {
+		r.startReviewWith(round+1, "")
+	}
+}
+
+func (r *run) prepareReviewAfterBaseUpdate(round int, reviewed string) error {
+	r.reviewNext(round, "base branch update moved the head past the "+reviewed+" review; reviewing the updated head")
 	if r.target.BranchOnly || r.o.Offline {
 		return nil
 	}
@@ -879,21 +860,11 @@ func suggestionRoundDue(o Options, f review.Findings) bool {
 func (r *run) suggestionRound(round int, findings review.Findings, comment, preSHA string) (bool, error) {
 	r.rep.Step("Suggestion round")
 	r.enter(PhaseFix)
-	tag := "suggestion-round"
-	if err := r.codexCall(tag, suggestionRoundPrompt(r.pr.Number, r.branch, r.target.BranchOnly, r.o.Offline, comment)); err != nil {
-		return false, err
-	}
-	if err := r.questionGate(tag); err != nil {
-		return false, err
-	}
-	if err := r.ensureCommitted(tag); err != nil {
-		return false, err
-	}
-	afterSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+	step, err := r.fixStep("suggestion-round", suggestionRoundPrompt(r.prompt, comment))
 	if err != nil {
 		return false, err
 	}
-	if afterSHA == preSHA {
+	if step.head == preSHA {
 		r.rep.Info("no suggestion was worth a change; the reviewed head stands")
 		return false, nil
 	}
@@ -901,7 +872,7 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 	if r.o.Offline {
 		// The push and the single CI wait follow in finalizeOffline; the test
 		// gate is all that checks these commits, because no review does.
-		r.queueFixComment(tag, "Suggestion round", preSHA)
+		r.queueFixComment(step, "Suggestion round", preSHA)
 		if err := r.ensureTestsGreen(); err != nil {
 			return true, err
 		}
@@ -910,7 +881,7 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 	if err := r.pushBranchWithFixes(); err != nil {
 		return true, err
 	}
-	if err := r.postFixComment(tag, "Suggestion round",
+	if err := r.postFixComment(step, "Suggestion round",
 		fmt.Sprintf("Review round %d", round), findingsCommentURL(findings), preSHA); err != nil {
 		return true, err
 	}
@@ -960,12 +931,8 @@ func (r *run) codexCall(tag, prompt string) error {
 
 	r.rep.StepStart(stepLabel(tag), r.fixModel)
 	started := time.Now()
-	var id engine.SessionRef
-	err = await(r.ctx, progressInterval, func(elapsed time.Duration) {
-		if elapsed > 0 {
-			r.rep.StepTick(stepLabel(tag), r.fixModel, elapsed)
-		}
-	}, func() error {
+	var id string
+	err = r.awaitStep(stepLabel(tag), r.fixModel, started, func() error {
 		if r.sessionID == "" {
 			var callErr error
 			id, callErr = r.fixer.Exec(r.ctx, r.env, r.o.FixTimeout,
@@ -1006,6 +973,55 @@ func (r *run) resume(tag, prompt string) error {
 		return fmt.Errorf("no fix session to resume")
 	}
 	return r.codexCall(tag, prompt)
+}
+
+// readOnlyReviewer runs the read-only passes outside the review rounds, the
+// divergence analysis and the final PR description, on the review model.
+func (r *run) readOnlyReviewer() (engine.Reviewer, error) {
+	return engine.NewReviewer(r.reviewModel, r.o.Bins)
+}
+
+// fixOutcome is what one fix step left behind.
+type fixOutcome struct {
+	tag string
+	// head is HEAD once the step and its gates are done.
+	head string
+	// first is the step's own final message, which carries its PR COMMENT
+	// block; last is the newest message, which a gate step may have written.
+	first, last string
+}
+
+// fixStep runs one step of the shared fix session and its gates: open
+// questions are answered, leftover changes committed, and the head read.
+func (r *run) fixStep(tag, prompt string) (fixOutcome, error) {
+	if err := r.codexCall(tag, prompt); err != nil {
+		return fixOutcome{}, err
+	}
+	return r.finishFixStep(tag)
+}
+
+// resumeStep is fixStep for steps that must not start a new session.
+func (r *run) resumeStep(tag, prompt string) (fixOutcome, error) {
+	if err := r.resume(tag, prompt); err != nil {
+		return fixOutcome{}, err
+	}
+	return r.finishFixStep(tag)
+}
+
+func (r *run) finishFixStep(tag string) (fixOutcome, error) {
+	step := fixOutcome{tag: tag, first: r.lastMsg}
+	if err := r.questionGate(tag); err != nil {
+		return step, err
+	}
+	if err := r.ensureCommitted(tag); err != nil {
+		return step, err
+	}
+	head, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+	if err != nil {
+		return step, err
+	}
+	step.head, step.last = head, r.lastMsg
+	return step, nil
 }
 
 // ensureCommitted makes sure the worktree is clean before the pipeline reads
@@ -1080,16 +1096,15 @@ func (r *run) pushBranch() error {
 	}); err != nil {
 		return err
 	}
-	prePushOut, prePushErr := r.prePushWithRetry(g, "origin", r.branch, pushedSHA, remoteBefore,
-		prePushLockAttempts, prePushLockRetryDelay)
+	prePushOut, prePushErr := r.prePushWithRetry(g, pushedSHA, remoteBefore)
 	if prePushErr != nil {
-		logPath := filepath.Join(r.logDir, "push-last.log")
+		logPath := filepath.Join(r.logDir, pushLogFile)
 		os.WriteFile(logPath, []byte(prePushOut), 0o644)
 		var contention *prePushContention
 		if errors.As(prePushErr, &contention) {
 			return prePushErr
 		}
-		return &pushRejection{branch: r.branch, sha: pushedSHA, out: prePushOut, hookOut: prePushOut, local: true}
+		return &pushRejection{branch: r.branch, sha: pushedSHA, out: prePushOut, local: true}
 	}
 	// PrePush verified this exact SHA. Do not run the same hook again during the
 	// transport: concurrent linters can make an already-passing check fail on
@@ -1100,7 +1115,7 @@ func (r *run) pushBranch() error {
 		out, err = g.Push(r.ctx, r.worktree, "origin", r.branch, pushedSHA)
 		return err
 	})
-	logPath := filepath.Join(r.logDir, "push-last.log")
+	logPath := filepath.Join(r.logDir, pushLogFile)
 	os.WriteFile(logPath, []byte(out), 0o644)
 
 	deadline := time.Now().Add(headSettleTimeout)
@@ -1119,10 +1134,8 @@ func (r *run) pushBranch() error {
 func (r *run) waitForPushedHead(pushedSHA string, deadline time.Time) error {
 	return r.waitActivity("waiting for GitHub to register the pushed head", func() error {
 		for {
-			select {
-			case <-time.After(5 * time.Second):
-			case <-r.ctx.Done():
-				return r.ctx.Err()
+			if err := r.sleep(5 * time.Second); err != nil {
+				return err
 			}
 			remote, _ := r.remoteHead()
 			if remote == pushedSHA {
@@ -1147,39 +1160,31 @@ func (e *prePushContention) Error() string {
 		e.branch, e.attempts)
 }
 
-func (r *run) prePushWithRetry(g git.G, remote, branch, sha, remoteSHA string, attempts int, delay time.Duration) (string, error) {
-	if attempts < 1 {
-		attempts = 1
-	}
+func (r *run) prePushWithRetry(g git.G, sha, remoteSHA string) (string, error) {
+	delay := r.timing.prePushRetryDelay()
 	for attempt := 1; ; attempt++ {
 		var out string
 		err := r.waitActivity("running pre-push verification", func() error {
 			var hookErr error
-			out, hookErr = g.PrePush(r.ctx, r.worktree, remote, branch, sha, remoteSHA)
+			out, hookErr = g.PrePush(r.ctx, r.worktree, "origin", r.branch, sha, remoteSHA)
 			return hookErr
 		})
 		if err == nil || !transientPrePushFailure(out) {
 			return out, err
 		}
-		if attempt == attempts {
-			return out, &prePushContention{branch: branch, attempts: attempts}
+		if attempt == prePushLockAttempts {
+			return out, &prePushContention{branch: r.branch, attempts: prePushLockAttempts}
 		}
 		r.rep.Info(fmt.Sprintf("pre-push verification is waiting for another golangci-lint process; retrying %d/%d in %s...",
-			attempt+1, attempts, delay))
+			attempt+1, prePushLockAttempts, delay))
 		if err := r.waitActivity("waiting to retry pre-push verification", func() error {
-			select {
-			case <-time.After(delay):
-				return nil
-			case <-r.ctx.Done():
-				return r.ctx.Err()
-			}
+			return r.sleep(delay)
 		}); err != nil {
 			return out, err
 		}
 	}
 }
 
-// recordRound stores a round's commits for the closing summary.
 func (r *run) recordRound(label, preSHA string) {
 	commits := r.p.Git.LogOneline(r.ctx, r.worktree, preSHA+"..HEAD")
 	if commits == "" {
@@ -1198,11 +1203,13 @@ func (r *run) recordRound(label, preSHA string) {
 
 // postFixComment posts one pushed fix step's log to the PR.
 //
-// The text comes from the session's PR COMMENT block. A later gate step may
-// have produced the newest message, so the step's own message is checked as
-// well; the commit list is the fallback. The pipeline posts it rather than the
+// The text comes from the step's PR COMMENT block. One of the step's gates may
+// have produced its newest message, so the step's first message is checked as
+// well; the commit list is the fallback. Neither is the session's latest
+// message: a push fix may have run since, and its block describes the push
+// fix, not this step. The pipeline posts it rather than the
 // session, which is what keeps it a normal comment from the user.
-func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) error {
+func (r *run) postFixComment(step fixOutcome, label, reviewLabel, reviewURL, preSHA string) error {
 	if r.target.BranchOnly || !r.o.Post {
 		return nil
 	}
@@ -1218,11 +1225,7 @@ func (r *run) postFixComment(tag, label, reviewLabel, reviewURL, preSHA string) 
 		return fmt.Errorf("the pushed fix is for %s but GitHub reports %s; refusing to post the fix log",
 			r.headSHA, currentSHA)
 	}
-	var original string
-	if data, err := os.ReadFile(filepath.Join(r.msgDir, tag+".md")); err == nil {
-		original = string(data)
-	}
-	body := fixCommentBody(label, reviewLabel, reviewURL, r.lastMsg, original, commits)
+	body := fixCommentBody(label, reviewLabel, reviewURL, step.last, step.first, commits)
 	r.postPRComment("fix-log comment", body, reviewURL)
 	return nil
 }
@@ -1266,7 +1269,7 @@ func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment contains prohibited term %q", kind, r.pr.Number, term))
 		return "", false
 	}
-	url, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, body)
+	url, err := r.p.GH.Comment(r.ctx, r.o.RepoRoot, r.pr.Number, body)
 	if err != nil {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: %v", kind, r.pr.Number, err))
 		return "", false
@@ -1295,9 +1298,9 @@ func prohibitedPRCommentTermExcept(text, generatedURL string) string {
 }
 
 func fixCommentBody(label, reviewLabel, reviewURL, current, original, commits string) string {
-	body := markerContent(current, MarkerComment)
+	body := markerContent(current, markerComment)
 	if body == "" {
-		body = markerContent(original, MarkerComment)
+		body = markerContent(original, markerComment)
 	}
 	if body == "" {
 		body = fmt.Sprintf("Commits:\n\n```text\n%s\n```", strings.TrimSpace(commits))
@@ -1313,7 +1316,7 @@ func fixCommentBody(label, reviewLabel, reviewURL, current, original, commits st
 }
 
 func disputeCommentBody(round int, reviewURL, dispute string) string {
-	body := markerContent(dispute, MarkerDisputed)
+	body := markerContent(dispute, markerDisputed)
 	if body == "" {
 		return ""
 	}
@@ -1343,31 +1346,6 @@ func findingsCommentURL(findings review.Findings) string {
 	return *findings.CommentURL
 }
 
-// gcOldRuns drops run directories nothing has looked at for a week.
-func (r *run) gcOldRuns() {
-	entries, err := os.ReadDir(r.o.RunsDir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-runRetention)
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(r.o.RunsDir, e.Name())
-		if proc.Claimed(dir) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || !info.ModTime().Before(cutoff) {
-			continue
-		}
-		r.p.Git.WorktreeRemove(r.ctx, r.o.RepoRoot, filepath.Join(dir, "worktree"))
-		_ = cachefs.RemoveAll(dir)
-	}
-	r.p.Git.WorktreePrune(r.ctx, r.o.RepoRoot)
-}
-
 // cleanup stops a background review and removes a successful run's worktree.
 // Failed worktrees stay available for diagnosis until normal cache collection.
 func (r *run) cleanup(succeeded bool) {
@@ -1393,13 +1371,13 @@ func (r *run) releaseRunClaim() {
 
 func (o Options) withDefaults() Options {
 	if o.MaxIter == 0 {
-		o.MaxIter = DefaultMaxIter
+		o.MaxIter = defaultMaxIter
 	}
 	if o.MaxCIFixes == 0 {
-		o.MaxCIFixes = DefaultMaxCIFixes
+		o.MaxCIFixes = defaultMaxCIFixes
 	}
 	if o.FixTimeout == 0 {
-		o.FixTimeout = DefaultFixTimeout
+		o.FixTimeout = defaultFixTimeout
 	}
 	return o
 }
@@ -1418,17 +1396,17 @@ func (o Options) validate() error {
 			}
 		}
 	}
-	if !engine.Valid(o.Engine) {
-		return fmt.Errorf("engine must be %s, %s or %s", engine.Codex, engine.Claude, engine.Grok)
+	if !spec.Valid(o.Engine) {
+		return fmt.Errorf("engine must be %s", spec.Choices())
 	}
-	if !engine.Valid(o.ReviewEngine) {
-		return fmt.Errorf("review-engine must be %s, %s or %s", engine.Codex, engine.Claude, engine.Grok)
+	if !spec.Valid(o.Review.Engine) {
+		return fmt.Errorf("review-engine must be %s", spec.Choices())
 	}
-	if !engine.ValidEffort(o.Engine, o.Effort) {
-		return fmt.Errorf("effort must be one of: %s", strings.Join(engine.Efforts(o.Engine), ", "))
+	if !spec.ValidEffort(o.Engine, o.Effort) {
+		return fmt.Errorf("effort must be one of: %s", strings.Join(spec.Efforts(o.Engine), ", "))
 	}
-	if !engine.ValidEffort(o.ReviewEngine, o.ReviewEffort) {
-		return fmt.Errorf("review-effort must be one of: %s", strings.Join(engine.Efforts(o.ReviewEngine), ", "))
+	if !spec.ValidEffort(o.Review.Engine, o.Review.Effort) {
+		return fmt.Errorf("review-effort must be one of: %s", strings.Join(spec.Efforts(o.Review.Engine), ", "))
 	}
 	if o.DivergenceTimeout < 0 {
 		return fmt.Errorf("divergence timeout must not be negative")
@@ -1441,12 +1419,11 @@ func (o Options) validate() error {
 
 func (p *Pipeline) reporter() Reporter {
 	if p.Rep == nil {
-		return NopReporter{}
+		return nopReporter{}
 	}
 	return p.Rep
 }
 
-// stepLabel turns an internal tag into what the status line shows.
 func stepLabel(tag string) string {
 	// Gate follow-ups hang off their round's tag: fix-round-2-dispute-1 is
 	// the first forced re-check of round 2, fix-round-2-answers-1 its first

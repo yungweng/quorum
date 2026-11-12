@@ -110,12 +110,9 @@ if test -f "$dir/$ep.$n"; then cat "$dir/$ep.$n"; elif test -f "$dir/$ep.last"; 
 }
 
 // fastCIWait shortens the CI wait's polls and its registration window for one
-// test.
-func fastCIWait(t *testing.T, window time.Duration) {
-	t.Helper()
-	pending, none, timeout := ciPendingPoll, ciNoChecksPoll, noChecksTimeout
-	ciPendingPoll, ciNoChecksPoll, noChecksTimeout = time.Millisecond, time.Millisecond, window
-	t.Cleanup(func() { ciPendingPoll, ciNoChecksPoll, noChecksTimeout = pending, none, timeout })
+// run.
+func fastCIWait(window time.Duration) timings {
+	return timings{ciPendingPoll: time.Millisecond, ciNoChecksPoll: time.Millisecond, noChecksTimeout: window}
 }
 
 func ciTestRun(t *testing.T, bin string) *run {
@@ -131,7 +128,7 @@ func ciTestRun(t *testing.T, bin string) *run {
 		p:       &Pipeline{GH: c},
 		o:       Options{Repo: "acme/api", RepoRoot: root},
 		ctx:     context.Background(),
-		rep:     NopReporter{},
+		rep:     nopReporter{},
 		pr:      gh.FullPR{Number: 42, BaseRefName: "main"},
 		headSHA: "abc123",
 		root:    root,
@@ -143,7 +140,6 @@ func ciTestRun(t *testing.T, bin string) *run {
 // checks` then passes, but the Actions run of the head registers a moment
 // later and must be waited for before CI counts as green.
 func TestCIWaitWaitsForAnActionsRunThatRegistersLate(t *testing.T) {
-	fastCIWait(t, time.Hour)
 	bin, asked := ciFixture{
 		prChecks: "secret-scan\tpass",
 		branch:   []string{noProtection},
@@ -159,6 +155,7 @@ func TestCIWaitWaitsForAnActionsRunThatRegistersLate(t *testing.T) {
 		flows: []string{someWorkflow},
 	}.install(t)
 	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(time.Hour)
 
 	state, err := r.watchCI()
 	if err != nil {
@@ -175,7 +172,6 @@ func TestCIWaitWaitsForAnActionsRunThatRegistersLate(t *testing.T) {
 // The required check is the merge gate. While it is still running - or not
 // reported yet - CI is not green, whatever else already passed.
 func TestCIWaitWaitsForARunningRequiredCheck(t *testing.T) {
-	fastCIWait(t, time.Hour)
 	bin, asked := ciFixture{
 		prChecks: "secret-scan\tpass",
 		branch:   []string{ciGateRule},
@@ -186,6 +182,7 @@ func TestCIWaitWaitsForARunningRequiredCheck(t *testing.T) {
 		flows:    []string{someWorkflow},
 	}.install(t)
 	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(time.Hour)
 
 	state, err := r.watchCI()
 	if err != nil {
@@ -205,7 +202,6 @@ func TestCIWaitWaitsForARunningRequiredCheck(t *testing.T) {
 // A required check that never reports keeps the pull request blocked. After
 // the registration window the run stops - neither green nor a CI fix session.
 func TestCIWaitStopsOnARequiredCheckThatNeverReports(t *testing.T) {
-	fastCIWait(t, 50*time.Millisecond)
 	bin, _ := ciFixture{
 		prChecks: "secret-scan\tpass",
 		branch:   []string{ciGateRule},
@@ -216,6 +212,7 @@ func TestCIWaitStopsOnARequiredCheckThatNeverReports(t *testing.T) {
 		flows:    []string{someWorkflow},
 	}.install(t)
 	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(50 * time.Millisecond)
 
 	err := r.ensureCIGreen()
 	if !errors.Is(err, ErrCIUnconfirmed) || !strings.Contains(err.Error(), "ci-gate") {
@@ -234,7 +231,6 @@ func TestCIWaitStopsOnAWorkflowRunThatFailedWithoutJobs(t *testing.T) {
 	// not start as "startup_failure"; neither leaves a check behind.
 	for _, conclusion := range []string{"failure", "startup_failure"} {
 		t.Run(conclusion, func(t *testing.T) {
-			fastCIWait(t, time.Hour)
 			bin, _ := ciFixture{
 				prChecks: "secret-scan\tpass",
 				branch:   []string{noProtection},
@@ -245,6 +241,7 @@ func TestCIWaitStopsOnAWorkflowRunThatFailedWithoutJobs(t *testing.T) {
 				flows:    []string{someWorkflow},
 			}.install(t)
 			r := ciTestRun(t, bin)
+			r.timing = fastCIWait(time.Hour)
 
 			err := r.ensureCIGreen()
 			if !errors.Is(err, ErrCIUnconfirmed) || !strings.Contains(err.Error(), conclusion) {
@@ -260,7 +257,6 @@ func TestCIWaitStopsOnAWorkflowRunThatFailedWithoutJobs(t *testing.T) {
 // A failed check bound to the head goes to the CI fix path, as a failure
 // `gh pr checks` reports would.
 func TestCIConfirmationReportsAFailedCheckOfTheHead(t *testing.T) {
-	fastCIWait(t, time.Hour)
 	bin, _ := ciFixture{
 		prChecks: "secret-scan\tpass",
 		branch:   []string{ciGateRule},
@@ -271,6 +267,7 @@ func TestCIConfirmationReportsAFailedCheckOfTheHead(t *testing.T) {
 		flows:    []string{someWorkflow},
 	}.install(t)
 	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(time.Hour)
 
 	state, err := r.watchCI()
 	if err != nil {
@@ -284,7 +281,6 @@ func TestCIConfirmationReportsAFailedCheckOfTheHead(t *testing.T) {
 // A repository without workflow files never gets an Actions run, so an
 // external check alone is a complete result and needs no registration window.
 func TestCIWaitAcceptsExternalChecksWhenNoWorkflowExists(t *testing.T) {
-	fastCIWait(t, time.Hour)
 	bin, asked := ciFixture{
 		prChecks: "secret-scan\tpass",
 		branch:   []string{noProtection},
@@ -295,6 +291,7 @@ func TestCIWaitAcceptsExternalChecksWhenNoWorkflowExists(t *testing.T) {
 		flows:    []string{`{"workflows":[]}`},
 	}.install(t)
 	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(time.Hour)
 
 	done := make(chan struct{})
 	var state gh.CheckState
@@ -322,7 +319,6 @@ func TestCIWaitAcceptsExternalChecksWhenNoWorkflowExists(t *testing.T) {
 // Nothing reported and nothing required: after the window this is a PR
 // without CI, as before.
 func TestCIWaitReportsNoChecksAfterTheWindow(t *testing.T) {
-	fastCIWait(t, 50*time.Millisecond)
 	bin, _ := ciFixture{
 		prChecks: "",
 		branch:   []string{noProtection},
@@ -333,6 +329,7 @@ func TestCIWaitReportsNoChecksAfterTheWindow(t *testing.T) {
 		flows:    []string{someWorkflow},
 	}.install(t)
 	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(50 * time.Millisecond)
 
 	state, err := r.watchCI()
 	if err != nil {

@@ -11,8 +11,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/proc"
-	"github.com/yungweng/quorum/internal/runner"
-	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/rundir"
 )
 
 // staleClaim is an unlocked claim left by a run that is over. Its bytes count
@@ -65,26 +64,6 @@ func liveRun(t *testing.T, root, name string, worktree, output int) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(release)
-	return dir
-}
-
-// legacyLiveRun has no run.pid: v1.0.1 exposed liveness through its detached
-// review marker and state record instead.
-func legacyLiveRun(t *testing.T, a *app, root, name string, worktree, output int) string {
-	t.Helper()
-	dir := makeRun(t, root, name, worktree, output, "")
-	key := "owner/repo#1"
-	marker, got, err := runner.Acquire(a.p.RunningDir, key)
-	if err != nil || !got {
-		t.Fatalf("acquiring legacy marker: got=%v err=%v", got, err)
-	}
-	t.Cleanup(marker.Release)
-	if err := state.Mutate(a.p.StateFile, key, func(rec *state.Record) {
-		rec.Status = state.Running
-		rec.RunDir = dir
-	}); err != nil {
-		t.Fatal(err)
-	}
 	return dir
 }
 
@@ -184,98 +163,10 @@ func TestCollectTreatsAReleasedClaimAsCurrent(t *testing.T) {
 	freed, removed := mustCollect(t, a, false)
 	assertCollected(t, freed, removed, 800, 0)
 	if exists(filepath.Join(run, "worktree")) {
-		t.Error("a completed current-version run received the legacy grace period")
+		t.Error("the worktree of a completed run survived over the budget")
 	}
 	if !exists(filepath.Join(run, proc.ClaimFile)) {
-		t.Error("a released claim lost its current-version sentinel")
-	}
-}
-
-func TestCollectNeverTouchesARecentLegacyTerminalRunDuringUpgrade(t *testing.T) {
-	a := testApp(t)
-	a.cfg.CacheBudgetGB = gigabytes(100)
-	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
-
-	freed, removed := mustCollect(t, a, false)
-	assertCollected(t, freed, removed, 0, 0)
-	if !exists(filepath.Join(run, "worktree")) {
-		t.Error("worktree of a recent v1.0.1 terminal review was deleted")
-	}
-}
-
-func TestCollectDropsAnExpiredLegacyTerminalRun(t *testing.T) {
-	a := testApp(t)
-	a.cfg.CacheBudgetGB = gigabytes(500)
-	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
-	expired := time.Now().Add(-legacyRunGrace - time.Hour)
-	if err := os.Chtimes(run, expired, expired); err != nil {
-		t.Fatal(err)
-	}
-
-	freed, removed := mustCollect(t, a, false)
-	assertCollected(t, freed, removed, 800, 0)
-	if exists(filepath.Join(run, "worktree")) {
-		t.Error("worktree of an expired v1.0.1 terminal review survived")
-	}
-}
-
-func TestCollectNeverTouchesALegacyLiveRunDuringUpgrade(t *testing.T) {
-	a := testApp(t)
-	a.cfg.CacheBudgetGB = gigabytes(100)
-	run := legacyLiveRun(t, a, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
-	expired := time.Now().Add(-legacyRunGrace - time.Hour)
-	if err := os.Chtimes(run, expired, expired); err != nil {
-		t.Fatal(err)
-	}
-
-	freed, removed := mustCollect(t, a, false)
-	assertCollected(t, freed, removed, 0, 0)
-	if !exists(filepath.Join(run, "worktree")) {
-		t.Error("worktree of a running v1.0.1 review was deleted")
-	}
-}
-
-func TestCollectMatchesLegacyLiveRunsByFullPath(t *testing.T) {
-	a := testApp(t)
-	a.cfg.CacheBudgetGB = gigabytes(500)
-	name := "owner-repo-pr-1-20260101-120000"
-	live := legacyLiveRun(t, a, a.p.ReviewRuns, name, 100, 100)
-	unrelated := makeRun(t, a.p.BabysitRuns, name, 800, 100, "")
-	expired := time.Now().Add(-legacyRunGrace - time.Hour)
-	for _, run := range []string{live, unrelated} {
-		if err := os.Chtimes(run, expired, expired); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	freed, removed := mustCollect(t, a, false)
-	assertCollected(t, freed, removed, 800, 0)
-	if !exists(filepath.Join(live, "worktree")) {
-		t.Error("worktree of the live legacy review was deleted")
-	}
-	if exists(filepath.Join(unrelated, "worktree")) {
-		t.Error("an unrelated babysit run with the same basename was protected")
-	}
-}
-
-func TestCollectProtectsRunsWhenALegacyMarkerCannotBeMapped(t *testing.T) {
-	a := testApp(t)
-	a.cfg.CacheBudgetGB = gigabytes(100)
-	run := makeRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100, "")
-	expired := time.Now().Add(-legacyRunGrace - time.Hour)
-	if err := os.Chtimes(run, expired, expired); err != nil {
-		t.Fatal(err)
-	}
-	marker, got, err := runner.Acquire(a.p.RunningDir, "owner/repo#1")
-	if err != nil || !got {
-		t.Fatalf("acquiring legacy marker: got=%v err=%v", got, err)
-	}
-	t.Cleanup(marker.Release)
-
-	freed, removed := mustCollect(t, a, false)
-	assertCollected(t, freed, removed, 0, 0)
-	if !exists(filepath.Join(run, "worktree")) {
-		t.Error("run was deleted while a v1.0.1 review could not be mapped")
+		t.Error("a released claim lost its sentinel")
 	}
 }
 
@@ -405,8 +296,10 @@ func TestCollectTreatsAMissingCacheAsEmpty(t *testing.T) {
 			if exists(cacheRoot) {
 				t.Error("collection created an empty cache root")
 			}
-			if tc.dry && a.cacheBytes != 123 {
-				t.Errorf("dry collection changed the remembered size to %d", a.cacheBytes)
+			if tc.dry {
+				if got := a.cacheSize(); got != 123 {
+					t.Errorf("dry collection changed the remembered size to %d", got)
+				}
 			}
 		})
 	}
@@ -490,7 +383,7 @@ func TestCollectReleasesStartupLockBeforeRecursiveRemoval(t *testing.T) {
 	}()
 	<-removing
 
-	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	unlock, err := rundir.LockCache(a.p.DepsCache)
 	if err != nil {
 		close(finish)
 		t.Fatal(err)
@@ -509,7 +402,7 @@ func TestCollectDoesNotLockRunStartupBelowBudget(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(1000)
 	staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 100, 100)
 
-	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	unlock, err := rundir.LockCache(a.p.DepsCache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,13 +415,15 @@ func TestCollectDoesNotLockRunStartupBelowBudget(t *testing.T) {
 	}()
 	<-started
 
+	// Collection blocked on the lock never finishes while it is held, so the
+	// deadline only has to tell "never" from "slow under load".
 	select {
 	case err := <-done:
 		unlock()
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(10 * time.Second):
 		unlock()
 		<-done
 		t.Fatal("collection waited for the run-startup lock despite being below budget")
@@ -543,7 +438,7 @@ func TestCollectSerializesDependencyEvictionWithRunStartup(t *testing.T) {
 	a.cfg.CacheBudgetGB = gigabytes(150)
 	tree := depsTree(t, a.p.DepsCache, 1000)
 
-	unlock, err := proc.LockDir(filepath.Dir(a.p.DepsCache))
+	unlock, err := rundir.LockCache(a.p.DepsCache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +474,7 @@ func TestCollectSerializesDependencyEvictionWithRunStartup(t *testing.T) {
 func rememberSize(t *testing.T, a *app, at time.Time, n int64) {
 	t.Helper()
 	line := at.Format(time.RFC3339) + " " + strconv.FormatInt(n, 10) + "\n"
-	if err := os.WriteFile(a.rememberedSizePath(), []byte(line), 0o644); err != nil {
+	if err := os.WriteFile(a.p.CacheSizeFile(), []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -654,7 +549,7 @@ func TestCollectIgnoresAGarbageMeasurement(t *testing.T) {
 	a := testApp(t)
 	a.cfg.CacheBudgetGB = gigabytes(500)
 	run := staleRun(t, a.p.ReviewRuns, "owner-repo-pr-1", 800, 100)
-	if err := os.WriteFile(a.rememberedSizePath(), []byte("not a measurement\n"), 0o644); err != nil {
+	if err := os.WriteFile(a.p.CacheSizeFile(), []byte("not a measurement\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,8 +113,8 @@ func TestExecWrapsMissingSessionError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	bin := fakeCodex(t, "exit 0")
 	_, err := Options{Bin: bin}.Exec(context.Background(), testEnv(t), 0, "prompt", filepath.Join(t.TempDir(), "out.md"), io.Discard)
-	if err == nil {
-		t.Fatal("want an error when no rollout matches the worktree")
+	if err == nil || !strings.Contains(err.Error(), "could not find the Codex session") {
+		t.Fatalf("err = %v, want the missing session reported", err)
 	}
 }
 
@@ -135,7 +136,7 @@ exit 0`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) == "" {
-		t.Fatal("nothing reached the log file")
+	if !strings.Contains(string(b), "hello from codex") {
+		t.Fatalf("the output did not reach the log file: %q", b)
 	}
 }

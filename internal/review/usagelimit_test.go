@@ -11,53 +11,26 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/codex"
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/target"
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
-func TestReviewEngineDefaultsHelper(t *testing.T) {
-	eng, model, effort := ReviewEngineDefaults("", "", "")
-	if eng != engine.Codex || model != DefaultModel || effort != DefaultEffort {
-		t.Fatalf("empty input resolved to %s/%s/%s", eng, model, effort)
-	}
-	eng, model, effort = ReviewEngineDefaults(engine.Claude, "", "high")
-	if eng != engine.Claude || model != ClaudeDefaultModel {
-		t.Fatalf("claude resolved to %s/%s", eng, model)
-	}
-	if effort != "high" {
-		t.Fatalf("an explicit effort was rewritten to %q", effort)
-	}
-	if _, model, _ = ReviewEngineDefaults(engine.Claude, "opus", ""); model != "opus" {
-		t.Fatalf("an explicit model was rewritten to %q", model)
-	}
-	eng, model, effort = ReviewEngineDefaults(engine.Grok, "", "medium")
-	if eng != engine.Grok || model != GrokDefaultModel {
-		t.Fatalf("grok resolved to %s/%s", eng, model)
-	}
-	if effort != "medium" {
-		t.Fatalf("an explicit grok effort was rewritten to %q", effort)
-	}
-	if _, model, _ = ReviewEngineDefaults(engine.Grok, "custom-model", ""); model != "custom-model" {
-		t.Fatalf("an explicit grok model was rewritten to %q", model)
-	}
-}
-
 func TestWithDefaultsAppliesCodexModelOnlyForCodexEngine(t *testing.T) {
 	o := Options{}.withDefaults()
-	if o.Model != DefaultModel || o.Effort != DefaultEffort || o.Engine != engine.Codex {
+	if o.Model != spec.Get(spec.Codex).ReviewModel || o.Effort != spec.Get(spec.Codex).ReviewEffort || o.Engine != spec.Codex {
 		t.Fatalf("codex defaults missing: %s/%s/%s", o.Engine, o.Model, o.Effort)
 	}
-	c := Options{Engine: engine.Claude}.withDefaults()
-	if c.Model != ClaudeDefaultModel {
+	c := Options{Engine: spec.Claude}.withDefaults()
+	if c.Model != spec.Get(spec.Claude).ReviewModel {
 		t.Fatalf("claude default model = %q", c.Model)
 	}
 	if strings.HasPrefix(c.Model, "gpt-") {
 		t.Fatal("a GPT model reached the claude engine")
 	}
-	g := Options{Engine: engine.Grok}.withDefaults()
-	if g.Model != GrokDefaultModel {
+	g := Options{Engine: spec.Grok}.withDefaults()
+	if g.Model != spec.Get(spec.Grok).ReviewModel {
 		t.Fatalf("grok default model = %q", g.Model)
 	}
 	if strings.HasPrefix(g.Model, "gpt-") {
@@ -69,23 +42,23 @@ func TestWithDefaultsAppliesCodexModelOnlyForCodexEngine(t *testing.T) {
 // codex and not for claude or grok; accepting it for those would run the panel
 // at an effort nobody chose.
 func TestValidateChecksEffortAgainstTheSelectedEngine(t *testing.T) {
-	ok := Options{Engine: engine.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "xhigh"}.withDefaults()
+	ok := Options{Engine: spec.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "xhigh"}.withDefaults()
 	if err := ok.validate(); err != nil {
 		t.Fatalf("valid claude effort rejected: %v", err)
 	}
-	claude := Options{Engine: engine.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
+	claude := Options{Engine: spec.Claude, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
 	if err := claude.validate(); err == nil {
 		t.Fatal("the codex-only effort ultra was accepted for the claude engine")
 	}
-	codexOK := Options{Engine: engine.Codex, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
+	codexOK := Options{Engine: spec.Codex, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
 	if err := codexOK.validate(); err != nil {
 		t.Fatalf("valid codex effort rejected: %v", err)
 	}
-	grokOK := Options{Engine: engine.Grok, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "high"}.withDefaults()
+	grokOK := Options{Engine: spec.Grok, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "high"}.withDefaults()
 	if err := grokOK.validate(); err != nil {
 		t.Fatalf("valid grok effort rejected: %v", err)
 	}
-	grokBad := Options{Engine: engine.Grok, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
+	grokBad := Options{Engine: spec.Grok, Repo: "acme/api", RepoRoot: "/tmp/x", Effort: "ultra"}.withDefaults()
 	if err := grokBad.validate(); err == nil {
 		t.Fatal("the codex-only effort ultra was accepted for the grok engine")
 	}

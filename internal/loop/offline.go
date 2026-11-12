@@ -2,8 +2,6 @@ package loop
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/yungweng/quorum/internal/review"
@@ -96,7 +94,7 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 // comment flushed after the final push. Its online counterpart is
 // postFixComment; the parts held back here are exactly what that would have
 // posted, minus the per-round review backlinks no posted review exists for.
-func (r *run) queueFixComment(tag, label, preSHA string) {
+func (r *run) queueFixComment(step fixOutcome, label, preSHA string) {
 	if r.target.BranchOnly || !r.o.Post {
 		return
 	}
@@ -104,12 +102,8 @@ func (r *run) queueFixComment(tag, label, preSHA string) {
 	if commits == "" {
 		return
 	}
-	var original string
-	if data, err := os.ReadFile(filepath.Join(r.msgDir, tag+".md")); err == nil {
-		original = string(data)
-	}
 	r.pendingFixComments = append(r.pendingFixComments,
-		fixCommentBody(label, "", "", r.lastMsg, original, commits))
+		fixCommentBody(label, "", "", step.last, step.first, commits))
 }
 
 // flushFixComments posts the queued offline rounds as one comment. The queue
@@ -153,7 +147,7 @@ func (r *run) postFinalReviewComment(res *Result, round int, findings review.Fin
 	if err := r.requirePublishedHead(findings.HeadSHA); err != nil {
 		return fmt.Errorf("checking the pull request head before posting review round %d's comment: %w", round, err)
 	}
-	url, err := r.p.GH.CommentBody(r.ctx, r.o.RepoRoot, r.pr.Number, comment)
+	url, err := r.p.GH.Comment(r.ctx, r.o.RepoRoot, r.pr.Number, comment)
 	if err != nil {
 		return fmt.Errorf("posting review round %d's comment to PR #%d: %w", round, r.pr.Number, err)
 	}

@@ -6,18 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
+	"github.com/yungweng/quorum/internal/atomicfile"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/target"
 )
 
-const (
-	legacyRunTargetSchema = 1
-	runTargetSchema       = 2
-)
+const runTargetSchema = 2
 
 // runTarget preserves the target contract that produced a run's reviewer
 // outputs. A resume must aggregate and publish under that same contract.
@@ -38,7 +33,6 @@ type runTarget struct {
 func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Target, runPaths, error) {
 	var run runPaths
 	var saved *runTarget
-	legacy := false
 
 	if o.ResumeRun != "" {
 		var err error
@@ -48,15 +42,17 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 		}
 		meta, err := readRunTarget(run.target)
 		if errors.Is(err, os.ErrNotExist) {
-			legacy = true
+			return target.Target{}, runPaths{}, fmt.Errorf(
+				"%w: the run has no target metadata, so its original target and base cannot be verified; start a new review",
+				ErrResumeUnusable,
+			)
 		} else if err != nil {
 			return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
-		} else {
-			if err := applyRunTarget(o, meta); err != nil {
-				return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
-			}
-			saved = &meta
 		}
+		if err := applyRunTarget(o, meta); err != nil {
+			return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
+		}
+		saved = &meta
 	}
 
 	var tgt target.Target
@@ -103,12 +99,6 @@ func (r *Runner) resolveRunTarget(ctx context.Context, o *Options) (target.Targe
 		if err := saved.matches(tgt); err != nil {
 			return target.Target{}, runPaths{}, fmt.Errorf("%w: %v", ErrResumeUnusable, err)
 		}
-	}
-	if legacy && !legacyPRRunMatches(run.root, tgt) {
-		return target.Target{}, runPaths{}, fmt.Errorf(
-			"%w: the run has no target metadata, so its original branch target and base cannot be verified; start a new review",
-			ErrResumeUnusable,
-		)
 	}
 	return tgt, run, nil
 }
@@ -163,17 +153,13 @@ func applyRunTarget(o *Options, meta runTarget) error {
 	if meta.PR != nil {
 		pr := *meta.PR
 		o.LocalPR = &pr
-	} else if meta.LocalHead != "" && meta.Number > 0 {
-		// Schema 1 did not retain the full PR. Its identity fields still let a
-		// local-head resume reconstruct the PR target without consulting origin.
-		o.LocalPR = &gh.FullPR{Number: meta.Number}
 	}
 	return nil
 }
 
 func (m runTarget) validate() error {
-	if m.Schema != legacyRunTargetSchema && m.Schema != runTargetSchema {
-		return fmt.Errorf("resume target metadata has schema %d, want %d or %d", m.Schema, legacyRunTargetSchema, runTargetSchema)
+	if m.Schema != runTargetSchema {
+		return fmt.Errorf("resume target metadata has schema %d, want %d", m.Schema, runTargetSchema)
 	}
 	if m.Repo == "" || m.Branch == "" || m.BaseBranch == "" {
 		return fmt.Errorf("resume target metadata is incomplete")
@@ -181,7 +167,7 @@ func (m runTarget) validate() error {
 	if m.BranchOnly == (m.Number > 0) {
 		return fmt.Errorf("resume target metadata has inconsistent target kind")
 	}
-	if m.Schema == runTargetSchema && m.Number > 0 && (m.PR == nil || m.PR.Number != m.Number) {
+	if m.Number > 0 && (m.PR == nil || m.PR.Number != m.Number) {
 		return fmt.Errorf("resume target metadata is missing PR metadata")
 	}
 	if m.Number == 0 && m.PR != nil {
@@ -215,51 +201,5 @@ func readRunTarget(path string) (runTarget, error) {
 }
 
 func writeRunTarget(path string, meta runTarget) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := path + ".tmp"
-	defer os.Remove(tmp)
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Runs created before target metadata existed can only be resumed when their
-// generated name proves they were for the same explicit PR. A branch run has
-// no durable record of its base, so guessing would risk changing review mode.
-func legacyPRRunMatches(root string, tgt target.Target) bool {
-	if tgt.BranchOnly || tgt.PR.Number <= 0 {
-		return false
-	}
-	name := filepath.Base(root)
-	const stampLen = len("20060102-150405")
-	if len(name) <= stampLen || name[len(name)-stampLen-1] != '-' {
-		return false
-	}
-	stamp := name[len(name)-stampLen:]
-	if _, err := time.Parse("20060102-150405", stamp); err != nil {
-		return false
-	}
-	stem := strings.TrimSuffix(name, "-"+stamp)
-	if strings.HasSuffix(stem, "-branch-"+legacySafeRunPart(tgt.PR.HeadRefName)) {
-		return false
-	}
-	return strings.HasSuffix(stem, fmt.Sprintf("-pr-%d", tgt.PR.Number))
-}
-
-func legacySafeRunPart(s string) string {
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.ReplaceAll(s, "\\", "-")
-	s = strings.ReplaceAll(s, "..", "-")
-	if s == "" {
-		return "unknown"
-	}
-	return s
+	return atomicfile.WriteJSON(path, meta)
 }

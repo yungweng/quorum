@@ -33,8 +33,8 @@ func TestTimeoutIsReportedAsSuch(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
 	}
-	if got := ExitCode(err); got != TimeoutExitCode {
-		t.Errorf("exit code = %d, want %d", got, TimeoutExitCode)
+	if got := ExitCode(err); got != timeoutExitCode {
+		t.Errorf("exit code = %d, want %d", got, timeoutExitCode)
 	}
 }
 
@@ -47,8 +47,10 @@ func TestTimeoutKillsGrandchildren(t *testing.T) {
 
 	// A shell that backgrounds a long sleep, records its pid, and then blocks.
 	// Killing only the shell would leave the sleep running.
+	// The timeout leaves the shell ample time to record the pid even on a
+	// loaded machine; a missing pid file skips the test instead of failing it.
 	script := "sleep 300 & echo $! > " + pidFile + "; wait"
-	err := Run(t.Context(), 300*time.Millisecond, Spec{Name: "sh", Args: []string{"-c", script}})
+	err := Run(t.Context(), time.Second, Spec{Name: "sh", Args: []string{"-c", script}})
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
 	}

@@ -3,6 +3,7 @@ package deps
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,7 +14,7 @@ func newCache(t *testing.T) Cache {
 	root := t.TempDir()
 	return Cache{
 		Root:     filepath.Join(root, "deps"),
-		Repo:     "acme-api",
+		Repo:     "acme/api",
 		Worktree: mustDir(t, filepath.Join(root, "worktree")),
 	}
 }
@@ -39,7 +40,7 @@ func TestProjectsFindsEveryLockFileDirectory(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "root")
 	writeFile(t, filepath.Join(c.Worktree, "apps", "web", "package-lock.json"), "web")
 
-	got, err := c.Projects()
+	got, err := c.projects()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,8 +50,8 @@ func TestProjectsFindsEveryLockFileDirectory(t *testing.T) {
 	seen := map[string]bool{}
 	for _, p := range got {
 		seen[p.Rel] = true
-		if len(p.Hash) != 12 {
-			t.Errorf("hash %q is not 12 characters", p.Hash)
+		if len(p.hash) != 12 {
+			t.Errorf("hash %q is not 12 characters", p.hash)
 		}
 	}
 	if !seen["."] || !seen["apps/web"] {
@@ -65,7 +66,7 @@ func TestProjectsReportsADirectoryOnce(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "a")
 	writeFile(t, filepath.Join(c.Worktree, "package-lock.json"), "b")
 
-	got, err := c.Projects()
+	got, err := c.projects()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +82,7 @@ func TestProjectsSkipsNodeModules(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "root")
 	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "package-lock.json"), "dep")
 
-	got, err := c.Projects()
+	got, err := c.projects()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,17 +93,20 @@ func TestProjectsSkipsNodeModules(t *testing.T) {
 
 // A changed lock file must miss the cache, or a run would reuse a tree that no
 // longer matches what the project declares.
-func TestChangedLockFileGetsADifferentHash(t *testing.T) {
+func TestChangedLockFileMissesTheCache(t *testing.T) {
 	c := newCache(t)
-	lock := filepath.Join(c.Worktree, "pnpm-lock.yaml")
+	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "version: 1")
+	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "index.js"), "module")
+	failed := func(err error) { t.Fatalf("unexpected failure: %v", err) }
+	if links := c.Capture(failed, func(string) {}); len(links) != 1 {
+		t.Fatalf("Capture created %d links, want 1", len(links))
+	}
 
-	writeFile(t, lock, "version: 1")
-	before, _ := c.Projects()
-	writeFile(t, lock, "version: 2")
-	after, _ := c.Projects()
-
-	if before[0].Hash == after[0].Hash {
-		t.Error("a changed lock file produced the same hash, so a stale tree would be reused")
+	next := c
+	next.Worktree = mustDir(t, filepath.Join(t.TempDir(), "worktree2"))
+	writeFile(t, filepath.Join(next.Worktree, "pnpm-lock.yaml"), "version: 2")
+	if links := next.Link(failed, func(string) {}); len(links) != 0 {
+		t.Error("a changed lock file reused the tree cached for the old one")
 	}
 }
 
@@ -113,7 +117,7 @@ func TestCaptureThenLinkReusesTheTree(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "v1")
 	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "index.js"), "module")
 
-	links, cached, err := c.Capture()
+	links, cached, err := c.capture()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,13 +132,18 @@ func TestCaptureThenLinkReusesTheTree(t *testing.T) {
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatal("node_modules is not a symlink after capture")
 	}
+	// The cache names the repository by its slug, one path component.
+	if target, err := os.Readlink(filepath.Join(c.Worktree, "node_modules")); err != nil ||
+		!strings.HasPrefix(target, filepath.Join(c.Root, "acme-api", "_root")+string(filepath.Separator)) {
+		t.Fatalf("shared tree = %q (%v), want it under %s", target, err, filepath.Join(c.Root, "acme-api"))
+	}
 
 	// A second worktree with the same lock file reuses it without installing.
 	next := c
 	next.Worktree = mustDir(t, filepath.Join(t.TempDir(), "worktree2"))
 	writeFile(t, filepath.Join(next.Worktree, "pnpm-lock.yaml"), "v1")
 
-	links, reused, err := next.Link()
+	links, reused, err := next.link()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,11 +170,11 @@ func TestLinkIgnoresAnIncompleteTree(t *testing.T) {
 	c := newCache(t)
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "v1")
 
-	projects, _ := c.Projects()
+	projects, _ := c.projects()
 	half := c.dir(projects[0])
 	writeFile(t, filepath.Join(half, "left-pad", "index.js"), "half written")
 
-	links, reused, err := c.Link()
+	links, reused, err := c.link()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +189,11 @@ func TestLinkLeavesAnExistingNodeModulesAlone(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "v1")
 	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "index.js"), "local")
 
-	projects, _ := c.Projects()
+	projects, _ := c.projects()
 	shared := c.dir(projects[0])
 	writeFile(t, filepath.Join(shared, completeMarker), "")
 
-	links, _, err := c.Link()
+	links, _, err := c.link()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +213,7 @@ func TestGCKeepsATreeThatIsStillBeingUsed(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "v1")
 	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "index.js"), "module")
 
-	_, cached, err := c.Capture()
+	_, cached, err := c.capture()
 	if err != nil || len(cached) != 1 {
 		t.Fatalf("capture failed: %v", err)
 	}
@@ -232,7 +241,7 @@ func TestGCRemovesATreeNobodyNeeded(t *testing.T) {
 	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "v1")
 	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "index.js"), "module")
 
-	_, cached, _ := c.Capture()
+	_, cached, _ := c.capture()
 	tree := c.dir(cached[0])
 
 	old := time.Now().Add(-30 * 24 * time.Hour)
@@ -250,10 +259,33 @@ func TestGCRemovesATreeNobodyNeeded(t *testing.T) {
 // A publish that never completed is dead weight regardless of its age.
 func TestGCRemovesAnIncompleteTree(t *testing.T) {
 	c := newCache(t)
-	half := filepath.Join(c.Root, c.Repo, "_root", "abc123456789")
+	half := filepath.Join(c.Root, "acme-api", "_root", "abc123456789")
 	writeFile(t, filepath.Join(half, "left-pad", "index.js"), "half")
 
 	if removed := c.GC(14 * 24 * time.Hour); removed != 1 {
 		t.Errorf("GC removed %d trees, want 1", removed)
+	}
+}
+
+func TestLinkAndCaptureReportWhatTheyShared(t *testing.T) {
+	c := newCache(t)
+	writeFile(t, filepath.Join(c.Worktree, "pnpm-lock.yaml"), "v1")
+	writeFile(t, filepath.Join(c.Worktree, "node_modules", "left-pad", "index.js"), "module")
+	var lines []string
+	info := func(line string) { lines = append(lines, line) }
+	failed := func(err error) { t.Fatalf("unexpected failure: %v", err) }
+
+	if links := c.Capture(failed, info); len(links) != 1 {
+		t.Fatalf("Capture created %d links, want 1", len(links))
+	}
+	next := c
+	next.Worktree = mustDir(t, filepath.Join(t.TempDir(), "worktree2"))
+	writeFile(t, filepath.Join(next.Worktree, "pnpm-lock.yaml"), "v1")
+	if links := next.Link(failed, info); len(links) != 1 {
+		t.Fatalf("Link created %d links, want 1", len(links))
+	}
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "deps:     cached . (") ||
+		!strings.HasPrefix(lines[1], "deps:     reused . (") {
+		t.Fatalf("reported %q", lines)
 	}
 }

@@ -14,15 +14,15 @@ func TestMarkersMatchOnlyAtTheStartOfALine(t *testing.T) {
 PR COMMENT:
 Fixed the migration ordering.`
 
-	if !hasMarker(msg, MarkerComment) {
+	if !hasMarker(msg, markerComment) {
 		t.Error("a marker at the start of a line was not found")
 	}
-	if hasMarker(msg, MarkerDisputed) {
+	if hasMarker(msg, markerDisputed) {
 		t.Error("a marker that is not present was found")
 	}
 
 	inline := "The reviewer wrote DISPUTED FINDINGS: in their comment, which I disagree with."
-	if hasMarker(inline, MarkerDisputed) {
+	if hasMarker(inline, markerDisputed) {
 		t.Error("a marker mentioned mid-sentence was treated as the real marker")
 	}
 }
@@ -36,8 +36,8 @@ DISPUTED FINDINGS:
 1. The parser already handles empty input.
 2. The retry loop is bounded by the context.`
 
-	got := section(msg, MarkerDisputed)
-	if !strings.HasPrefix(got, MarkerDisputed) {
+	got := section(msg, markerDisputed)
+	if !strings.HasPrefix(got, markerDisputed) {
 		t.Errorf("section did not start at the marker: %q", got)
 	}
 	if !strings.Contains(got, "2. The retry loop") {
@@ -46,7 +46,7 @@ DISPUTED FINDINGS:
 	if strings.Contains(got, "Summary of the round") {
 		t.Error("section included text from before the marker")
 	}
-	if section(msg, MarkerQuestions) != "" {
+	if section(msg, markerQuestions) != "" {
 		t.Error("an absent marker did not return the empty string")
 	}
 }
@@ -56,7 +56,7 @@ DISPUTED FINDINGS:
 // that stalls on questions nobody will answer, or a session inventing product
 // decisions while a human sits waiting.
 func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
-	auto := standingRules("feature/crumb-tray", true, false, false, "")
+	auto := standingRules(promptTarget{branch: "feature/crumb-tray", branchOnly: false, offline: false}, true, "")
 	if !strings.Contains(auto, "No human is available during this run") {
 		t.Error("autonomous rules do not tell the session to decide itself")
 	}
@@ -64,8 +64,8 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 		t.Error("autonomous rules still invite the session to ask questions")
 	}
 
-	interactive := standingRules("feature/crumb-tray", false, false, false, "")
-	if !strings.Contains(interactive, MarkerQuestions) {
+	interactive := standingRules(promptTarget{branch: "feature/crumb-tray", branchOnly: false, offline: false}, false, "")
+	if !strings.Contains(interactive, markerQuestions) {
 		t.Error("interactive rules do not describe the questions marker")
 	}
 }
@@ -73,7 +73,7 @@ func TestStandingRulesSwitchOnAutonomy(t *testing.T) {
 // The push command is spelled out because a bare `git push` fails on the
 // detached checkout the pipeline works in.
 func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
-	rules := standingRules("feature/crumb-tray", true, false, false, "")
+	rules := standingRules(promptTarget{branch: "feature/crumb-tray", branchOnly: false, offline: false}, true, "")
 	want := "git push origin HEAD:refs/heads/feature/crumb-tray"
 	if !strings.Contains(rules, want) {
 		t.Errorf("the standing rules do not contain %q", want)
@@ -83,7 +83,7 @@ func TestStandingRulesCarryTheExactPushCommand(t *testing.T) {
 // The pipeline posts the fix log itself so it appears as an ordinary comment
 // from the user. A session that posts its own would produce duplicates.
 func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
-	rules := standingRules("main", true, false, false, "")
+	rules := standingRules(promptTarget{branch: "main", branchOnly: false, offline: false}, true, "")
 	if !strings.Contains(rules, "Never create or edit PRs or comments") {
 		t.Error("the standing rules do not forbid the session from commenting")
 	}
@@ -93,7 +93,7 @@ func TestStandingRulesForbidTheSessionPostingComments(t *testing.T) {
 }
 
 func TestFixSessionPromptsRequireACleanWorktree(t *testing.T) {
-	rules := standingRules("main", true, false, false, "")
+	rules := standingRules(promptTarget{branch: "main", branchOnly: false, offline: false}, true, "")
 	for _, want := range []string{"$TMPDIR or /tmp", "leave git status --porcelain empty", "remove only temporary artifacts you created"} {
 		if !strings.Contains(rules, want) {
 			t.Errorf("the standing rules are missing %q", want)
@@ -112,8 +112,8 @@ func TestFixSessionPromptsRequireACleanWorktree(t *testing.T) {
 func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"ci fix":           ciFixPrompt(12, "[]"),
-		"fix round":        fixRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
-		"suggestion round": suggestionRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
+		"fix round":        fixRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: false}, "## Summary\n\nfine"),
+		"suggestion round": suggestionRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: false}, "## Summary\n\nfine"),
 	} {
 		if !strings.Contains(prompt, "Do not wait for CI") {
 			t.Errorf("%s prompt does not tell the session to leave CI to the pipeline", name)
@@ -124,10 +124,10 @@ func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 func TestPRFixPromptsRequireACommentBlock(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"ci fix":           ciFixPrompt(12, "[]"),
-		"review fix":       fixRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
-		"suggestion round": suggestionRoundPrompt(12, "", false, false, "## Summary\n\nfine"),
+		"review fix":       fixRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: false}, "## Summary\n\nfine"),
+		"suggestion round": suggestionRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: false}, "## Summary\n\nfine"),
 	} {
-		if !strings.Contains(prompt, "a line that is exactly:\n"+MarkerComment) {
+		if !strings.Contains(prompt, "a line that is exactly:\n"+markerComment) {
 			t.Errorf("%s prompt does not require the PR comment marker", name)
 		}
 		for _, want := range []string{"what", "which checks you ran", "language of the PR description", "never mention AI"} {
@@ -139,8 +139,8 @@ func TestPRFixPromptsRequireACommentBlock(t *testing.T) {
 }
 
 func TestBranchFixPromptDoesNotInventAPROrCIWatcher(t *testing.T) {
-	got := fixRoundPrompt(0, "feature/crumb-tray", true, false, "## Summary\n\nfine")
-	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", MarkerComment} {
+	got := fixRoundPrompt(promptTarget{number: 0, branch: "feature/crumb-tray", branchOnly: true, offline: false}, "## Summary\n\nfine")
+	for _, unwanted := range []string{"PR #0", "pipeline watches the checks", markerComment} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("branch fix prompt contains %q", unwanted)
 		}
@@ -204,14 +204,14 @@ func TestFinalDescriptionPromptDescribesStateWithoutHistory(t *testing.T) {
 // finding in a way that itself violates the rule that produced it.
 func TestStandingRulesCarryRepositoryRules(t *testing.T) {
 	repoRules := "- No new UI components; reuse existing ones first (Blocker)."
-	rules := standingRules("main", true, false, false, repoRules)
+	rules := standingRules(promptTarget{branch: "main", branchOnly: false, offline: false}, true, repoRules)
 	if !strings.Contains(rules, repoRules) {
 		t.Error("the standing rules are missing the repository rules")
 	}
 	if !strings.Contains(rules, "never resolve a finding in a way that itself violates one of them") {
 		t.Error("the repository rules block lost its framing")
 	}
-	if strings.Contains(standingRules("main", true, false, false, ""), "its own rules below") {
+	if strings.Contains(standingRules(promptTarget{branch: "main", branchOnly: false, offline: false}, true, ""), "its own rules below") {
 		t.Error("a rules block appeared without repository rules")
 	}
 }

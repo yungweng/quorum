@@ -1,0 +1,17 @@
+An external code review of PR #42 found issues. The full review comment follows below.
+
+Please check for each finding whether it is a real issue or might be intended behavior.
+- For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
+- Suggestions: implement each one unless it describes intended behavior or you have a strong technical reason not to.
+- Resolve the Questions with your best judgment; only raise OPEN QUESTIONS if one truly needs a product decision.
+- Run the affected checks and commit your work. Do not push.
+
+Unless you end with the DISPUTED FINDINGS marker, end your final message with a line that is exactly:
+PR COMMENT:
+followed by a short log comment for the PR: what you fixed and how, which checks you ran, and which findings you left unchanged because they are intended. Write it in the language of the PR description, plain and factual, and never mention AI, agents, or automation in it. Use this marker for nothing else.
+
+---
+
+## Summary
+
+fine

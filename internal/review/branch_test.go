@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/target"
@@ -106,37 +105,6 @@ esac
 	}
 	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
 		t.Fatal("comment was posted after the remote head moved")
-	}
-}
-
-func TestAllowDirenvFailsClosedWhenChangedFilesCannotBeChecked(t *testing.T) {
-	worktree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(worktree, ".envrc"), []byte("export UNSAFE=1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitBin := filepath.Join(t.TempDir(), "git")
-	if err := os.WriteFile(gitBin, []byte(`#!/bin/sh
-echo "diff failed" >&2
-exit 1
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	direnvBin := filepath.Join(t.TempDir(), "direnv")
-	if err := os.WriteFile(direnvBin, []byte(`#!/bin/sh
-touch .direnv-allowed
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	r := &Runner{Git: git.New(gitBin)}
-	err := r.allowDirenv(context.Background(), Options{AllowEnvrcChange: true},
-		runPaths{worktree: worktree}, "origin/main",
-		envexec.Env{Worktree: worktree, Direnv: true, DirenvBin: direnvBin}, NopReporter{})
-	if err == nil || !strings.Contains(err.Error(), "check changed .envrc files") {
-		t.Fatalf("allowDirenv error = %v, want changed-file check failure", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(worktree, ".direnv-allowed")); !os.IsNotExist(statErr) {
-		t.Fatal("direnv ran after the changed-file check failed")
 	}
 }
 

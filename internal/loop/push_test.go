@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/deps"
-	"github.com/yungweng/quorum/internal/engine"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/target"
@@ -39,14 +38,14 @@ func TestFixablePushRejectionOnlyCoversLocalVerification(t *testing.T) {
 	}
 
 	hook := "pre-push hook\nsrc/app.ts(12,3): error TS2339: Property 'crumb' does not exist"
-	if !fixablePushRejection(&pushRejection{hookOut: hook, local: true}) {
+	if !fixablePushRejection(&pushRejection{out: hook, local: true}) {
 		t.Error("a verification hook rejection must be repairable")
 	}
-	if fixablePushRejection(&pushRejection{hookOut: hook}) {
+	if fixablePushRejection(&pushRejection{out: hook}) {
 		t.Error("unverified output must not be handed to a fix session")
 	}
 	lock := "Error: parallel golangci-lint is running"
-	if fixablePushRejection(&pushRejection{hookOut: lock, local: true}) {
+	if fixablePushRejection(&pushRejection{out: lock, local: true}) {
 		t.Error("a transient linter lock must not be handed to a fix session")
 	}
 }
@@ -75,8 +74,8 @@ esac
 		t.Fatal(err)
 	}
 	rep := &activityReporter{}
-	r := &run{ctx: context.Background(), rep: rep, worktree: dir}
-	if out, err := r.prePushWithRetry(git.New(bin), "origin", "feature/crumb-tray", "head-sha", "base-sha", 3, 0); err != nil {
+	r := &run{ctx: context.Background(), rep: rep, worktree: dir, branch: "feature/crumb-tray", timing: timings{prePushRetry: time.Nanosecond}}
+	if out, err := r.prePushWithRetry(git.New(bin), "head-sha", "base-sha"); err != nil {
 		t.Fatalf("retrying transient pre-push failure: %v\n%s", err, out)
 	}
 	wantActivities := []string{
@@ -117,8 +116,8 @@ esac
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := &run{ctx: context.Background(), rep: NopReporter{}, worktree: dir}
-	out, err := r.prePushWithRetry(git.New(bin), "origin", "feature/crumb-tray", "head-sha", "base-sha", 3, 0)
+	r := &run{ctx: context.Background(), rep: nopReporter{}, worktree: dir, branch: "feature/crumb-tray", timing: timings{prePushRetry: time.Nanosecond}}
+	out, err := r.prePushWithRetry(git.New(bin), "head-sha", "base-sha")
 	if err == nil || !strings.Contains(err.Error(), "3 attempts") || !strings.Contains(out, "parallel golangci-lint") {
 		t.Fatalf("persistent lock result = %q, %v", out, err)
 	}
@@ -170,7 +169,7 @@ func TestPushFixPromptForbidsBypassingTheVerification(t *testing.T) {
 		"Do not push",
 		"no --no-verify",
 		"no changes to the hook configuration",
-		"a line that is exactly:\n" + MarkerComment,
+		"a line that is exactly:\n" + markerComment,
 		"never mention AI",
 	} {
 		if !strings.Contains(got, want) {
@@ -186,7 +185,7 @@ type fakeFixer struct {
 	onExec  func()
 }
 
-func (f *fakeFixer) Exec(_ context.Context, _ envexec.Env, _ time.Duration, prompt, outFile string, _ io.Writer) (engine.SessionRef, error) {
+func (f *fakeFixer) Exec(_ context.Context, _ envexec.Env, _ time.Duration, prompt, outFile string, _ io.Writer) (string, error) {
 	f.prompts = append(f.prompts, prompt)
 	if f.onExec != nil {
 		f.onExec()
@@ -194,7 +193,7 @@ func (f *fakeFixer) Exec(_ context.Context, _ envexec.Env, _ time.Duration, prom
 	return "fake-session", os.WriteFile(outFile, []byte("fixed the type error\n"), 0o644)
 }
 
-func (f *fakeFixer) Resume(_ context.Context, _ envexec.Env, _ time.Duration, _ engine.SessionRef, prompt, outFile string, _ io.Writer) error {
+func (f *fakeFixer) Resume(_ context.Context, _ envexec.Env, _ time.Duration, _ string, prompt, outFile string, _ io.Writer) error {
 	f.prompts = append(f.prompts, prompt)
 	if f.onExec != nil {
 		f.onExec()
@@ -232,7 +231,7 @@ esac
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{RepoRoot: dir},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		target:   target.Target{BranchOnly: true},
 		branch:   "feature/crumb-tray",
 		worktree: dir,
@@ -300,7 +299,7 @@ esac
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{RepoRoot: dir},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		target:   target.Target{BranchOnly: true},
 		branch:   "feature/crumb-tray",
 		worktree: dir,
@@ -331,7 +330,7 @@ esac
 		t.Fatal(err)
 	}
 	r := &run{
-		p: &Pipeline{Git: git.New(bin)}, o: Options{RepoRoot: dir}, ctx: context.Background(), rep: NopReporter{},
+		p: &Pipeline{Git: git.New(bin)}, o: Options{RepoRoot: dir}, ctx: context.Background(), rep: nopReporter{},
 		target: target.Target{BranchOnly: true}, branch: "feature/crumb-tray", worktree: dir, logDir: dir,
 	}
 	err := r.pushBranch()
@@ -410,8 +409,12 @@ func dependencyPushRun(t *testing.T, cached bool) (*run, *fakeFixer) {
 	if cached {
 		donor := filepath.Join(root, "donor")
 		writeDependencyFixture(t, donor, true)
-		if _, trees, err := (deps.Cache{Root: depsRoot, Repo: "acme-api", Worktree: donor}).Capture(); err != nil || len(trees) != 1 {
-			t.Fatalf("seed dependency cache: cached %d: %v", len(trees), err)
+		var seedErr error
+		trees := 0
+		(deps.Cache{Root: depsRoot, Repo: "acme/api", Worktree: donor}).Capture(
+			func(err error) { seedErr = err }, func(string) { trees++ })
+		if seedErr != nil || trees != 1 {
+			t.Fatalf("seed dependency cache: cached %d: %v", trees, seedErr)
 		}
 	}
 	pushed := filepath.Join(root, "pushed")
@@ -420,7 +423,7 @@ func dependencyPushRun(t *testing.T, cached bool) (*run, *fakeFixer) {
 	r := &run{
 		p:   &Pipeline{Git: git.New(dependencyPushGit(t, root, ready, pushed))},
 		o:   Options{Repo: "acme/api", RepoRoot: dir, DepsDir: depsRoot},
-		ctx: context.Background(), rep: NopReporter{}, target: target.Target{BranchOnly: true},
+		ctx: context.Background(), rep: nopReporter{}, target: target.Target{BranchOnly: true},
 		branch: "feature/crumb-tray", worktree: dir, logDir: dir, msgDir: dir,
 		env: envexec.Env{Worktree: dir}, fixer: fixer,
 	}
@@ -590,7 +593,7 @@ esac
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{RepoRoot: dir, TestCmd: "test -f " + testFixed, MaxCIFixes: 1},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		target:   target.Target{BranchOnly: true},
 		branch:   "feature/crumb-tray",
 		worktree: dir,
@@ -630,7 +633,7 @@ esac
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{RepoRoot: dir},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		target:   target.Target{BranchOnly: true},
 		branch:   "feature/crumb-tray",
 		worktree: dir,

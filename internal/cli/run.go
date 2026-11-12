@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/runner"
+	"github.com/yungweng/quorum/internal/prkey"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
@@ -33,8 +34,8 @@ func (a *app) cmdRun(args []string) int {
 		return a.die("%v", err)
 	}
 
-	key := fmt.Sprintf("%s#%d", repo, number)
-	marker, got, err := runner.Acquire(a.p.RunningDir, key)
+	key := prkey.Format(repo, number)
+	marker, got, err := agentstate.Acquire(a.p.RunningDir, key)
 	if err != nil {
 		return a.die("%v", err)
 	}
@@ -52,11 +53,9 @@ func (a *app) cmdRun(args []string) int {
 		return a.die("%v", err)
 	}
 	a.log.Echo = func(s string) { fmt.Println(s) }
-	r := &runner.Runner{Cfg: a.cfg, P: a.p, Log: a.log, GitBin: t.Git, GHBin: t.GH,
-		CodexBin: t.Codex, ClaudeBin: t.Claude, GrokBin: t.Grok, DirenvBin: t.Direnv, GH: client, Git: a.newGit(t.Git),
-		TerminalNotify: func(title, body string) {
-			a.out.Notify("quorum: "+title, body)
-		},
+	r := a.newRunner(t, client)
+	r.TerminalNotify = func(title, body string) {
+		a.out.Notify("quorum: "+title, body)
 	}
 	// A finished run is the only thing that grows the cache, so the next
 	// collector has to measure instead of trusting a size from before it.
@@ -67,10 +66,7 @@ func (a *app) cmdRun(args []string) int {
 	return 0
 }
 
-// parseLogArgs reads the arguments of `quorum logs`.
-//
-// -n takes a line count, the way every other tool spells it. It used to mean
-// "do not follow", which is what --no-follow is for.
+// -n takes a line count, the way every other tool spells it.
 func parseLogArgs(args []string) (lines int, follow bool, err error) {
 	lines, follow = 50, true
 	for i := 0; i < len(args); i++ {
@@ -101,7 +97,6 @@ func parseLogArgs(args []string) (lines int, follow bool, err error) {
 	return lines, follow, nil
 }
 
-// cmdLogs follows the log file, printing the tail first.
 func (a *app) cmdLogs(args []string) int {
 	n, follow, err := parseLogArgs(args)
 	if err != nil {
@@ -161,7 +156,6 @@ func (a *app) cmdLogs(args []string) int {
 // separately. A pass that finds nothing changed paints nothing at all.
 const watchInterval = time.Second
 
-// cmdWatch redraws the dashboard until interrupted.
 func (a *app) cmdWatch(args []string) int {
 	_ = args
 	if !a.out.Color {
@@ -208,7 +202,6 @@ func (a *app) cmdWatch(args []string) int {
 	}
 }
 
-// reload picks up config edits and a resized terminal between redraws.
 func (a *app) reload() {
 	cfg, err := config.Load(a.p.Config)
 	a.cfg, a.configErr = cfg, err

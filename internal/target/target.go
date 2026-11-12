@@ -61,13 +61,12 @@ func ResolveLocal(
 	ghc *gh.Client,
 	gitc git.G,
 	repoRoot string,
-	baseBranch string,
 ) (Target, error) {
 	branch, err := gitc.CurrentBranch(ctx, repoRoot)
 	if err != nil {
 		return Target{}, err
 	}
-	return resolveBranch(ctx, ghc, gitc, repoRoot, branch, baseBranch, true)
+	return resolveBranch(ctx, ghc, gitc, repoRoot, branch, "", true)
 }
 
 // ResolvePinned builds a branch-only target for a head that exists only in the
@@ -94,18 +93,9 @@ func ResolvePinned(
 	if err != nil {
 		return Target{}, err
 	}
-	pr := gh.FullPR{
-		Title:       branch,
-		State:       "BRANCH",
-		HeadRefName: branch,
-		HeadRefOid:  headSHA,
-		BaseRefName: baseBranch,
-		BaseRefOid:  baseSHA,
-	}
-	return Target{PR: pr, BranchOnly: true}, nil
+	return branchTarget(branch, headSHA, baseBranch, baseSHA), nil
 }
 
-// resolveBranch builds the branch-only target both entry points share.
 func resolveBranch(
 	ctx context.Context,
 	ghc *gh.Client,
@@ -154,8 +144,7 @@ func resolveBranch(
 			// headSHA came from ls-remote and may not exist in the local object
 			// database yet; fetch the branch so the ancestor check below has
 			// the commit to compare against.
-			if ferr := gitc.Fetch(ctx, repoRoot, "origin",
-				"+refs/heads/"+branch+":refs/remotes/origin/"+branch); ferr != nil {
+			if ferr := gitc.FetchBranch(ctx, repoRoot, branch); ferr != nil {
 				return Target{}, ferr
 			}
 			// A checkout that is merely behind origin loses nothing: the run
@@ -174,15 +163,17 @@ func resolveBranch(
 		}
 	}
 
-	pr := gh.FullPR{
+	return branchTarget(branch, headSHA, baseBranch, baseSHA), nil
+}
+
+func branchTarget(branch, headSHA, baseBranch, baseSHA string) Target {
+	return Target{BranchOnly: true, PR: gh.FullPR{
 		Title:       branch,
-		State:       "BRANCH",
 		HeadRefName: branch,
 		HeadRefOid:  headSHA,
 		BaseRefName: baseBranch,
 		BaseRefOid:  baseSHA,
-	}
-	return Target{PR: pr, BranchOnly: true}, nil
+	}}
 }
 
 func pushedHead(ctx context.Context, gitc git.G, repoRoot, branch string) (string, error) {

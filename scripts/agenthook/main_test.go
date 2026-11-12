@@ -13,6 +13,19 @@ import (
 	"testing"
 )
 
+// TestMain keeps git away from the developer's configuration and from any
+// repository the tests were started in: a global hooksPath, commit template or
+// GIT_DIR inherited from a git hook would otherwise change what every test
+// repository does.
+func TestMain(m *testing.M) {
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"} {
+		_ = os.Unsetenv(name)
+	}
+	os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	os.Exit(m.Run())
+}
+
 func TestAgentHookChecksOnlyRelevantSessionChanges(t *testing.T) {
 	t.Setenv("GO111MODULE", "off")
 	repo := newGitRepository(t)
@@ -103,8 +116,14 @@ func TestAgentHookChecksIgnoredGoChanges(t *testing.T) {
 	assertFileContents(t, filepath.Join(repo, ".check-ran"), "x")
 }
 
-func TestWorktreeFingerprintHashesSymlinkTextWithoutFollowingIt(t *testing.T) {
+// A symlink counts as its target text, never as what it points at: a file
+// outside the worktree changing is not a change this session made, while
+// repointing the link is.
+func TestAgentHookComparesSymlinkTextWithoutFollowingIt(t *testing.T) {
 	repo := newGitRepository(t)
+	writeTestFile(t, repo, "Makefile", ".PHONY: check\ncheck:\n\t@printf x >> .check-ran\n")
+	git(t, repo, "add", "Makefile")
+	git(t, repo, "commit", "-m", "initial")
 	external := filepath.Join(t.TempDir(), "outside.go")
 	if err := os.WriteFile(external, []byte("first contents\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -117,20 +136,12 @@ func TestWorktreeFingerprintHashesSymlinkTextWithoutFollowingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	before, err := worktreeFingerprint(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runAgentHook(t, repo, "symlink-session", "start", false, 0)
 	if err := os.WriteFile(external, []byte("second contents\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	afterContentsChange, err := worktreeFingerprint(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, afterContentsChange) {
-		t.Fatal("fingerprint included contents outside the worktree")
-	}
+	runAgentHook(t, repo, "symlink-session", "stop", false, 0)
+	assertFileMissing(t, filepath.Join(repo, ".check-ran"))
 
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
@@ -138,13 +149,8 @@ func TestWorktreeFingerprintHashesSymlinkTextWithoutFollowingIt(t *testing.T) {
 	if err := os.Symlink("different-target.go", link); err != nil {
 		t.Fatal(err)
 	}
-	afterTargetChange, err := worktreeFingerprint(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Equal(before, afterTargetChange) {
-		t.Fatal("fingerprint ignored changed symlink text")
-	}
+	runAgentHook(t, repo, "symlink-session", "stop", false, 0)
+	assertFileContents(t, filepath.Join(repo, ".check-ran"), "x")
 }
 
 func TestHookCommandsExitOutsideRepository(t *testing.T) {
@@ -174,6 +180,9 @@ func TestHookCommandsExitOutsideRepository(t *testing.T) {
 					}
 					cmd := exec.Command("/bin/sh", "-c", hook.Command)
 					cmd.Dir = t.TempDir()
+					// A temporary directory that happens to sit inside a
+					// repository must still read as outside one.
+					cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+filepath.Dir(cmd.Dir))
 					cmd.Stdin = strings.NewReader(`{"session_id":"outside","cwd":"/"}`)
 					if output, err := cmd.CombinedOutput(); err != nil {
 						t.Fatalf("%s %s failed outside a repository: %v\n%s", name, event, err, output)

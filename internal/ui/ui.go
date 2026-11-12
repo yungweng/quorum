@@ -22,9 +22,9 @@ type Writer struct {
 	Color bool
 	Links bool
 	Width int
-	// Height is the terminal's row count, 0 when it is not a terminal. Only
+	// height is the terminal's row count, 0 when it is not a terminal. Only
 	// watch uses it, to keep a frame from scrolling the screen it is painting.
-	Height int
+	height int
 	// Wide lifts the MaxWidth cap. The cap exists because bare rules and right
 	// aligned fields running to the edge of a very wide screen read as a
 	// mistake; a framed panel owns its edges, so the boxed dashboard spans the
@@ -45,13 +45,12 @@ func New(out *os.File) *Writer {
 		return w
 	}
 	w.Color = true
-	// OSC 8 hyperlinks are ignored by terminals that do not know them, but a
-	// few older ones print the escape instead, so keep it to a terminal that
-	// announces itself.
+	// OSC 8 hyperlinks go to every colour terminal. Terminals that do not
+	// know them ignore the escape, though a few older ones print it.
 	w.Links = true
 	if width, height, err := term.GetSize(fd); err == nil && width > 20 {
 		w.Width = width
-		w.Height = height
+		w.height = height
 	}
 	return w
 }
@@ -154,10 +153,9 @@ func (w *Writer) Section(title string, count int, total int) {
 }
 
 // Ago renders how long ago t was, in the shortest form that stays unambiguous.
-func Ago(t time.Time) string { return AgoFrom(time.Now(), t) }
+func Ago(t time.Time) string { return agoFrom(time.Now(), t) }
 
-// AgoFrom is Ago with an explicit now, so it can be tested.
-func AgoFrom(now, t time.Time) string {
+func agoFrom(now, t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
@@ -244,8 +242,8 @@ func (w *Writer) Paint(frame string) {
 	// the debris this is meant to avoid. Cutting whole lines keeps every escape
 	// sequence balanced. A line wider than the terminal still wraps and counts
 	// as one, so callers keep their lines inside Width.
-	if w.Height > 0 && len(lines) > w.Height {
-		lines = lines[:w.Height]
+	if w.height > 0 && len(lines) > w.height {
+		lines = lines[:w.height]
 	}
 	var b strings.Builder
 	b.WriteString("\x1b[H")

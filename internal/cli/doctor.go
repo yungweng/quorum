@@ -11,9 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/runner"
-	"github.com/yungweng/quorum/internal/state"
+	"github.com/yungweng/quorum/internal/engine/spec"
+	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
@@ -103,48 +104,47 @@ func (a *app) runChecks() []check {
 
 	widenPath()
 
-	// External tools.
-	for _, spec := range []struct{ name, why string }{
-		{"gh", "GitHub access"},
-		{"git", "cloning and fetching"},
-
-		{"codex", "the reviewer panel runs it"},
-		{"claude", "the claude engine runs it"},
-		{"grok", "the grok engine runs it"},
-		{"direnv", "entering project environments"},
-	} {
-		path, err := exec.LookPath(spec.name)
+	type need struct {
+		name, why string
+		eng       spec.Engine
+	}
+	needs := []need{
+		{"gh", "GitHub access", spec.Engine{}},
+		{"git", "cloning and fetching", spec.Engine{}},
+	}
+	for _, e := range spec.All {
+		why := "the " + e.Name + " engine runs it"
+		if e.Name == spec.Codex {
+			why = "the reviewer panel runs it"
+		}
+		needs = append(needs, need{e.Bin, why, e})
+	}
+	needs = append(needs, need{"direnv", "entering project environments", spec.Engine{}})
+	for _, t := range needs {
+		path, err := exec.LookPath(t.name)
 		if err != nil {
-			level, fix := 2, "install "+spec.name
-			if spec.name == "direnv" {
+			level, fix := 2, "install "+t.name
+			if t.name == "direnv" {
 				// Only projects with an .envrc need it.
 				// REVIEW_ARGS is retired and only --dry-run is still read out of
 				// it, so pointing at it here would be advice that does nothing.
 				level, fix = 1, "install direnv, or pass --no-direnv"
 			}
-			if spec.name == "claude" {
-				// Only needed when an engine setting selects it.
-				level, fix = 1, "install Claude Code, or leave REVIEW_ENGINE/FIX_ENGINE at codex"
-				if a.cfg.ReviewEngine == config.EngineClaude || a.cfg.FixEngine == config.EngineClaude {
-					level, fix = 2, "install Claude Code; your config selects the claude engine"
+			if e := t.eng; e.Name != "" && e.Name != spec.Codex {
+				level, fix = 1, "install "+e.Install+", or leave REVIEW_ENGINE/FIX_ENGINE at "+spec.Codex
+				if a.cfg.ReviewEngine == e.Name || a.cfg.FixEngine == e.Name {
+					level, fix = 2, "install "+e.Install+"; your config selects the "+e.Name+" engine"
 				}
 			}
-			if spec.name == "grok" {
-				level, fix = 1, "install the Grok CLI, or leave REVIEW_ENGINE/FIX_ENGINE at codex"
-				if a.cfg.ReviewEngine == config.EngineGrok || a.cfg.FixEngine == config.EngineGrok {
-					level, fix = 2, "install the Grok CLI; your config selects the grok engine"
-				}
-			}
-			out = append(out, check{spec.name, "not found, needed for " + spec.why, level, fix})
+			out = append(out, check{t.name, "not found, needed for " + t.why, level, fix})
 			continue
 		}
-		out = append(out, check{spec.name, versionOf(path), 0, ""})
+		out = append(out, check{t.name, versionOf(path), 0, ""})
 	}
 	if runtime.GOOS == "darwin" {
 		out = append(out, notificationChecks(a.cfg)...)
 	}
 
-	// GitHub authentication.
 	if ghBin, err := exec.LookPath("gh"); err == nil {
 		client := a.newGH(ghBin)
 		client.Log = nil
@@ -155,14 +155,13 @@ func (a *app) runChecks() []check {
 		}
 	}
 
-	// The agent and whether it is actually working.
 	switch {
 	case runtime.GOOS != "darwin":
 		out = append(out, check{"agent", "launchd is macOS only, run `quorum poll` from cron", 1, ""})
 	case !a.agentLoaded():
 		out = append(out, check{"agent", "not installed", 1, "quorum install"})
 	default:
-		at, open, ok := a.lastPoll()
+		at, open, ok := agentstate.ReadHeartbeat(a.p.LastPollFile())
 		switch {
 		case !ok:
 			out = append(out, check{"agent", "loaded, but has not completed a poll yet", 1, "quorum poll"})
@@ -178,26 +177,22 @@ func (a *app) runChecks() []check {
 		}
 	}
 
-	// Config.
 	if a.configErr != nil {
 		out = append(out, check{"config", a.configErr.Error(), 1, "quorum setup, or fix the file by hand"})
 	} else {
 		out = append(out, check{"config", a.p.Config, 0, ""})
 	}
 
-	// Recent GitHub trouble, straight from the log.
-	if retries := a.countLog("retrying in"); retries > 0 {
+	if retries := a.countLog(gh.RetryLogPhrase); retries > 0 {
 		out = append(out, check{"network", fmt.Sprintf("%d GitHub call(s) had to be retried recently", retries), 1,
 			"nothing to do, quorum retries by itself"})
 	}
 
-	// Interrupted reviews.
-	if n := a.orphanCount(); n > 0 {
+	if n := len(a.orphans()); n > 0 {
 		out = append(out, check{"reviews", fmt.Sprintf("%d review(s) recorded as running with no process left", n), 1,
 			"quorum doctor --fix"})
 	}
 
-	// Disk.
 	size := a.cacheSize()
 	limit := a.budgetBytes()
 	switch {
@@ -213,7 +208,6 @@ func (a *app) runChecks() []check {
 		out = append(out, check{"backups", "the review cache is being backed up by Time Machine", 1, "quorum doctor --fix"})
 	}
 
-	// Scheduling priority.
 	if a.cfg.Nice <= 0 {
 		out = append(out, check{"priority", "reviews run at normal priority", 1, "set NICE=10 in the config"})
 	} else {
@@ -256,7 +250,6 @@ func temporaryNotificationCheck() check {
 	return check{"notifications", versionOf(path), 0, ""}
 }
 
-// versionOf asks a tool for its version, falling back to its path.
 func versionOf(path string) string {
 	out, err := exec.Command(path, "--version").Output()
 	if err != nil {
@@ -269,30 +262,10 @@ func versionOf(path string) string {
 	return line
 }
 
-// countLog counts how often a phrase appears in the recent log.
 func (a *app) countLog(phrase string) int {
 	n := 0
 	for _, line := range a.log.Tail(500) {
 		if strings.Contains(line, phrase) {
-			n++
-		}
-	}
-	return n
-}
-
-// orphanCount counts records that claim to be running with no live process.
-func (a *app) orphanCount() int {
-	file, err := state.Read(a.p.StateFile)
-	if err != nil {
-		return 0
-	}
-	live := map[string]bool{}
-	for _, m := range runner.Live(a.p.RunningDir) {
-		live[m.Key] = true
-	}
-	n := 0
-	for key, rec := range file.PRs {
-		if rec.Status == state.Running && !live[key] {
 			n++
 		}
 	}
@@ -312,7 +285,6 @@ func isTimeMachineIncluded(dir string) bool {
 	return strings.Contains(string(out), "[Included]")
 }
 
-// totalMemory reports the machine's physical memory.
 func totalMemory() (int64, bool) {
 	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
 	if err != nil {

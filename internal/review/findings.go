@@ -8,14 +8,23 @@ import (
 	"strings"
 )
 
-// Sections are the five headings the aggregated comment must use, in this
+// sections are the five headings the aggregated comment must use, in this
 // order. The whole machine-readable side of quorum rests on this contract:
 // findings.json is produced by counting bullets under these headings, and the
 // fix pipeline decides whether to keep looping from those counts.
-var Sections = []string{"Summary", "Blockers", "Critical", "Suggestions", "Questions"}
+var sections = []string{"Summary", "Blockers", "Critical", "Suggestions", "Questions"}
 
 // countedSections are the four that hold findings. Summary is prose.
 var countedSections = []string{"Blockers", "Critical", "Suggestions", "Questions"}
+
+// The prompts name the sections from the same lists: sectionHeadings as
+// "## Summary, ## Blockers, ...", findingSections as "Blockers, ..., and
+// Questions".
+var (
+	sectionHeadings = "## " + strings.Join(sections, ", ## ")
+	findingSections = strings.Join(countedSections[:len(countedSections)-1], ", ") +
+		", and " + countedSections[len(countedSections)-1]
+)
 
 // Findings is the machine-readable summary written next to the comment.
 type Findings struct {
@@ -39,6 +48,13 @@ type Findings struct {
 // they are open-ended by nature, so treating them as blocking would mean the
 // loop can chase moving targets forever and never converge.
 func (f Findings) Blocking() int { return f.Blockers + f.Critical }
+
+// MergeEligible is deliberately the same threshold as loop convergence:
+// questions and suggestions do not block auto-merge, an unposted or
+// branch-only review does.
+func (f Findings) MergeEligible() bool {
+	return f.PR > 0 && f.Posted && f.Blocking() == 0
+}
 
 // Summary renders the counts the way both the status output and the
 // notifications phrase them. Empty categories are left out: a reader scanning
@@ -79,11 +95,11 @@ var (
 	summaryHeadingStart = regexp.MustCompile(`(?i)##[ \t]+Summary\b`)
 )
 
-// NormalizeCommentFile rewrites path so the postable report starts at its
+// normalizeCommentFile rewrites path so the postable report starts at its
 // first ## Summary heading. Engines that emit tool chatter or a short plan
 // before the five sections still yield a machine-readable comment; a file with
-// no Summary heading is left alone so ValidateComment can reject it.
-func NormalizeCommentFile(path string) error {
+// no Summary heading is left alone so validateComment can reject it.
+func normalizeCommentFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading the comment to normalize: %w", err)
@@ -98,13 +114,11 @@ func NormalizeCommentFile(path string) error {
 	return nil
 }
 
-// normalizeAndValidateComment strips preamble before the five-section report
-// and then applies the postable-shape gate.
 func normalizeAndValidateComment(path string) error {
-	if err := NormalizeCommentFile(path); err != nil {
+	if err := normalizeCommentFile(path); err != nil {
 		return err
 	}
-	return ValidateComment(path)
+	return validateComment(path)
 }
 
 // normalizeComment drops everything before the first ## Summary heading so
@@ -121,13 +135,13 @@ func normalizeComment(text string) string {
 	return out + "\n"
 }
 
-// ValidateComment checks that the aggregator produced something postable.
+// validateComment checks that the aggregator produced something postable.
 //
 // Every rule here exists because findings.json is only trustworthy when the
 // structure is exactly as specified: a renamed heading or a finding written as
 // prose instead of a bullet would silently count as zero findings, and a run
 // with real blockers would report itself clean.
-func ValidateComment(path string) error {
+func validateComment(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading the aggregated comment: %w", err)
@@ -143,7 +157,7 @@ func ValidateComment(path string) error {
 	}
 
 	present := headings(text)
-	for _, want := range Sections {
+	for _, want := range sections {
 		if !present[strings.ToLower(want)] {
 			return fmt.Errorf("aggregator output is missing the '## %s' section", want)
 		}
@@ -156,8 +170,7 @@ func ValidateComment(path string) error {
 	return nil
 }
 
-// Count returns the number of top-level bullets under a heading.
-func Count(text, heading string) int {
+func countSection(text, heading string) int {
 	n := 0
 	forEachLineIn(text, heading, func(line string) {
 		if bulletRe.MatchString(line) {
@@ -167,13 +180,12 @@ func Count(text, heading string) int {
 	return n
 }
 
-// CountFile counts a heading's bullets in a file on disk.
-func CountFile(path, heading string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
+// countFindings sets the four counts from the bullets under countedSections,
+// which lists the headings in the order of the fields below.
+func (f *Findings) countFindings(comment string) {
+	for i, n := range []*int{&f.Blockers, &f.Critical, &f.Suggestions, &f.Questions} {
+		*n = countSection(comment, countedSections[i])
 	}
-	return Count(string(data), heading)
 }
 
 // writeVerificationChanges records every finding block that differs between
@@ -312,8 +324,6 @@ var noneRe = regexp.MustCompile(`(?i)^none[.!]?([ \t]|$)`)
 
 func isNone(line string) bool { return noneRe.MatchString(strings.TrimSpace(line)) }
 
-// forEachLineIn calls fn for every line under the given level-2 heading, up to
-// the next level-2 heading.
 func forEachLineIn(text, heading string, fn func(string)) {
 	want := strings.ToLower(heading)
 	inside := false

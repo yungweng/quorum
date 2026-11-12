@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yungweng/quorum/internal/firstline"
 	"github.com/yungweng/quorum/internal/gh"
-	"github.com/yungweng/quorum/internal/review"
 )
 
 const approvalText = "No blockers or critical findings found."
@@ -29,14 +29,14 @@ const (
 	Queued = "queued for merge"
 )
 
-// ErrMergeNotReady means GitHub refused the exact-head merge because branch
+// errMergeNotReady means GitHub refused the exact-head merge because branch
 // requirements have not settled yet. Callers may wait for checks and retry.
-var ErrMergeNotReady = errors.New("reviewed head is not ready to merge")
+var errMergeNotReady = errors.New("reviewed head is not ready to merge")
 var errHeadDrift = errors.New("pull request head moved after review")
 
 type Result struct {
-	ApprovalAttempted bool
-	ApprovalCreated   bool
+	approvalAttempted bool
+	approvalCreated   bool
 	Status            string
 	// QueuePosition is set with Queued, and is zero when GitHub reported no
 	// position for the entry.
@@ -44,26 +44,51 @@ type Result struct {
 	approvalReviewID int64
 }
 
-// Eligible is deliberately the same threshold as loop convergence. Questions
-// and suggestions do not block; an unposted or branch-only review does.
-func Eligible(findings review.Findings) bool {
-	return findings.PR > 0 && findings.Posted && findings.Blocking() == 0
+// The reasons Decide gives for not merging a run auto-merge otherwise
+// applies to.
+const (
+	// The merge path refuses drafts outright; a converged draft run must not
+	// turn that refusal into a failure of the whole run.
+	skipDraft = "the PR is a draft"
+	// Auto-merge approves the reviewed head only. The suggestion round pushed
+	// commits past it, so merging now would claim a review that never saw
+	// them; the drift refusal would fail the run for the same reason, less
+	// legibly.
+	skipSuggestionCommits = "the suggestion round pushed commits the final review has not seen"
+)
+
+// Decide says whether a finished run may be auto-merged. It needs the
+// source-specific option and the global posting policy, because fix loops post
+// their own reviews and a posted review alone cannot represent POST=0. eligible
+// is review.Findings.MergeEligible. When auto-merge applies but must not run,
+// merge is false and skip names the reason; when it does not apply at all,
+// skip is empty.
+func Decide(enabled, post, eligible, isDraft, suggestionCommits bool) (merge bool, skip string) {
+	switch {
+	case !enabled || !post || !eligible:
+		return false, ""
+	case isDraft:
+		return false, skipDraft
+	case suggestionCommits:
+		return false, skipSuggestionCommits
+	}
+	return true, ""
 }
 
-// Allowed also requires the source-specific option and global posting policy.
-// Fix loops post their own reviews, so Findings.Posted alone cannot represent
-// POST=0 at these call sites.
-func Allowed(enabled, post bool, findings review.Findings) bool {
-	return enabled && post && Eligible(findings)
+// ReadyNoticeDue says whether a finished run owes the ready-to-merge notice:
+// the option is on, auto-merge left no status, and the review would have
+// allowed a merge. A draft is not ready to merge.
+func ReadyNoticeDue(enabled bool, mergeStatus string, eligible, isDraft bool) bool {
+	return enabled && mergeStatus == "" && eligible && !isDraft
 }
 
-// Run binds both side effects to reviewedSHA. It is safe to repeat: an
+// run binds both side effects to reviewedSHA. It is safe to repeat: an
 // existing approval for that commit is reused, and a pull request GitHub has
 // already merged or already queued at that commit is success.
 // A non-empty allowedAuthors list limits merging to those PR authors; a pull
 // request from anyone else keeps its clean review and waits for a person,
 // exactly like an own PR whose branch requires an approving review.
-func Run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string, allowedAuthors []string) (Result, error) {
+func run(ctx context.Context, client *gh.Client, repo string, number int, reviewedSHA string, allowedAuthors []string) (Result, error) {
 	var result Result
 	mergeMethod := gh.MergeMethodMerge
 	queueEnabled := false
@@ -181,7 +206,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 			}
 			return result, err
 		}
-		result.ApprovalAttempted = true
+		result.approvalAttempted = true
 		createdReview, err = client.ApproveHead(ctx, repo, number, reviewedSHA, approvalBody)
 		if err != nil {
 			approvalErr := fmt.Errorf("approving reviewed head: %w", err)
@@ -190,7 +215,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 			}
 			return result, approvalErr
 		}
-		result.ApprovalCreated = true
+		result.approvalCreated = true
 		result.approvalReviewID = createdReview.ID
 	}
 
@@ -241,7 +266,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 			return result, nil
 		}
 		if mergeReadinessPending(current, mergeErr) {
-			return result, fmt.Errorf("%w: %v", ErrMergeNotReady, mergeErr)
+			return result, fmt.Errorf("%w: %v", errMergeNotReady, mergeErr)
 		}
 		return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
 			fmt.Errorf("merging reviewed head: %w", mergeErr))
@@ -250,7 +275,7 @@ func Run(ctx context.Context, client *gh.Client, repo string, number int, review
 	return result, nil
 }
 
-// reuseQueueEntry makes Run repeatable on a queue-required branch. An entry for
+// reuseQueueEntry makes run repeatable on a queue-required branch. An entry for
 // the reviewed head means the work is already done, exactly as an already
 // merged pull request does; an entry for another commit is head drift, because
 // only a push after the review could have produced it.
@@ -308,7 +333,7 @@ func enqueue(ctx context.Context, client *gh.Client, repo string, number int, pu
 		}
 	}
 	if branchRulesUnsettled(current) {
-		return result, fmt.Errorf("%w: %v", ErrMergeNotReady, enqueueErr)
+		return result, fmt.Errorf("%w: %v", errMergeNotReady, enqueueErr)
 	}
 	return result, dismissCreatedApprovalAfterFailure(ctx, client, repo, number, &result,
 		fmt.Errorf("queueing reviewed head: %w", enqueueErr))
@@ -347,8 +372,7 @@ func branchRulesUnsettled(current gh.Details) bool {
 		current.Mergeable == "UNKNOWN" && current.MergeStateStatus == "UNKNOWN"
 }
 
-// authorAllowed treats an empty whitelist as no restriction. Logins compare
-// case-insensitively because GitHub logins are case-insensitive.
+// GitHub logins are case-insensitive.
 func authorAllowed(login string, allowed []string) bool {
 	if len(allowed) == 0 {
 		return true
@@ -370,11 +394,11 @@ func latestReviewsRequestChanges(reviews []gh.LatestReview, login string) bool {
 	return false
 }
 
-// RetryWhenReady waits for checks, then retries the exact-head merge. A green
-// check result can precede GitHub's mergeability update, so ErrMergeNotReady
+// retryWhenReady waits for checks, then retries the exact-head merge. A green
+// check result can precede GitHub's mergeability update, so errMergeNotReady
 // remains retryable until waitTimeout expires. A zero timeout waits until the
 // caller cancels the context.
-func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo string, number int, reviewedSHA string, allowedAuthors []string, initial Result, waitTimeout time.Duration) (Result, error) {
+func retryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo string, number int, reviewedSHA string, allowedAuthors []string, initial Result, waitTimeout time.Duration) (Result, error) {
 	var deadline time.Time
 	if waitTimeout > 0 {
 		deadline = time.Now().Add(waitTimeout)
@@ -429,12 +453,12 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 		var delay time.Duration
 		switch checkState {
 		case gh.ChecksPass:
-			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
+			result, mergeErr := run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
 			combined = combineResults(combined, result)
 			if mergeErr == nil {
 				return combined, nil
 			}
-			if !errors.Is(mergeErr, ErrMergeNotReady) {
+			if !errors.Is(mergeErr, errMergeNotReady) {
 				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			if deadlineExpired(deadline) {
@@ -443,14 +467,14 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 			delay = retryDelay(5*time.Second, waitTimeout)
 		case gh.ChecksFail:
 			return stopRetry(ctx, client, repo, number, combined,
-				fmt.Errorf("required checks failed: %s", firstLine(output)))
+				fmt.Errorf("required checks failed: %s", firstline.OrNoOutput(output)))
 		case gh.ChecksNone:
-			result, mergeErr := Run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
+			result, mergeErr := run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
 			combined = combineResults(combined, result)
 			if mergeErr == nil {
 				return combined, nil
 			}
-			if !errors.Is(mergeErr, ErrMergeNotReady) || deadlineExpired(deadline) {
+			if !errors.Is(mergeErr, errMergeNotReady) || deadlineExpired(deadline) {
 				return stopRetry(ctx, client, repo, number, combined, mergeErr)
 			}
 			delay = retryDelay(20*time.Second, waitTimeout)
@@ -471,6 +495,32 @@ func RetryWhenReady(ctx context.Context, client *gh.Client, checksDir, repo stri
 	}
 }
 
+// Complete merges the reviewed head, waiting for required checks when GitHub
+// is not ready yet. onWait, when set, is called once before that wait starts.
+//
+// A failure says how far the approval got, because that decides what a human
+// has to clean up: nothing, an approval that stands on the pull request, or
+// one whose fate GitHub never confirmed.
+func Complete(ctx context.Context, client *gh.Client, checksDir, repo string, number int, reviewedSHA string, allowedAuthors []string, waitTimeout time.Duration, onWait func()) (Result, error) {
+	result, err := run(ctx, client, repo, number, reviewedSHA, allowedAuthors)
+	if errors.Is(err, errMergeNotReady) {
+		if onWait != nil {
+			onWait()
+		}
+		result, err = retryWhenReady(ctx, client, checksDir, repo, number, reviewedSHA, allowedAuthors, result, waitTimeout)
+	}
+	switch {
+	case err == nil:
+		return result, nil
+	case result.approvalCreated:
+		return result, fmt.Errorf("auto-merge failed after the approval was posted: %w", err)
+	case result.approvalAttempted:
+		return result, fmt.Errorf("auto-merge failed and GitHub's approval result is unknown: %w", err)
+	default:
+		return result, fmt.Errorf("auto-merge failed: %w", err)
+	}
+}
+
 func retryDelay(limit, waitTimeout time.Duration) time.Duration {
 	if waitTimeout <= 0 {
 		return limit
@@ -488,8 +538,8 @@ func combineResults(first, second Result) Result {
 		reviewID = second.approvalReviewID
 	}
 	return Result{
-		ApprovalAttempted: first.ApprovalAttempted || second.ApprovalAttempted,
-		ApprovalCreated:   first.ApprovalCreated || second.ApprovalCreated,
+		approvalAttempted: first.approvalAttempted || second.approvalAttempted,
+		approvalCreated:   first.approvalCreated || second.approvalCreated,
 		Status:            second.Status,
 		QueuePosition:     second.QueuePosition,
 		approvalReviewID:  reviewID,
@@ -511,7 +561,7 @@ func reconcileApprovalFailure(ctx context.Context, client *gh.Client, repo strin
 		if candidate.ID != 0 && !existed && candidate.State == "APPROVED" &&
 			candidate.CommitID == reviewedSHA && candidate.Body == approvalBody &&
 			strings.EqualFold(candidate.User.Login, login) {
-			result.ApprovalCreated = true
+			result.approvalCreated = true
 			result.approvalReviewID = candidate.ID
 			break
 		}
@@ -613,15 +663,4 @@ func dismissCreatedApprovalWith(ctx context.Context, client *gh.Client, repo str
 	}
 	result.approvalReviewID = 0
 	return cause
-}
-
-func firstLine(text string) string {
-	text = strings.TrimSpace(text)
-	if line, _, ok := strings.Cut(text, "\n"); ok {
-		return line
-	}
-	if text == "" {
-		return "no output"
-	}
-	return text
 }

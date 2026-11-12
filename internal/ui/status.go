@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// spinFrames is the braille spinner both shell tools used.
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // Symbols degrade to ASCII without a terminal, so a piped log stays readable.
@@ -42,10 +41,6 @@ func (w *Writer) SymSkip() string {
 }
 
 // Rule prints a horizontal separator across the block width.
-//
-// It used to be sixty columns whatever the terminal did, which on a wide
-// screen stops halfway under content that keeps going and is the single most
-// obvious sign of output that was never fitted to its terminal.
 func (w *Writer) Rule() {
 	unit := "-"
 	if w.Color {
@@ -96,7 +91,6 @@ type Status struct {
 
 func (w *Writer) Status() *Status { return &Status{w: w} }
 
-// Draw replaces the status line with text.
 func (s *Status) Draw(text string) {
 	if !s.w.Color {
 		return
@@ -121,7 +115,6 @@ func (s *Status) Clear() {
 	s.shown = false
 }
 
-// Spinner returns the current frame of the braille spinner for tick.
 func Spinner(tick int) string { return spinFrames[tick%len(spinFrames)] }
 
 // Bar draws a proportional progress bar n columns wide.
@@ -151,8 +144,6 @@ type Panel struct {
 
 func (w *Writer) Panel() *Panel { return &Panel{w: w} }
 
-// Draw replaces the panel's previous content with lines.
-//
 // Movement is relative to where the cursor is, so a panel near the bottom of
 // the screen survives the terminal scrolling under it. Each line erases its own
 // tail, and one erase at the end removes rows a previous, taller frame left
@@ -179,7 +170,6 @@ func (p *Panel) Draw(lines []string) {
 // the finished reviewer list stays in the scrollback.
 func (p *Panel) Freeze() { p.lines = 0 }
 
-// Clear removes the panel entirely.
 func (p *Panel) Clear() {
 	if !p.w.Color || p.lines == 0 {
 		return

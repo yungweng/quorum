@@ -1,10 +1,8 @@
 // Package paths resolves every file quorum reads or writes.
 //
-// The three tools quorum replaces kept four separate trees: prbot's config,
-// state and clones, pr-codex-review's run cache with the shared dependency
-// trees inside it, and babysit's run cache. Everything now hangs off one
-// config directory, one state directory and one cache directory, which is what
-// makes a single `quorum gc` able to reason about the whole footprint.
+// Everything hangs off one config directory, one state directory and one cache
+// directory, which is what makes a single `quorum gc` able to reason about the
+// whole footprint.
 package paths
 
 import (
@@ -27,13 +25,21 @@ type P struct {
 	RunLogDir    string
 	CloneDir     string
 
-	CacheRoot   string // everything below is under here
 	ReviewRuns  string // one directory per review run
 	BabysitRuns string // one directory per babysit run
 	DepsCache   string // shared dependency trees, keyed by lock file hash
 
 	Plist string
 }
+
+// LastPollFile is the heartbeat every finished poll writes.
+func (p P) LastPollFile() string { return filepath.Join(p.StateDir, "last-poll") }
+
+// CacheSizeFile is the last cache measurement, kept for the next process.
+func (p P) CacheSizeFile() string { return filepath.Join(p.StateDir, "cache-size") }
+
+// PollLock serialises polls.
+func (p P) PollLock() string { return filepath.Join(p.StateDir, "poll.lock") }
 
 // PlistLabel is the launchd job name. Changing it orphans installed agents,
 // which is why `quorum install` unloads the old prbot label as well.
@@ -80,11 +86,8 @@ func Resolve() P {
 		RunLogDir:    filepath.Join(stateDir, "runs"),
 		CloneDir:     env("QUORUM_CLONE_DIR", filepath.Join(cacheRoot, "repos")),
 
-		CacheRoot: cacheRoot,
-		// Run directories and the shared dependency cache are siblings. In
-		// pr-codex-review the deps tree lived inside the run cache, so the run
-		// GC had to skip over it by name; as a sibling it simply cannot be
-		// mistaken for a run.
+		// The shared dependency cache is a sibling of the run directories, so
+		// the run collector cannot mistake it for a run.
 		ReviewRuns:  filepath.Join(cacheRoot, "reviews"),
 		BabysitRuns: filepath.Join(cacheRoot, "babysit"),
 		DepsCache:   filepath.Join(cacheRoot, "deps"),
@@ -114,13 +117,17 @@ func exists(path string) bool {
 	return err == nil
 }
 
+// RunRoots lists every directory run directories are created in. They share
+// the dependency cache, so each has to be checked for live runs before a
+// shared tree is collected.
+func (p P) RunRoots() []string { return []string{p.ReviewRuns, p.BabysitRuns} }
+
 // EnsureDirs creates everything a run needs. Callers that only read state can
 // skip it; poll, review and babysit cannot.
 func (p P) EnsureDirs() error {
-	for _, d := range []string{
-		p.StateDir, p.RunningDir, p.ManualDir, p.RunLogDir, p.CloneDir,
-		p.ReviewRuns, p.BabysitRuns, p.DepsCache,
-	} {
+	dirs := append([]string{p.StateDir, p.RunningDir, p.ManualDir, p.RunLogDir, p.CloneDir},
+		append(p.RunRoots(), p.DepsCache)...)
+	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

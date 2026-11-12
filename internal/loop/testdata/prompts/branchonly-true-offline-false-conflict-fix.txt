@@ -1,0 +1,3 @@
+The pipeline started merging base branch main into branch feature/crumb-tray, but Git stopped with conflicts.
+
+Continue the active merge; do not abort or restart it. Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge main into feature/crumb-tray", and push.

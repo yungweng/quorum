@@ -4,12 +4,17 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestUnquote(t *testing.T) {
+// Values are read the way the shell read them: quotes removed, and a trailing
+// comment stripped only outside quotes. A key quorum does not know is kept and
+// written back verbatim, which shows the parsed value without reaching into
+// the struct.
+func TestLoadReadsValuesLikeTheShell(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`""`, ""},
 		{`"acme-inc myorg"`, "acme-inc myorg"},
@@ -22,34 +27,26 @@ func TestUnquote(t *testing.T) {
 		{`'single quoted'`, "single quoted"},
 		{`   spaced   `, "spaced"},
 	}
+	dir := t.TempDir()
 	for _, c := range cases {
-		if got := unquote(c.in); got != c.want {
-			t.Errorf("unquote(%q) = %q, want %q", c.in, got, c.want)
+		in, out := filepath.Join(dir, "in"), filepath.Join(dir, "out")
+		if err := os.WriteFile(in, []byte("FUTURE_KEY="+c.in+"\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
-	}
-}
-
-func TestParseLine(t *testing.T) {
-	if _, _, ok := parseLine("# just a comment"); ok {
-		t.Error("comment parsed as assignment")
-	}
-	if _, _, ok := parseLine("   "); ok {
-		t.Error("blank line parsed as assignment")
-	}
-	// Anything executable in the old shell config must be reported, not run.
-	msg, _, ok := parseLine("rm -rf /")
-	if ok {
-		t.Error("a command parsed as an assignment")
-	}
-	if !strings.Contains(msg, "not an assignment") {
-		t.Errorf("unhelpful complaint: %q", msg)
-	}
-	if _, _, ok := parseLine("export FOO=1"); ok {
-		t.Error("export line parsed as a plain assignment")
-	}
-	k, v, ok := parseLine("MAX_CODEX=8")
-	if !ok || k != "MAX_CODEX" || v != "8" {
-		t.Errorf("got %q=%q ok=%v", k, v, ok)
+		cfg, err := Load(in)
+		if err != nil {
+			t.Fatalf("Load(FUTURE_KEY=%s): %v", c.in, err)
+		}
+		if err := cfg.Save(out); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "\nFUTURE_KEY=" + strconv.Quote(c.want) + "\n"; !strings.Contains(string(b), want) {
+			t.Errorf("FUTURE_KEY=%s was written back without %q:\n%s", c.in, strings.TrimSpace(want), b)
+		}
 	}
 }
 
@@ -101,8 +98,8 @@ NOTIFY=1
 	if !cfg.SkipDrafts || !cfg.SkipOwn || !cfg.IncludeTeams || !cfg.Notify {
 		t.Errorf("flags: %+v", cfg)
 	}
-	if cfg.ReviewArgs != "--dry-run" {
-		t.Errorf("ReviewArgs = %q", cfg.ReviewArgs)
+	if cfg.reviewArgs != "--dry-run" {
+		t.Errorf("ReviewArgs = %q", cfg.reviewArgs)
 	}
 	// Keys the old file never had must fall back to the defaults.
 	if cfg.Reviewers != Default().Reviewers || cfg.Nice != Default().Nice ||
@@ -130,12 +127,26 @@ func TestDefaultAutoMergeTimeoutCoversLongChecks(t *testing.T) {
 func TestLoadReportsUnparsableLines(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config")
-	if err := os.WriteFile(path, []byte("ORGS=\"acme\"\nsource /etc/passwd\n"), 0o644); err != nil {
+	// Anything executable in the old shell config must be reported, not run.
+	// Comments and blank lines are neither.
+	body := "# a comment\n   \nORGS=\"acme\"\nsource /etc/passwd\nexport FOO=1\nMAX_CONCURRENT=8\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
 	if err == nil {
 		t.Fatal("an unparsable line was accepted silently")
+	}
+	for _, want := range []string{"line 4: not an assignment: source /etc/passwd", "line 5: not an assignment: export FOO=1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not report %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "line 1") || strings.Contains(err.Error(), "line 2") {
+		t.Errorf("a comment or blank line was reported: %v", err)
+	}
+	if cfg.MaxConcurrent != 8 {
+		t.Errorf("MAX_CONCURRENT after the bad lines = %d, want 8", cfg.MaxConcurrent)
 	}
 	// The rest of the file still has to be usable.
 	if !reflect.DeepEqual(cfg.Orgs, []string{"acme"}) {
@@ -184,7 +195,7 @@ func TestRoundTrip(t *testing.T) {
 	want.AutoMerge = true
 	want.AutoMergeTimeout = 90 * time.Minute
 	want.AutoMergeAuthors = []string{"example-user", "trusted-bot[bot]"}
-	want.Unknown = map[string]string{"FUTURE_KEY": "keep me"}
+	want.unknown = map[string]string{"FUTURE_KEY": "keep me"}
 
 	path := filepath.Join(t.TempDir(), "config")
 	if err := want.Save(path); err != nil {
@@ -197,7 +208,7 @@ func TestRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip changed the config:\n got %+v\nwant %+v", got, want)
 	}
-	if got.Unknown["FUTURE_KEY"] != "keep me" {
+	if got.unknown["FUTURE_KEY"] != "keep me" {
 		t.Error("an unrecognised key was dropped on rewrite")
 	}
 }
@@ -218,8 +229,8 @@ func TestRetiredReviewArgsMapsDryRunAndIsNotRewritten(t *testing.T) {
 	if got.Post {
 		t.Error("REVIEW_ARGS=--dry-run did not turn posting off")
 	}
-	if got.ReviewArgs != "--dry-run -n 4" {
-		t.Errorf("the old value was not preserved for the user to see: %q", got.ReviewArgs)
+	if got.reviewArgs != "--dry-run -n 4" {
+		t.Errorf("the old value was not preserved for the user to see: %q", got.reviewArgs)
 	}
 
 	if err := got.Save(path); err != nil {
@@ -229,16 +240,14 @@ func TestRetiredReviewArgsMapsDryRunAndIsNotRewritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.ReviewArgs != "" {
-		t.Errorf("REVIEW_ARGS survived a rewrite as a live setting: %q", again.ReviewArgs)
+	if again.reviewArgs != "" {
+		t.Errorf("REVIEW_ARGS survived a rewrite as a live setting: %q", again.reviewArgs)
 	}
 	if again.Post {
 		t.Error("POST was not written out, so the dry-run intent was lost on rewrite")
 	}
 }
 
-// Every review runs all of its passes at once, so the peak is simply the
-// product. Nothing divides the passes between reviews any more.
 // The three per-source auto-merge keys collapsed into one AUTO_MERGE. The old
 // agent key migrates, the other two are read no more and vanish on rewrite.
 func TestRetiredPerSourceAutoMergeKeysMigrateFromAgent(t *testing.T) {
@@ -272,6 +281,8 @@ func TestRetiredPerSourceAutoMergeKeysMigrateFromAgent(t *testing.T) {
 	}
 }
 
+// Every review runs all of its passes at once, so the peak is simply the
+// product. Nothing divides the passes between reviews any more.
 func TestCodexPeakIsTheProduct(t *testing.T) {
 	cases := []struct{ maxConcurrent, reviewers, want int }{
 		{6, 6, 36},
@@ -305,7 +316,7 @@ func TestRetiredMaxCodexIsDropped(t *testing.T) {
 	if cfg.MaxConcurrent != 3 || cfg.Reviewers != 6 {
 		t.Errorf("cfg = %+v", cfg)
 	}
-	if _, ok := cfg.Unknown["MAX_CODEX"]; ok {
+	if _, ok := cfg.unknown["MAX_CODEX"]; ok {
 		t.Error("the retired key was kept as an unknown assignment")
 	}
 	if err := cfg.Save(path); err != nil {

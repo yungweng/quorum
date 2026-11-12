@@ -25,8 +25,7 @@ func (r *run) ensureBaseCurrent() (bool, error) {
 	}
 	base := r.pr.BaseRefName
 	if err := r.waitActivity("fetching "+base+" for the base update", func() error {
-		return r.p.Git.Fetch(r.ctx, r.o.RepoRoot, "origin",
-			fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", base, base))
+		return r.p.Git.FetchBranch(r.ctx, r.o.RepoRoot, base)
 	}); err != nil {
 		return false, err
 	}
@@ -69,7 +68,7 @@ func (r *run) mergeOutdatedBase(base, baseSHA string) (bool, error) {
 		})
 	})
 	if mergeErr == nil {
-		return r.finishBaseUpdate(base, baseSHA, preSHA, "", "Base update from "+base)
+		return r.finishBaseUpdate(base, baseSHA, preSHA, "Base update from "+base)
 	}
 
 	unmerged, err := r.p.Git.UnmergedFiles(r.ctx, r.worktree)
@@ -92,9 +91,12 @@ func (r *run) resolveBaseConflicts(base, baseSHA, preSHA string) (bool, error) {
 	r.enter(PhaseConflictFix)
 	r.conflictFixes++
 	tag := fmt.Sprintf("conflict-fix-%d", r.conflictFixes)
-	if err := r.codexCall(tag, conflictFixPrompt(r.pr.Number, base, r.branch, r.target.BranchOnly, r.o.Offline)); err != nil {
+	// Not fixStep: a leftover-commit failure here is reported as the conflicts
+	// it most likely is, and the merge check below reads the head itself.
+	if err := r.codexCall(tag, conflictFixPrompt(r.prompt, base)); err != nil {
 		return false, err
 	}
+	step := fixOutcome{tag: tag, first: r.lastMsg}
 	if err := r.questionGate(tag); err != nil {
 		return false, err
 	}
@@ -105,34 +107,37 @@ func (r *run) resolveBaseConflicts(base, baseSHA, preSHA string) (bool, error) {
 		}
 		return false, err
 	}
+	step.last = r.lastMsg
 	label := fmt.Sprintf("Merge conflict fix %d", r.conflictFixes)
 	afterSHA, err := r.requireBaseUpdate(base, baseSHA, preSHA)
 	if err != nil {
 		r.rep.Notify("Konflikte", fmt.Sprintf("%s hat weiterhin ungeloeste Merge-Konflikte", r.targetLabel()))
 		return false, fmt.Errorf("%w: %v: %s", ErrConflicts, err, r.targetReference())
 	}
-	return r.publishBaseUpdate(preSHA, afterSHA, tag, label)
+	return r.publishBaseUpdate(preSHA, afterSHA, step, label)
 }
 
-func (r *run) finishBaseUpdate(base, baseSHA, preSHA, tag, label string) (bool, error) {
+func (r *run) finishBaseUpdate(base, baseSHA, preSHA, label string) (bool, error) {
 	afterSHA, err := r.requireBaseUpdate(base, baseSHA, preSHA)
 	if err != nil {
 		return false, err
 	}
-	return r.publishBaseUpdate(preSHA, afterSHA, tag, label)
+	return r.publishBaseUpdate(preSHA, afterSHA, fixOutcome{}, label)
 }
 
-func (r *run) publishBaseUpdate(preSHA, afterSHA, tag, label string) (bool, error) {
+// publishBaseUpdate records, tests and publishes a merge of the base. step is
+// the conflict session that resolved it; zero for a merge git made alone.
+func (r *run) publishBaseUpdate(preSHA, afterSHA string, step fixOutcome, label string) (bool, error) {
 	r.recordRound(label, preSHA)
 	if r.o.Offline {
-		if tag != "" {
-			r.queueFixComment(tag, label, preSHA)
+		if step.tag != "" {
+			r.queueFixComment(step, label, preSHA)
 		}
 		if err := r.ensureTestsGreen(); err != nil {
 			return false, err
 		}
 		if r.o.DivergenceScan {
-			r.traceCIFix(preSHA, afterSHA, baseUpdateTag(tag))
+			r.traceCIFix(preSHA, afterSHA, step.first)
 		}
 		return true, nil
 	}
@@ -140,19 +145,12 @@ func (r *run) publishBaseUpdate(preSHA, afterSHA, tag, label string) (bool, erro
 		return false, err
 	}
 	if r.o.DivergenceScan {
-		r.traceCIFix(preSHA, r.headSHA, baseUpdateTag(tag))
+		r.traceCIFix(preSHA, r.headSHA, step.first)
 	}
-	if tag == "" {
+	if step.tag == "" {
 		return true, nil
 	}
-	return true, r.postFixComment(tag, label, "", "", preSHA)
-}
-
-func baseUpdateTag(tag string) string {
-	if tag == "" {
-		return "base-update"
-	}
-	return tag
+	return true, r.postFixComment(step, label, "", "", preSHA)
 }
 
 func (r *run) requireBaseUpdate(base, baseSHA, preSHA string) (string, error) {

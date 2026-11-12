@@ -43,6 +43,7 @@ func TestNewCreatesClaimedDirInTempDirAndRemoveDeletesIt(t *testing.T) {
 
 func TestSweepRemovesOnlyUnclaimedQuorumDirs(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("TMPDIR", root)
 	mk := func(name string, claimFile bool) string {
 		dir := filepath.Join(root, name)
 		if err := os.Mkdir(dir, 0o755); err != nil {
@@ -65,7 +66,7 @@ func TestSweepRemovesOnlyUnclaimedQuorumDirs(t *testing.T) {
 	unclaimed := mk(Prefix+"no-claim-file", false)
 	other := mk("other-tool", true)
 
-	if got := sweep(root); got != 1 {
+	if got := Sweep(); got != 1 {
 		t.Fatalf("sweep removed %d dirs, want 1", got)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {

@@ -11,32 +11,13 @@ import (
 
 	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/ui"
 )
-
-func TestManualCommandsDefaultToCurrentBranchPR(t *testing.T) {
-	reviewNumber, err := resolveReviewNumber(nil, "acme/api")
-	if err != nil {
-		t.Fatal(err)
-	}
-	babysitNumber, context, err := resolveBabysitTarget(nil, "acme/api")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if reviewNumber != 0 || babysitNumber != 0 {
-		t.Fatalf("default PR numbers = review %d, babysit %d; want both 0 for gh pr view in the current checkout",
-			reviewNumber, babysitNumber)
-	}
-	if len(context) != 0 {
-		t.Fatalf("babysit context = %q, want none", context)
-	}
-}
 
 func TestResolveBabysitTarget(t *testing.T) {
 	for _, test := range []struct {
@@ -46,6 +27,10 @@ func TestResolveBabysitTarget(t *testing.T) {
 		wantContext []string
 		wantErr     string
 	}{
+		{
+			// 0 lets gh pr view pick the PR of the current checkout.
+			name: "no argument selects the current branch PR",
+		},
 		{
 			name:        "explicit PR among context",
 			positionals: []string{"focus on retries", "42", "keep the API stable"},
@@ -79,7 +64,7 @@ func TestResolveBabysitTarget(t *testing.T) {
 				t.Errorf("resolveBabysitTarget(%q) number = %d, want %d",
 					test.positionals, number, test.wantNumber)
 			}
-			if !reflect.DeepEqual(context, test.wantContext) {
+			if (len(context) > 0 || len(test.wantContext) > 0) && !reflect.DeepEqual(context, test.wantContext) {
 				t.Errorf("resolveBabysitTarget(%q) context = %q, want %q",
 					test.positionals, context, test.wantContext)
 			}
@@ -125,7 +110,7 @@ func TestConvergedBabysitMergeFailureKeepsConvergedHistory(t *testing.T) {
 }
 
 func TestBabysitDivergenceFlagIsBoolean(t *testing.T) {
-	args, err := parseArgs([]string{"42", "--divergence-scan", "focus on retries"}, babysitBoolFlags)
+	args, err := parseArgs([]string{"42", "--divergence-scan", "focus on retries"}, babysitFlags)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,14 +124,14 @@ func TestBabysitDivergenceFlagIsBoolean(t *testing.T) {
 
 func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 	var out bytes.Buffer
-	rep := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+	rep := &loopTermReporter{out: plainWriter(&out)}
 	// The fix engine is named so its row asserts on a string that appears
 	// nowhere else in the header: "engine default" also occurs in the sandbox
 	// row, where it says nothing about a model.
 	rep.Header(loop.Header{
 		Repo: "acme/api", Branch: "feature", Base: "main",
-		ReviewEngine: "codex", ReviewModel: "gpt-5.6-terra", ReviewEffort: "medium",
-		Engine: "claude", Model: "", Effort: "", MaxIter: 12, FixTimeout: 2 * time.Hour,
+		Review: spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"},
+		Fix:    spec.Model{Engine: "claude"}, MaxIter: 12, FixTimeout: 2 * time.Hour,
 	})
 
 	got := out.String()
@@ -165,11 +150,11 @@ func TestBabysitHeaderSeparatesReviewAndFixModels(t *testing.T) {
 // the label alone does not say which side a step belongs to.
 func TestStepLinesNameTheModelThatRanTheStep(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
 
-	reviewModel := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "max"}
-	fixModel := engine.Model{Engine: "claude", Name: "opus", Effort: "high"}
+	reviewModel := spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "max"}
+	fixModel := spec.Model{Engine: "claude", Name: "opus", Effort: "high"}
 	rep.StepEnd("Review round 2 (cancelled)", reviewModel, 11*time.Minute, true)
 	rep.StepEnd("CI fix 1", fixModel, 11*time.Minute, true)
 
@@ -191,7 +176,7 @@ func TestStepStartImmediatelyShowsWhatIsRunning(t *testing.T) {
 	var out bytes.Buffer
 	w := (&ui.Writer{Out: os.Stdout, Color: true, Width: 100}).To(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
-	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}
+	model := spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}
 
 	rep.StepStart("Fix round 4", model)
 
@@ -207,7 +192,7 @@ func TestWarningRestoresTheActiveStep(t *testing.T) {
 	var out bytes.Buffer
 	w := (&ui.Writer{Out: os.Stdout, Color: true, Width: 100}).To(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
-	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}
+	model := spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}
 
 	rep.StepStart("Push fix 1", model)
 	out.Reset()
@@ -232,14 +217,18 @@ func TestActivityImmediatelyNamesNonModelWork(t *testing.T) {
 		t.Fatalf("Activity left the blocking operation invisible: %q", got)
 	}
 	rep.ActivityDone()
-	if rep.active.shown {
-		t.Fatal("finished activity remained live")
+	// Later output redraws whatever is still live below it; a finished
+	// activity must not come back.
+	out.Reset()
+	rep.Warn("push rejected before it reached the remote")
+	if got := ui.StripANSI(out.String()); strings.Contains(got, "pre-push verification") {
+		t.Fatalf("finished activity was redrawn: %q", got)
 	}
 }
 
 func TestActivityTicksDoNotFillPipedOutput(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
 
 	rep.Activity("running pre-push verification", 0)
@@ -284,26 +273,26 @@ func TestUnsetModelRowsNameWhoDecides(t *testing.T) {
 		rows[s.name] = s
 	}
 	cfg := a.cfg
-	cfg.ReviewEngine, cfg.FixEngine = config.EngineClaude, config.EngineClaude
+	cfg.ReviewEngine, cfg.FixEngine = spec.Claude, spec.Claude
 	cfg.ReviewModel, cfg.ReviewEffort = "", ""
 	cfg.FixModel, cfg.FixEffort = "", ""
 
 	got := rows["review model"].value(cfg)
-	if !strings.Contains(got, review.ClaudeDefaultModel) || !strings.Contains(got, "quorum's default") {
+	if !strings.Contains(got, spec.Get(spec.Claude).ReviewModel) || !strings.Contains(got, "quorum's default") {
 		t.Errorf("review model value = %q", got)
 	}
 	if got := rows["fix model"].value(cfg); !strings.Contains(got, "claude's own choice") {
 		t.Errorf("fix model value = %q", got)
 	}
-	cfg.ReviewEngine = config.EngineCodex
-	if got := rows["review model"].value(cfg); !strings.Contains(got, review.DefaultModel) ||
-		!strings.Contains(got, review.DefaultEffort) {
+	cfg.ReviewEngine = spec.Codex
+	if got := rows["review model"].value(cfg); !strings.Contains(got, spec.Get(spec.Codex).ReviewModel) ||
+		!strings.Contains(got, spec.Get(spec.Codex).ReviewEffort) {
 		t.Errorf("codex review model value = %q", got)
 	}
 }
 
 func TestDefaultEffortOptionHasAVisibleLabel(t *testing.T) {
-	opts := defaultEffortOptions(config.EngineCodex, func(c *config.Config) *string { return &c.FixEffort })
+	opts := defaultEffortOptions(spec.Codex, func(c *config.Config) *string { return &c.FixEffort })
 	if len(opts) == 0 || opts[0].label != "your codex default" {
 		t.Fatalf("effort options = %+v", opts)
 	}
@@ -319,17 +308,17 @@ func TestEffortOptionsFollowTheSelectedEngine(t *testing.T) {
 		}
 		return out
 	}
-	claude := strings.Join(labels(config.EngineClaude), " ")
+	claude := strings.Join(labels(spec.Claude), " ")
 	if strings.Contains(claude, "ultra") || strings.Contains(claude, "minimal") {
 		t.Fatalf("claude was offered a codex-only effort: %s", claude)
 	}
 	if !strings.Contains(claude, "your claude default") || !strings.Contains(claude, "xhigh") {
 		t.Fatalf("claude effort options = %s", claude)
 	}
-	if !strings.Contains(strings.Join(labels(config.EngineCodex), " "), "ultra") {
+	if !strings.Contains(strings.Join(labels(spec.Codex), " "), "ultra") {
 		t.Fatal("codex lost its ultra effort")
 	}
-	grok := strings.Join(labels(config.EngineGrok), " ")
+	grok := strings.Join(labels(spec.Grok), " ")
 	if strings.Contains(grok, "ultra") || strings.Contains(grok, "xhigh") || strings.Contains(grok, "max") {
 		t.Fatalf("grok was offered a non-grok effort: %s", grok)
 	}
@@ -374,7 +363,7 @@ func TestUnresolvedConflictsHaveADistinctExitCode(t *testing.T) {
 }
 
 func TestBabysitDraftLocalAndConflictFlagsAreBoolean(t *testing.T) {
-	args, err := parseArgs([]string{"--draft", "--local", "--no-resolve-conflicts", "42"}, babysitBoolFlags)
+	args, err := parseArgs([]string{"--draft", "--local", "--no-resolve-conflicts", "42"}, babysitFlags)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +446,7 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var out bytes.Buffer
-			rep := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+			rep := &loopTermReporter{out: plainWriter(&out)}
 			res := test.result
 			if res == nil {
 				res = &loop.Result{PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1}
@@ -479,9 +468,9 @@ func TestBabysitSummaryReportsTheActualOutcome(t *testing.T) {
 // back and merged into the result, so the round is one line.
 func TestReviewRoundStepAndResultMergeIntoOneLine(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
-	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"}
+	model := spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"}
 
 	rep.StepEnd("Review round 1", model, 6*time.Minute, true)
 	if out.Len() != 0 {
@@ -502,9 +491,9 @@ func TestReviewRoundStepAndResultMergeIntoOneLine(t *testing.T) {
 // between) must still reach the terminal with the next output.
 func TestPendingReviewRoundLineIsFlushedByLaterOutput(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
-	model := engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"}
+	model := spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "medium"}
 
 	rep.StepEnd("Review round 3", model, time.Minute, true)
 	rep.Info("the review is for another head")
@@ -519,10 +508,10 @@ func TestPendingReviewRoundLineIsFlushedByLaterOutput(t *testing.T) {
 // an error with no line to point at.
 func TestFailedStepPrintsARedLine(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
 
-	rep.StepEnd("CI fix 2", engine.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}, 3*time.Minute, false)
+	rep.StepEnd("CI fix 2", spec.Model{Engine: "codex", Name: "gpt-5.6-terra", Effort: "low"}, 3*time.Minute, false)
 
 	if got, want := out.String(), "FAIL: CI fix 2 · gpt-5.6-terra/low · 3m · failed"; !strings.Contains(got, want) {
 		t.Errorf("failed step line is missing %q:\n%s", want, got)
@@ -534,7 +523,7 @@ func TestFailedStepPrintsARedLine(t *testing.T) {
 // of order.
 func TestWarningsGoThroughTheWriter(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
 
 	rep.Warn("push rejected before it reached the remote")
@@ -555,7 +544,7 @@ func TestSummaryRepeatsOnlyAnUnpostedRebuttal(t *testing.T) {
 	}
 	render := func(res loop.Result) string {
 		var out bytes.Buffer
-		w := ui.New(os.Stdout).To(&out)
+		w := plainWriter(&out)
 		rep := &loopTermReporter{out: w, status: w.Status()}
 		rep.summary(&res, nil, automerge.Result{}, nil)
 		return out.String()
@@ -584,7 +573,7 @@ func TestSummaryRepeatsOnlyAnUnpostedRebuttal(t *testing.T) {
 // line up under the value column like every other row.
 func TestSummaryCommitsSitInTheRowGrid(t *testing.T) {
 	var out bytes.Buffer
-	w := ui.New(os.Stdout).To(&out)
+	w := plainWriter(&out)
 	rep := &loopTermReporter{out: w, status: w.Status()}
 	rep.summary(&loop.Result{
 		PR: gh.FullPR{Number: 42, HeadRefName: "feature/crumb-tray"}, Rounds: 1, Converged: true,
@@ -617,7 +606,7 @@ func TestCIWaitLineNamesTheReviewBesideIt(t *testing.T) {
 	}
 
 	out.Reset()
-	plain := &loopTermReporter{out: ui.New(os.Stdout).To(&out)}
+	plain := &loopTermReporter{out: plainWriter(&out)}
 	plain.CIWait(42, 0, "review round 1 running")
 	plain.CIWait(42, time.Second, "review round 1 running")
 	plain.CIWait(42, 2*time.Second, "review round 1 posted")

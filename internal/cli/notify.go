@@ -1,43 +1,22 @@
 package cli
 
 import (
-	"fmt"
-
 	macnotify "github.com/yungweng/quorum/internal/notify"
 )
 
-func (a *app) notifyReadyToMerge(enabled bool, repo string, number int, url string) {
+// notifyAction sends a notice that needs the user to act, falling back to the
+// terminal when Notification Center cannot deliver it.
+func (a *app) notifyAction(enabled bool, n macnotify.Notice) {
 	if !enabled {
 		return
 	}
-	if url == "" {
-		url = fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
+	var logf func(string, ...any)
+	if a.log != nil {
+		logf = a.log.Printf
 	}
-	if err := macnotify.ReadyToMerge(repo, number, url); err != nil {
-		if a.log != nil {
-			a.log.Printf("notification not sent: %v", err)
-		}
-		if a.out != nil {
-			a.out.Notify("quorum: ready to merge",
-				fmt.Sprintf("%s#%d is clean and ready to merge.", repo, number))
-		}
+	var fallback func(string, string)
+	if a.out != nil {
+		fallback = a.out.Notify
 	}
-}
-
-func (a *app) notifyApprovalRequired(enabled bool, repo string, number int, url string) {
-	if !enabled {
-		return
-	}
-	if url == "" {
-		url = fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
-	}
-	if err := macnotify.ApprovalRequired(repo, number, url); err != nil {
-		if a.log != nil {
-			a.log.Printf("notification not sent: %v", err)
-		}
-		if a.out != nil {
-			a.out.Notify("quorum: approval required",
-				fmt.Sprintf("%s#%d is clean. Ask another reviewer to approve it.", repo, number))
-		}
-	}
+	n.SendOr(logf, fallback)
 }

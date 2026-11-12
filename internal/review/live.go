@@ -8,7 +8,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/atomicfile"
+	"github.com/yungweng/quorum/internal/engine/spec"
+	"github.com/yungweng/quorum/internal/prkey"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -26,7 +28,7 @@ type LiveRun struct {
 	// Model is what every pass of this run works on, resolved. A watcher would
 	// otherwise have to read the current configuration, which can have changed
 	// since this run started.
-	Model engine.Model `json:"model,omitzero"`
+	Model spec.Model `json:"model,omitzero"`
 
 	RunDir string `json:"run_dir"`
 }
@@ -34,7 +36,7 @@ type LiveRun struct {
 // Key identifies either a pull request or a branch-only run.
 func (r LiveRun) Key() string {
 	if r.Number > 0 {
-		return fmt.Sprintf("%s#%d", r.Repo, r.Number)
+		return prkey.Format(r.Repo, r.Number)
 	}
 	return r.Repo + "@" + r.Branch
 }
@@ -64,7 +66,7 @@ func (r *LiveTracker) Header(h RunHeader) {
 		Author:    h.Author,
 		StartedAt: r.started,
 		Reviewers: h.Runs,
-		Model:     engine.Model{Engine: h.Engine, Name: h.Model, Effort: h.Effort},
+		Model:     h.Model,
 		RunDir:    h.RunDir,
 	})
 	r.Reporter.Header(h)
@@ -93,15 +95,7 @@ func publishLive(dir, path string, run LiveRun) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, fmt.Sprintf(".%d.json", os.Getpid()))
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicfile.Write(path, b)
 }
 
 func readLive(path string) (LiveRun, bool) {

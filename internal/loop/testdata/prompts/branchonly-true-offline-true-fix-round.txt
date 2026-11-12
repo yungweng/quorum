@@ -1,0 +1,13 @@
+An external code review of branch feature/crumb-tray found issues. The full review report follows below.
+
+Please check for each finding whether it is a real issue or might be intended behavior.
+- For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
+- Suggestions: implement each one unless it describes intended behavior or you have a strong technical reason not to.
+- Resolve the Questions with your best judgment; only raise OPEN QUESTIONS if one truly needs a product decision.
+- Run the affected checks and commit your work. Do not push.
+
+---
+
+## Summary
+
+fine

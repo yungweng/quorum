@@ -5,12 +5,16 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
 
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/rundir"
 	"github.com/yungweng/quorum/internal/target"
 )
 
@@ -35,7 +39,7 @@ esac
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{RepoRoot: t.TempDir()},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		target:   target.Target{BranchOnly: true},
 		branch:   "feature/crumb-tray",
 		worktree: t.TempDir(),
@@ -73,6 +77,18 @@ func TestReviewPostingHonorsRunOptionAndBranchTarget(t *testing.T) {
 	r.target.BranchOnly = true
 	if r.reviewOptions().Post {
 		t.Fatal("posting was enabled for a branch-only review")
+	}
+}
+
+func TestReviewRoundsCarryTheConfiguredTimeoutAndBinaries(t *testing.T) {
+	bins := spec.Bins{spec.Codex: "/bin/codex", spec.Grok: "/bin/grok"}
+	r := &run{o: Options{Review: review.Options{ReviewTimeout: 7 * time.Minute}, Bins: bins, DirenvBin: "/bin/direnv"}}
+	o := r.reviewOptions()
+	if o.ReviewTimeout != 7*time.Minute {
+		t.Fatalf("review round timeout = %v, want the configured 7m", o.ReviewTimeout)
+	}
+	if !reflect.DeepEqual(o.Bins, bins) || o.DirenvBin != "/bin/direnv" {
+		t.Fatalf("review round binaries = %v, direnv %q", o.Bins, o.DirenvBin)
 	}
 }
 
@@ -152,7 +168,7 @@ touch .direnv-allowed
 					AllowEnvrcChange: allow,
 				},
 				ctx:      context.Background(),
-				rep:      NopReporter{},
+				rep:      nopReporter{},
 				target:   target.Target{BranchOnly: true},
 				pr:       gh.FullPR{BaseRefName: "main"},
 				worktree: worktree,
@@ -164,7 +180,7 @@ touch .direnv-allowed
 			}
 			err := r.setupDirenv()
 			if !allow {
-				if !errors.Is(err, review.ErrEnvrcChanged) {
+				if !errors.Is(err, rundir.ErrEnvrcChanged) {
 					t.Fatalf("setupDirenv error = %v, want ErrEnvrcChanged", err)
 				}
 				if _, statErr := os.Stat(filepath.Join(worktree, ".direnv-allowed")); !os.IsNotExist(statErr) {
@@ -179,5 +195,30 @@ touch .direnv-allowed
 				t.Fatal("direnv did not run after the explicit override")
 			}
 		})
+	}
+}
+
+func TestReviewRoundsTakeSharedValuesFromTheLoopNotTheTemplate(t *testing.T) {
+	r := &run{
+		o: Options{
+			Repo: "acme/api", RepoRoot: "/src/api", Rules: "loop rules", DepsDir: "/cache/deps",
+			Review: review.Options{
+				Runs: 3, Engine: spec.Claude, RunsDir: "/cache/reviews",
+				Repo: "acme/other", RepoRoot: "/src/other", Rules: "template rules", DepsDir: "/elsewhere",
+				Post: true, KeepWorktree: true, ResumeRun: "/cache/reviews/old", LocalHead: true,
+			},
+		},
+		pr: gh.FullPR{Number: 42, BaseRefName: "main"},
+	}
+	o := r.reviewOptions()
+	if o.Runs != 3 || o.Engine != spec.Claude || o.RunsDir != "/cache/reviews" {
+		t.Fatalf("round lost its template settings: %+v", o)
+	}
+	if o.Repo != "acme/api" || o.RepoRoot != "/src/api" || o.Rules != "loop rules" || o.DepsDir != "/cache/deps" ||
+		o.Number != 42 || o.BaseBranch != "main" {
+		t.Fatalf("round took shared values from the template: %+v", o)
+	}
+	if o.Post || o.KeepWorktree || o.ResumeRun != "" || o.LocalHead {
+		t.Fatalf("round kept per-round values from the template: %+v", o)
 	}
 }

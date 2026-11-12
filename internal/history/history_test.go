@@ -25,7 +25,7 @@ func TestReadReturnsTheNewestFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got := Read(p, 0)
+	got := Read(p)
 	if len(got) != 3 {
 		t.Fatalf("read %d runs, want 3", len(got))
 	}
@@ -37,23 +37,8 @@ func TestReadReturnsTheNewestFirst(t *testing.T) {
 	if err := Append(p, Run{Key: "acme/api#1", Kind: KindReview, Outcome: Failed}); err != nil {
 		t.Fatal(err)
 	}
-	if got := Read(p, 0); len(got) != 4 {
+	if got := Read(p); len(got) != 4 {
 		t.Errorf("a second run on the same pull request was merged away: %d entries", len(got))
-	}
-}
-
-func TestReadHonoursTheLimit(t *testing.T) {
-	p := path(t)
-	for i := range 5 {
-		if err := Append(p, Run{Key: "acme/api#1", Outcome: OK, EndedAt: time.Now().Add(time.Duration(i) * time.Second)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := Read(p, 2); len(got) != 2 {
-		t.Errorf("limit 2 returned %d", len(got))
-	}
-	if got := Read(p, 99); len(got) != 5 {
-		t.Errorf("a limit above the log size returned %d, want everything", len(got))
 	}
 }
 
@@ -64,7 +49,7 @@ func TestAppendTrimsToTheCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got := Read(p, 0)
+	got := Read(p)
 	if len(got) != maxEntries {
 		t.Fatalf("log holds %d entries, want the cap %d", len(got), maxEntries)
 	}
@@ -75,7 +60,7 @@ func TestAppendTrimsToTheCap(t *testing.T) {
 }
 
 func TestAMissingLogIsEmptyNotAnError(t *testing.T) {
-	if got := Read(filepath.Join(t.TempDir(), "nothing.jsonl"), 10); len(got) != 0 {
+	if got := Read(filepath.Join(t.TempDir(), "nothing.jsonl")); len(got) != 0 {
 		t.Errorf("a missing log returned %d runs", len(got))
 	}
 }
@@ -97,7 +82,7 @@ func TestABrokenLineIsSkipped(t *testing.T) {
 	if err := Append(p, Run{Key: "acme/api#2", Outcome: OK}); err != nil {
 		t.Fatal(err)
 	}
-	got := Read(p, 0)
+	got := Read(p)
 	if len(got) != 2 {
 		t.Fatalf("read %d runs around a broken line, want 2", len(got))
 	}
@@ -118,7 +103,7 @@ func TestConcurrentAppendsKeepEveryEntry(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if got := Read(p, 0); len(got) != 20 {
+	if got := Read(p); len(got) != 20 {
 		t.Errorf("20 concurrent appends left %d entries", len(got))
 	}
 }
