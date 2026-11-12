@@ -14,13 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/yungweng/quorum/internal/firstline"
 	"github.com/yungweng/quorum/internal/prkey"
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // Client runs gh. The zero value is unusable; use New.
@@ -101,19 +101,44 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) ([]byte, e
 type invocation struct {
 	dir   string
 	stdin []byte
-	// noTimeoutRetry reports a command killed by the per-call timeout with the
-	// error the kill produced, which is not transient, so it is not retried.
-	// A write that timed out may still have reached GitHub, and repeating one
-	// that is not idempotent posts it twice.
+	// noTimeoutRetry does not retry a command killed by the per-call timeout.
+	// A write that timed out may still have reached GitHub.
 	noTimeoutRetry bool
+	// write marks a request that must not reach GitHub twice, such as posting
+	// a comment. It is retried only when the failure shows that it never left
+	// this machine; a 502 or a reset connection can follow a request GitHub
+	// accepted, and repeating it posts the comment again. It implies
+	// noTimeoutRetry.
+	write bool
+}
+
+// unsentSigns are the transient failures that happen before a request is on
+// the wire, which makes repeating even a write safe.
+var unsentSigns = []string{
+	"no such host",
+	"connection refused",
+	"tls handshake",
+	"temporary failure", // in name resolution
+}
+
+func neverSent(msg string) bool {
+	low := strings.ToLower(msg)
+	for _, sign := range unsentSigns {
+		if strings.Contains(low, sign) {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryLogPhrase is in every log line of a retried gh command, which is what
 // doctor counts.
 const RetryLogPhrase = "retrying in"
 
-// exec runs gh and returns stdout. A transient failure is retried with a
-// linear backoff and finally reported wrapped in ErrTransient. A failed command
+// exec runs gh and returns stdout. gh runs in its own process group, so the
+// per-call timeout and a cancelled ctx reach its children as well, a
+// credential helper or the git below `gh repo clone`. A transient failure is
+// retried with a linear backoff and finally reported wrapped in ErrTransient. A failed command
 // may still return stdout: GraphQL uses partial JSON responses when one field
 // fails, and callers that understand those responses must be able to inspect
 // them. All other callers discard stdout when err is non-nil.
@@ -123,17 +148,12 @@ func (c *Client) exec(ctx context.Context, inv invocation, args ...string) ([]by
 	var lastErr error
 	var lastOut []byte
 	for attempt := 1; attempt <= attempts; attempt++ {
-		runCtx, cancel := context.WithTimeout(ctx, c.Timeout)
-		cmd := exec.CommandContext(runCtx, c.Bin, args...)
-		cmd.Dir = inv.dir
-		if inv.stdin != nil {
-			cmd.Stdin = bytes.NewReader(inv.stdin)
-		}
 		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		cancel()
+		spec := proc.Spec{Name: c.Bin, Args: args, Dir: inv.dir, Stdout: &stdout, Stderr: &stderr}
+		if inv.stdin != nil {
+			spec.Stdin = bytes.NewReader(inv.stdin)
+		}
+		err := proc.Run(ctx, c.Timeout, spec)
 		lastOut = bytes.Clone(stdout.Bytes())
 
 		if err == nil {
@@ -148,16 +168,20 @@ func (c *Client) exec(ctx context.Context, inv invocation, args ...string) ([]by
 		if ctx.Err() != nil {
 			return lastOut, fmt.Errorf("gh %s: %w", args[0], ctx.Err())
 		}
-		// cancel() has already run, so runCtx.Err() is non-nil either way. Only
-		// DeadlineExceeded means the command really ran out of time; Canceled
-		// just means it finished first.
-		if !inv.noTimeoutRetry && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		timedOut := errors.Is(err, proc.ErrTimeout)
+		if timedOut {
 			msg = "timed out after " + c.Timeout.String()
 		}
 		lastErr = fmt.Errorf("gh %s: %s", strings.Join(args, " "), firstline.Trimmed(msg))
 
+		if timedOut && (inv.noTimeoutRetry || inv.write) {
+			return lastOut, lastErr
+		}
 		if !looksTransient(msg) {
 			return lastOut, lastErr
+		}
+		if inv.write && !neverSent(msg) {
+			return lastOut, fmt.Errorf("%w: %v", ErrTransient, lastErr)
 		}
 		if attempt < attempts {
 			wait := time.Duration(attempt) * c.Backoff

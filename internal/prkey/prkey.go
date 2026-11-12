@@ -18,6 +18,13 @@ func Format(repo string, number int) string {
 	return fmt.Sprintf("%s#%d", repo, number)
 }
 
+// Branch is the key of a run on a pushed branch that has no pull request. The
+// history log and the live-run records both use it, which is what lets the
+// dashboard tell that a logged branch run and a running one are the same.
+func Branch(repo, branch string) string {
+	return repo + "#branch:" + branch
+}
+
 // Repo returns the owner/repo half of a key, or the key itself when it has no
 // number part.
 func Repo(key string) string {

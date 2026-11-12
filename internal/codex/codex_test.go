@@ -147,7 +147,7 @@ func TestFindSessionMatchesOnTheWorktreePath(t *testing.T) {
 	writeRollout(t, today, "aaaaaaaa-1111-2222-3333-444444444444", "/somewhere/else", now.Add(-time.Minute))
 	writeRollout(t, today, "bbbbbbbb-1111-2222-3333-444444444444", ours, now)
 
-	got, err := findSession(ours)
+	got, err := findSession(ours, now)
 	if err != nil {
 		t.Fatalf("findSession: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestFindSessionMatchesOnTheWorktreePath(t *testing.T) {
 		t.Errorf("session = %s, want the one whose cwd is our worktree", got)
 	}
 
-	if _, err := findSession("/a/worktree/that/never/ran"); err == nil {
+	if _, err := findSession("/a/worktree/that/never/ran", now); err == nil {
 		t.Error("a worktree with no session was matched to one anyway")
 	}
 }
@@ -166,12 +166,13 @@ func TestFindSessionLooksAtYesterday(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	yesterday := time.Now().AddDate(0, 0, -1)
+	now := time.Now()
+	yesterday := now.AddDate(0, 0, -1)
 	dir := filepath.Join(home, ".codex", "sessions", yesterday.Format("2006/01/02"))
 	worktree := "/cache/quorum/babysit/acme-api-pr-12/worktree"
 	writeRollout(t, dir, "cccccccc-1111-2222-3333-444444444444", worktree, yesterday)
 
-	got, err := findSession(worktree)
+	got, err := findSession(worktree, now)
 	if err != nil {
 		t.Fatalf("findSession: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestFindSessionPrefersTheNewest(t *testing.T) {
 	writeRollout(t, dir, "dddddddd-1111-2222-3333-444444444444", worktree, now.Add(-time.Hour))
 	writeRollout(t, dir, "eeeeeeee-1111-2222-3333-444444444444", worktree, now)
 
-	got, err := findSession(worktree)
+	got, err := findSession(worktree, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +219,7 @@ func TestFindSessionSkipsUnreadableRollouts(t *testing.T) {
 	worktree := "/cache/quorum/babysit/acme-api-pr-12/worktree"
 	writeRollout(t, dir, "ffffffff-1111-2222-3333-444444444444", worktree, now)
 
-	got, err := findSession(worktree)
+	got, err := findSession(worktree, now)
 	if err != nil {
 		t.Fatalf("a broken rollout file broke the lookup: %v", err)
 	}

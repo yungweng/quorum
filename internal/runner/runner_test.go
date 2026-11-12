@@ -140,3 +140,45 @@ func TestAutoMergePendingPreservesReviewWithoutHandlingRequest(t *testing.T) {
 		t.Fatalf("review result was not preserved: %+v", rec)
 	}
 }
+
+// `quorum run` has no review request of its own. Its empty timestamp used to
+// be stored as the handled one, and the next poll reviewed the same pull
+// request again for a request the agent had long answered.
+func TestAManualRunDoesNotForgetTheHandledRequest(t *testing.T) {
+	const key, handled, newer = "acme/api#42", "2026-08-05T13:00:00Z", "2026-08-05T15:00:00Z"
+	r := &Runner{P: paths.P{StateFile: filepath.Join(t.TempDir(), "state.json")}}
+	if got := r.requestAnswered(key, ""); got != "" {
+		t.Errorf("a manual run before any poll answers %q, want no request", got)
+	}
+	if err := state.Mutate(r.P.StateFile, key, func(rec *state.Record) {
+		rec.ReqAt, rec.SeenReqAt = handled, newer
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.requestAnswered(key, handled); got != handled {
+		t.Errorf("the poll's request was replaced by %q", got)
+	}
+	// The newest request seen when the run begins, read once: one that
+	// arrives while the run is going has not been reviewed by it.
+	if got := r.requestAnswered(key, ""); got != newer {
+		t.Errorf("a manual run answers %q, want the newest request seen, %q", got, newer)
+	}
+
+	rec := state.Record{ReqAt: handled, SeenReqAt: newer}
+	markHandled(&rec, "")
+	if rec.ReqAt != handled {
+		t.Errorf("a run without a request recorded %q over the handled %q", rec.ReqAt, handled)
+	}
+	markHandled(&rec, newer)
+	if rec.ReqAt != newer {
+		t.Errorf("ReqAt = %q, want %q", rec.ReqAt, newer)
+	}
+}
+
+// REVIEWERS is checked when the config is read, against the review core's own
+// limit. The two must not drift.
+func TestConfigAndReviewAgreeOnTheReviewerLimit(t *testing.T) {
+	if config.MaxReviewers != review.MaxRuns {
+		t.Fatalf("config.MaxReviewers = %d, review.MaxRuns = %d", config.MaxReviewers, review.MaxRuns)
+	}
+}

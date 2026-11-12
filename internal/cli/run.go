@@ -8,25 +8,32 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/prkey"
 	"github.com/yungweng/quorum/internal/ui"
 )
 
 // cmdRun reviews one pull request now, whatever the queue and the filters say.
 func (a *app) cmdRun(args []string) int {
-	if len(args) == 0 {
-		return a.die("usage: quorum run <pr-url> | <owner/repo#number> | <number>")
+	const usage = "quorum run <pr-url> | <owner/repo#number> | <number>"
+	parsed, code, done := a.plainArgs(usage, args, nil, 1)
+	if done {
+		return code
 	}
-	repo, number, err := a.resolvePR(args[0])
+	if len(parsed.pos) == 0 {
+		return a.die("usage: %s", usage)
+	}
+	repo, number, err := a.resolvePR(parsed.pos[0])
 	if err != nil {
 		return a.die("%v", err)
 	}
-	t, err := a.findTools()
+	t, err := a.agentTools()
 	if err != nil {
 		return a.die("%v", err)
 	}
@@ -55,7 +62,7 @@ func (a *app) cmdRun(args []string) int {
 	a.log.Echo = func(s string) { fmt.Println(s) }
 	r := a.newRunner(t, client)
 	r.TerminalNotify = func(title, body string) {
-		a.out.Notify("quorum: "+title, body)
+		a.out.Notify(terminalTitle(title), body)
 	}
 	// A finished run is the only thing that grows the cache, so the next
 	// collector has to measure instead of trusting a size from before it.
@@ -64,6 +71,13 @@ func (a *app) cmdRun(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// terminalTitle is a runner notification's title as the terminal shows it.
+// Routine notices arrive bare; an action notice that fell back from
+// Notification Center already carries the prefix.
+func terminalTitle(title string) string {
+	return "quorum: " + strings.TrimPrefix(title, "quorum: ")
 }
 
 // -n takes a line count, the way every other tool spells it.
@@ -98,6 +112,12 @@ func parseLogArgs(args []string) (lines int, follow bool, err error) {
 }
 
 func (a *app) cmdLogs(args []string) int {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			fmt.Println("usage: quorum logs [-n N] [--no-follow]")
+			return 0
+		}
+	}
 	n, follow, err := parseLogArgs(args)
 	if err != nil {
 		return a.die("%v", err)
@@ -157,7 +177,9 @@ func (a *app) cmdLogs(args []string) int {
 const watchInterval = time.Second
 
 func (a *app) cmdWatch(args []string) int {
-	_ = args
+	if _, code, done := a.plainArgs("quorum watch", args, nil, 0); done {
+		return code
+	}
 	if !a.out.Color {
 		// Without a terminal there is nothing to redraw into.
 		return a.cmdStatus(nil)
@@ -203,7 +225,10 @@ func (a *app) cmdWatch(args []string) int {
 }
 
 func (a *app) reload() {
-	cfg, err := config.Load(a.p.Config)
+	// The paths as well: a watch opened before another command moved prbot's
+	// state over would otherwise keep reading the file nothing writes anymore.
+	a.p = paths.Resolve()
+	cfg, err := config.Load(a.p.ConfigSource())
 	a.cfg, a.configErr = cfg, err
 	a.out = ui.New(os.Stdout)
 }

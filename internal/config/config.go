@@ -9,8 +9,10 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,6 +121,11 @@ type Config struct {
 	// file never silently drops something the user put there.
 	unknown map[string]string
 }
+
+// MaxReviewers bounds REVIEWERS. It is the review core's own guard against a
+// typo costing a fortune in reviewer passes, repeated here so the config says
+// so when it is read instead of every run failing later.
+const MaxReviewers = 12
 
 // Agent actions.
 const (
@@ -247,7 +254,9 @@ func Load(path string) (Config, error) {
 			}
 			continue
 		}
-		cfg.set(key, value)
+		if problem := cfg.set(key, value); problem != "" {
+			problems = append(problems, fmt.Sprintf("line %d: %s", line, problem))
+		}
 	}
 	if err := sc.Err(); err != nil {
 		return cfg, err
@@ -256,10 +265,22 @@ func Load(path string) (Config, error) {
 	// failing the run later. The two level sets are engine-specific, but the
 	// file may predate that and pair a codex level with the claude engine, so
 	// the alternative is a tool that refuses to start on its own config - with
-	// no terminal to say so behind the launchd agent. What the run then uses is
-	// still visible: the run headers name the resolved model and effort.
-	cfg.ReviewEffort = spec.KnownEffort(cfg.ReviewEngine, cfg.ReviewEffort)
-	cfg.FixEffort = spec.KnownEffort(cfg.FixEngine, cfg.FixEffort)
+	// no terminal to say so behind the launchd agent. It is reported like any
+	// other value that was not used, and the run headers name the resolved
+	// model and effort.
+	for _, e := range []struct {
+		key, engine string
+		effort      *string
+	}{
+		{"REVIEW_EFFORT", cfg.ReviewEngine, &cfg.ReviewEffort},
+		{"FIX_EFFORT", cfg.FixEngine, &cfg.FixEffort},
+	} {
+		if known := spec.KnownEffort(e.engine, *e.effort); known != *e.effort {
+			problems = append(problems, fmt.Sprintf("%s=%q ignored, %s takes %s",
+				e.key, *e.effort, e.engine, strings.Join(spec.Efforts(e.engine), ", ")))
+			*e.effort = known
+		}
+	}
 	if len(problems) > 0 {
 		return cfg, fmt.Errorf("%s: %s", path, strings.Join(problems, "; "))
 	}
@@ -309,7 +330,72 @@ func unquote(rhs string) string {
 	return strings.TrimRight(b.String(), " \t")
 }
 
-func (c *Config) set(key, value string) {
+// set applies one assignment. A value it cannot use leaves the setting as it
+// was and comes back as a complaint: silently falling back turned
+// AGENT_ACTION=babysitt into plain reviews and let REVIEWERS=20 load only to
+// fail every run.
+func (c *Config) set(key, value string) (problem string) {
+	// An empty value was never a typo: it leaves the default in place, and
+	// switches a boolean off.
+	empty := strings.TrimSpace(value) == ""
+	reject := func(want string) {
+		if !empty {
+			problem = fmt.Sprintf("%s=%q ignored, expected %s", key, value, want)
+		}
+	}
+	boolean := func(dst *bool) {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "on":
+			*dst = true
+		case "0", "false", "no", "off", "":
+			*dst = false
+		default:
+			reject("1 or 0")
+		}
+	}
+	// hi below lo means no upper bound.
+	integer := func(dst *int, lo, hi int) {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		switch {
+		case err != nil:
+			reject("a number")
+		case n < lo && hi < lo:
+			reject(fmt.Sprintf("%d or more", lo))
+		case n < lo || hi >= lo && n > hi:
+			reject(fmt.Sprintf("%d to %d", lo, hi))
+		default:
+			*dst = n
+		}
+	}
+	float := func(dst *float64) {
+		n, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || n < 0 {
+			reject("a number, 0 or more")
+			return
+		}
+		*dst = n
+	}
+	duration := func(dst *time.Duration) {
+		d, err := ParseDuration(value)
+		if err != nil {
+			reject("seconds or a duration like 30m, 2h, or 0")
+			return
+		}
+		*dst = d
+	}
+	choice := func(dst *string, options ...string) {
+		v := strings.TrimSpace(strings.ToLower(value))
+		if !slices.Contains(options, v) {
+			reject(strings.Join(options, " or "))
+			return
+		}
+		*dst = v
+	}
+	engines := make([]string, 0, len(spec.All))
+	for _, e := range spec.All {
+		engines = append(engines, e.Name)
+	}
+
 	switch key {
 	case "ORGS":
 		c.Orgs = fields(value)
@@ -320,100 +406,90 @@ func (c *Config) set(key, value string) {
 	case "TEAMS":
 		c.Teams = fields(value)
 	case "INCLUDE_TEAMS":
-		c.IncludeTeams = truthy(value)
+		boolean(&c.IncludeTeams)
 	case "SKIP_DRAFTS":
-		c.SkipDrafts = truthy(value)
+		boolean(&c.SkipDrafts)
 	case "SKIP_FORKS":
-		c.SkipForks = truthy(value)
+		boolean(&c.SkipForks)
 	case "SKIP_BOTS":
-		c.SkipBots = truthy(value)
+		boolean(&c.SkipBots)
 	case "SKIP_OWN":
-		c.SkipOwn = truthy(value)
+		boolean(&c.SkipOwn)
 	case "NOTIFY":
-		c.Notify = truthy(value)
+		boolean(&c.Notify)
 	case "NOTIFY_READY_TO_MERGE":
-		c.NotifyReadyToMerge = truthy(value)
+		boolean(&c.NotifyReadyToMerge)
 	case "MAX_RETRIES":
-		c.MaxRetries = intOr(value, c.MaxRetries)
+		integer(&c.MaxRetries, 0, -1)
 	case "MAX_CONCURRENT":
-		c.MaxConcurrent = intOr(value, c.MaxConcurrent)
+		integer(&c.MaxConcurrent, 1, 0)
 	case "MAX_CODEX":
 		// Retired: it used to divide the reviewer passes between running
 		// reviews, which only made every review slower. Accepted so an older
 		// config still loads, and dropped when the file is written again.
 	case "REVIEWERS":
-		c.Reviewers = intOr(value, c.Reviewers)
+		integer(&c.Reviewers, 1, MaxReviewers)
 	case "NICE":
-		c.Nice = intOr(value, c.Nice)
+		integer(&c.Nice, math.MinInt, math.MaxInt)
 	case "HISTORY":
-		c.History = intOr(value, c.History)
+		integer(&c.History, 0, -1)
 	case "POLL_INTERVAL":
-		c.PollInterval = intOr(value, c.PollInterval)
+		integer(&c.PollInterval, 1, 0)
 	case "LOAD_LIMIT":
-		c.LoadLimit = floatOr(value, c.LoadLimit)
+		float(&c.LoadLimit)
 	case "CACHE_BUDGET_GB":
-		c.CacheBudgetGB = floatOr(value, c.CacheBudgetGB)
+		float(&c.CacheBudgetGB)
 	case "REVIEW_ENGINE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v != "" && spec.Valid(v) {
-			c.ReviewEngine = v
-		}
+		choice(&c.ReviewEngine, engines...)
 	case "REVIEW_MODEL":
 		c.ReviewModel = strings.TrimSpace(value)
 	case "REVIEW_EFFORT":
 		c.ReviewEffort = strings.TrimSpace(value)
 	case "REVIEW_TIMEOUT":
-		c.ReviewTimeout = durationOr(value, c.ReviewTimeout)
+		duration(&c.ReviewTimeout)
 	case "POST":
-		c.Post = truthy(value)
+		boolean(&c.Post)
 	case "FIX_ENGINE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v != "" && spec.Valid(v) {
-			c.FixEngine = v
-		}
+		choice(&c.FixEngine, engines...)
 	case "FIX_MODEL":
 		c.FixModel = strings.TrimSpace(value)
 	case "FIX_EFFORT":
 		c.FixEffort = strings.TrimSpace(value)
 	case "MAX_ITER":
-		c.MaxIter = intOr(value, c.MaxIter)
+		integer(&c.MaxIter, 1, 0)
 	case "MAX_CI_FIXES":
-		c.MaxCIFixes = intOr(value, c.MaxCIFixes)
+		integer(&c.MaxCIFixes, 0, -1)
 	case "FIX_TIMEOUT":
-		c.FixTimeout = durationOr(value, c.FixTimeout)
+		duration(&c.FixTimeout)
 	case "DIVERGENCE_SCAN":
-		c.DivergenceScan = truthy(value)
+		boolean(&c.DivergenceScan)
 	case "DIVERGENCE_ESCALATE_TO":
 		c.DivergenceEscalateTo = fields(value)
 	case "SANDBOXED":
-		c.Sandboxed = truthy(value)
+		boolean(&c.Sandboxed)
 	case "BABYSIT_DRAFTS":
-		c.BabysitDrafts = truthy(value)
+		boolean(&c.BabysitDrafts)
 	case "RESOLVE_CONFLICTS":
-		c.ResolveConflicts = truthy(value)
+		boolean(&c.ResolveConflicts)
 	case "BASE_UPDATE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v == baseUpdateAlways || v == BaseUpdateConflicts {
-			c.BaseUpdate = v
-		}
+		choice(&c.BaseUpdate, baseUpdateAlways, BaseUpdateConflicts)
 	case "FIX_SUGGESTIONS":
-		c.FixSuggestions = truthy(value)
+		boolean(&c.FixSuggestions)
 	case "LOOP_MODE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v == LoopOffline || v == LoopOnline {
-			c.LoopMode = v
-		}
+		choice(&c.LoopMode, LoopOffline, LoopOnline)
 	case "AGENT_ACTION":
-		if v := strings.TrimSpace(strings.ToLower(value)); v == ActionReview || v == ActionBabysit {
-			c.AgentAction = v
-		}
+		choice(&c.AgentAction, ActionReview, ActionBabysit)
 	case "AUTO_MERGE":
-		c.AutoMerge = truthy(value)
+		boolean(&c.AutoMerge)
 	case "AUTO_MERGE_AGENT":
 		// Retired: auto-merge used to be a separate opt-in per source. The
 		// agent value migrates because unattended runs are where the setting
 		// matters most; the other two keys are read no more and dropped when
 		// the file is written again.
-		c.AutoMerge = truthy(value)
+		boolean(&c.AutoMerge)
 	case "AUTO_MERGE_REVIEW", "AUTO_MERGE_BABYSIT":
 	case "AUTO_MERGE_TIMEOUT":
-		c.AutoMergeTimeout = durationOr(value, c.AutoMergeTimeout)
+		duration(&c.AutoMergeTimeout)
 	case "AUTO_MERGE_AUTHORS":
 		c.AutoMergeAuthors = fields(value)
 	case "REVIEW_ARGS":
@@ -431,6 +507,7 @@ func (c *Config) set(key, value string) {
 		}
 		c.unknown[key] = value
 	}
+	return problem
 }
 
 // fields splits a space separated list, collapsing "unset" and "set to empty"
@@ -441,41 +518,6 @@ func fields(v string) []string {
 		return nil
 	}
 	return f
-}
-
-// truthy accepts the shell habit of 1/0 as well as the words, so a config
-// edited by hand behaves the way its author expected.
-func truthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-func intOr(v string, fallback int) int {
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil {
-		return fallback
-	}
-	return n
-}
-
-func durationOr(v string, fallback time.Duration) time.Duration {
-	d, err := ParseDuration(v)
-	if err != nil {
-		return fallback
-	}
-	return d
-}
-
-func floatOr(v string, fallback float64) float64 {
-	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-	if err != nil {
-		return fallback
-	}
-	return n
 }
 
 func bit(b bool) string {
@@ -530,8 +572,8 @@ func (c Config) render() string {
 	w("# Reviews. POST=0 keeps review output on disk, disables every PR write,\n")
 	w("# and skips babysit's final description generation.\n")
 	w("# An empty model or effort means the engine's own default. The effort\n")
-	w("# levels differ per engine, and a level the engine does not know is\n")
-	w("# refused rather than silently dropped.\n")
+	w("# levels differ per engine. A level the engine does not know is ignored\n")
+	w("# in favour of the engine's default; quorum doctor and status report it.\n")
 	w("REVIEW_ENGINE=%q\t# codex, claude or grok\n", c.ReviewEngine)
 	w("REVIEW_MODEL=%q\n", c.ReviewModel)
 	w("REVIEW_EFFORT=%q\t# codex: minimal..ultra, claude: low..max, grok: low..high\n", c.ReviewEffort)

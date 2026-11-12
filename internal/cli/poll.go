@@ -32,11 +32,13 @@ type candidate struct {
 }
 
 func (a *app) cmdPoll(args []string) int {
-	_ = args
+	if _, code, done := a.plainArgs("quorum poll", args, nil, 0); done {
+		return code
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	t, err := a.findTools()
+	t, err := a.agentTools()
 	if err != nil {
 		a.log.Printf("%v", err)
 		return a.die("%v", err)
@@ -234,9 +236,14 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 	}
 
 	skip := func(reason string) (candidate, bool) {
-		if c.rec.Status != state.Skipped || c.rec.Reason != reason {
-			a.log.Printf("%s: skipped, %s", key, reason)
+		// A skip that already stands is left alone. Marking it again on every
+		// poll moved its timestamp to now, and since the state file keeps the
+		// newest records, a pile of permanently skipped pull requests pushed
+		// the finished reviews out of it.
+		if c.rec.Status == state.Skipped && c.rec.Reason == reason {
+			return c, false
 		}
+		a.log.Printf("%s: skipped, %s", key, reason)
 		a.record(key, func(rec *state.Record) {
 			rec.Title = pr.Title
 			rec.Mark(state.Skipped, reason)
@@ -395,7 +402,7 @@ func (a *app) cmdReviewOne(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	t, err := a.findTools()
+	t, err := a.agentTools()
 	if err != nil {
 		return a.die("%v", err)
 	}

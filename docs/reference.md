@@ -185,6 +185,11 @@ Without a terminal the symbols become `ok:`, `FAIL:`, `warn:` and `--`.
 | `quorum doctor` | `--fix` to apply what it can |
 | `quorum config` | `--path` or `-p` to print the config file location |
 
+Every command answers `-h` or `--help` with its usage and does nothing else.
+An option or argument it does not know stops it with an error instead of being
+ignored. A switch may carry a value: `--no-direnv=0` is the same as leaving it
+out.
+
 ## Engines
 
 Reviews and fix sessions each run on one of three engines, selected with
@@ -201,7 +206,8 @@ quorum refuses a level passed on the command line that the selected engine
 cannot use instead of starting the run. A level already in the config is
 dropped rather than refused: `REVIEW_EFFORT="ultra"` next to
 `REVIEW_ENGINE="claude"` runs at claude's own effort, which the run header
-names, instead of stopping every review including the agent's. The claude
+names and `quorum doctor` reports, instead of stopping every review including
+the agent's. The claude
 and grok engines' review passes run with a fixed read-only tool set; claude
 also turns off MCP and session persistence, while grok uses a read-only
 sandbox profile and blocks subagents.
@@ -402,6 +408,11 @@ NOTIFY_READY_TO_MERGE=0  # clickable notification per clean PR not auto-merged
 
 Durations accept a bare number of seconds or a value like `30m`, `45m`, `2h`.
 Zero disables the timeout it belongs to.
+
+A value quorum cannot use, such as `AGENT_ACTION="babysitt"`, `REVIEWERS=20`
+(the limit is 12) or an effort level the selected engine does not have, is
+ignored in favour of the default. `quorum doctor`, `quorum status` and the
+agent's log name the line.
 
 `REVIEW_ARGS` and `MAX_CODEX` are retired. A `REVIEW_ARGS` that contains
 `--dry-run` still turns posting off; nothing else in it is read.
@@ -666,7 +677,10 @@ the log.
 
 **A GitHub call failed.** Transient failures are retried with a backoff and
 reported as retries. They are never recorded as a decision not to review, so a
-hiccup cannot make a pull request silently disappear from the queue.
+hiccup cannot make a pull request silently disappear from the queue. Posting a
+comment and merging are the exception: they are repeated only when the request
+provably never left your machine, because a comment sent twice is posted
+twice.
 
 **Works in the terminal, not from launchd.** Almost always `PATH`. launchd
 ignores your shell profile, so the job carries a fixed agent `PATH` (the usual

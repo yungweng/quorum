@@ -115,6 +115,10 @@ func TestProhibitedPRCommentTermMatchesWholeWords(t *testing.T) {
 		"release_automation",
 		"generated using artificial intelligence",
 		"Artificial-intelligence generated",
+		// Every selectable fix engine, and who makes it.
+		"Claude rewrote the parser",
+		"grok-assisted",
+		"as Anthropic recommends",
 	} {
 		if got := prohibitedPRCommentTermExcept(text, ""); got == "" {
 			t.Errorf("prohibitedPRCommentTermExcept(%q, %q) found nothing", text, "")

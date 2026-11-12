@@ -38,7 +38,7 @@ func (r LiveRun) Key() string {
 	if r.Number > 0 {
 		return prkey.Format(r.Repo, r.Number)
 	}
-	return r.Repo + "@" + r.Branch
+	return prkey.Branch(r.Repo, r.Branch)
 }
 
 // LiveTracker publishes one terminal review until Close removes its record.

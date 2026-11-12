@@ -44,11 +44,13 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 `
 
 func (a *app) cmdInstall(args []string) int {
-	_ = args
+	if _, code, done := a.plainArgs("quorum install", args, nil, 0); done {
+		return code
+	}
 	if runtime.GOOS != "darwin" {
 		return a.die("install only supports macOS launchd; on Linux run `quorum poll` from a systemd timer or cron")
 	}
-	if _, err := a.findTools(); err != nil {
+	if _, err := a.agentTools(); err != nil {
 		return a.die("%v", err)
 	}
 	if err := a.p.EnsureDirs(); err != nil {
@@ -58,7 +60,7 @@ func (a *app) cmdInstall(args []string) int {
 		if err := a.cfg.Save(a.p.Config); err != nil {
 			return a.die("could not write %s: %v", a.p.Config, err)
 		}
-		a.out.Printf("wrote a default config to %s\n", a.p.Config)
+		a.out.Printf("wrote the config to %s\n", a.p.Config)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(a.p.Plist), 0o755); err != nil {
@@ -89,7 +91,9 @@ func (a *app) cmdInstall(args []string) int {
 }
 
 func (a *app) cmdUninstall(args []string) int {
-	_ = args
+	if _, code, done := a.plainArgs("quorum uninstall", args, nil, 0); done {
+		return code
+	}
 	exec.Command("launchctl", "unload", a.p.Plist).Run()
 	if err := os.Remove(a.p.Plist); err != nil && !os.IsNotExist(err) {
 		return a.die("%v", err)

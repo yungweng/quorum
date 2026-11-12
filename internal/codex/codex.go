@@ -178,7 +178,7 @@ func (o Options) Exec(ctx context.Context, env envexec.Env, timeout time.Duratio
 	if err := o.run(ctx, env, timeout, args, nil, log); err != nil {
 		return "", err
 	}
-	id, err := findSession(env.Worktree)
+	id, err := findSession(env.Worktree, time.Now())
 	if err != nil {
 		return "", fmt.Errorf("could not find the Codex session for %s: %w", env.Worktree, err)
 	}

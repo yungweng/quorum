@@ -162,7 +162,7 @@ func (a *app) cmdReview(argv []string) int {
 		}
 	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
-	if notify && automerge.ReadyNoticeDue(a.cfg.NotifyReadyToMerge, mergeStatus, eligible, false) {
+	if notify && automerge.ReadyNoticeDue(a.cfg.NotifyReadyToMerge, mergeStatus, eligible, false, false) {
 		a.notifyAction(notify, macnotify.ReadyToMerge(repo, number))
 		return exitOK
 	}

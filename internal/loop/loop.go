@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -66,7 +67,6 @@ var (
 const (
 	defaultMaxIter    = 12
 	defaultMaxCIFixes = 3
-	defaultFixTimeout = 2 * time.Hour
 	// maxQuestionBounces is how often autonomous mode sends questions back
 	// before giving up rather than looping forever.
 	maxQuestionBounces = 3
@@ -142,7 +142,7 @@ type Options struct {
 
 	MaxIter    int
 	MaxCIFixes int
-	FixTimeout time.Duration
+	FixTimeout time.Duration // per fix step; 0 disables
 
 	DivergenceScan       bool
 	DivergenceEscalateTo []string
@@ -1285,8 +1285,12 @@ func prohibitedPRCommentTermExcept(text, generatedURL string) string {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	for i, word := range words {
-		switch strings.ToLower(word) {
-		case "ai", "openai", "agent", "agents", "codex", "automation":
+		// Every selectable engine is a coding tool the comment must not name,
+		// and so is the company behind it.
+		switch lower := strings.ToLower(word); {
+		case spec.Valid(lower):
+			return word
+		case slices.Contains([]string{"ai", "agent", "agents", "automation", "openai", "anthropic", "xai"}, lower):
 			return word
 		}
 		if i+1 < len(words) && strings.EqualFold(word, "artificial") &&
@@ -1376,9 +1380,8 @@ func (o Options) withDefaults() Options {
 	if o.MaxCIFixes == 0 {
 		o.MaxCIFixes = defaultMaxCIFixes
 	}
-	if o.FixTimeout == 0 {
-		o.FixTimeout = defaultFixTimeout
-	}
+	// FixTimeout has no default here on purpose: zero is the documented way to
+	// switch it off, and the config and --fix-timeout supply the usual value.
 	return o
 }
 

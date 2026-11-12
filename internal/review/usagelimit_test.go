@@ -215,3 +215,11 @@ func TestResumeUnusableWrapsMissingRunDir(t *testing.T) {
 		t.Fatalf("err = %v, want ErrResumeUnusable", cerr)
 	}
 }
+
+// REVIEW_TIMEOUT=0 and --review-timeout 0 are documented to switch the
+// timeout off. Filling in the default for zero made that impossible.
+func TestZeroReviewTimeoutStaysOff(t *testing.T) {
+	if got := (Options{}).withDefaults().ReviewTimeout; got != 0 {
+		t.Fatalf("ReviewTimeout = %v, want 0 to mean no timeout", got)
+	}
+}

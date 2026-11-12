@@ -73,3 +73,38 @@ func TestLoadAvgIsPlausible(t *testing.T) {
 		t.Errorf("implausible load average: %v", load)
 	}
 }
+
+// A marker has to appear complete. Live deletes what it cannot parse, so a
+// marker that existed empty for a moment could be removed by a dashboard
+// repaint, and the next poll started the same review again.
+func TestMarkerIsNeverVisibleHalfWritten(t *testing.T) {
+	dir := t.TempDir()
+	const key = "acme/api#4"
+	m, got, err := Acquire(dir, key)
+	if err != nil || !got {
+		t.Fatalf("Acquire: got=%v err=%v", got, err)
+	}
+	if err := m.Adopt(os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != safeName(key) {
+		t.Fatalf("the running directory holds %v, want only the marker", entries)
+	}
+
+	// A marker another process is still writing is neither a review nor
+	// rubbish to clear away.
+	draft := filepath.Join(dir, draftPrefix+"123")
+	if err := os.WriteFile(draft, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if live := Live(dir); len(live) != 1 || live[0].Key != key {
+		t.Errorf("Live = %+v, want only %s", live, key)
+	}
+	if _, err := os.Stat(draft); err != nil {
+		t.Errorf("Live removed a marker that was still being written: %v", err)
+	}
+}

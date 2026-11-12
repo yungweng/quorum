@@ -40,9 +40,9 @@ type rolloutMeta struct {
 // way if the run directory layout ever changes.
 //
 // Today's and yesterday's buckets are both searched, because a run that starts
-// before midnight resumes after it.
-func findSession(worktree string) (string, error) {
-	now := time.Now()
+// before midnight resumes after it. now is passed in so that which two days
+// those are is the caller's one reading of the clock.
+func findSession(worktree string, now time.Time) (string, error) {
 	root := sessionsDir()
 	dirs := []string{
 		filepath.Join(root, now.Format("2006/01/02")),

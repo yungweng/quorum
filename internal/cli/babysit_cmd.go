@@ -194,7 +194,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 
 	if err == nil && res != nil && automerge.ReadyNoticeDue(a.cfg.NotifyReadyToMerge, mergeResult.Status,
-		res.LastFindings.MergeEligible(), res.PR.IsDraft) {
+		res.LastFindings.MergeEligible(), res.PR.IsDraft, res.SuggestionCommits) {
 		a.notifyAction(rep.notify, macnotify.ReadyToMerge(repo, res.PR.Number))
 		rep.readySent = rep.notify
 	}

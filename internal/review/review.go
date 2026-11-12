@@ -104,13 +104,14 @@ func ResumableRunDir(err error) (dir string, ok bool) {
 // Defaults for a run. The model and effort defaults live in the engine table
 // (spec.ReviewDefaults).
 const (
-	defaultRuns          = 6
-	defaultReviewTimeout = 45 * time.Minute
+	defaultRuns = 6
 	// prewarmTimeout bounds the single environment entry that installs
 	// dependencies before the reviewers start.
 	prewarmTimeout = 20 * time.Minute
-	// maxRuns is a guard against a typo costing a fortune in reviewer passes.
-	maxRuns = 12
+	// MaxRuns is a guard against a typo costing a fortune in reviewer passes.
+	// config.MaxReviewers repeats it for REVIEWERS; a runner test keeps the
+	// two equal.
+	MaxRuns = 12
 	// depsRetention is how long a shared dependency tree survives without
 	// being used.
 	depsRetention = 14 * 24 * time.Hour
@@ -141,9 +142,9 @@ type Options struct {
 	Engine        string // codex, claude or grok; empty means codex
 	Model         string
 	Effort        string
-	BaseBranch    string // empty uses the PR's own base
-	MinSuccessful int    // 0 means a majority of Runs
-	ReviewTimeout time.Duration
+	BaseBranch    string        // empty uses the PR's own base
+	MinSuccessful int           // 0 means a majority of Runs
+	ReviewTimeout time.Duration // per reviewer pass; 0 disables
 	// Rules is the repository's user-local review rules file, verbatim. It
 	// reaches every reviewer pass, the aggregator and the verifier; empty
 	// means the repository has none.
@@ -972,9 +973,9 @@ func (o Options) withDefaults() Options {
 		o.Concurrency = o.Runs
 	}
 	o.Engine, o.Model, o.Effort = spec.ReviewDefaults(o.Engine, o.Model, o.Effort)
-	if o.ReviewTimeout == 0 {
-		o.ReviewTimeout = defaultReviewTimeout
-	}
+	// ReviewTimeout has no default here on purpose: zero is the documented way
+	// to switch it off, and the config and --review-timeout supply the usual
+	// value.
 	return o
 }
 
@@ -982,8 +983,8 @@ func (o Options) validate() error {
 	if o.Runs < 1 {
 		return fmt.Errorf("runs must be >= 1")
 	}
-	if o.Runs > maxRuns {
-		return fmt.Errorf("runs must be <= %d", maxRuns)
+	if o.Runs > MaxRuns {
+		return fmt.Errorf("runs must be <= %d", MaxRuns)
 	}
 	if o.Concurrency < 1 {
 		return fmt.Errorf("concurrency must be >= 1")

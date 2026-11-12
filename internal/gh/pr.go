@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/firstline"
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // FullPR is the pull request metadata the review core and the fix pipeline
@@ -108,10 +109,19 @@ func (c *Client) HeadSHA(ctx context.Context, dir string, number int) (string, e
 	return strings.TrimSpace(string(out)), nil
 }
 
+// Clone clones repo into dir. It has no per-call timeout: how long a clone
+// takes is a property of the repository, not of GitHub's health.
+func (c *Client) Clone(ctx context.Context, repo, dir string) error {
+	unbounded := *c
+	unbounded.Timeout = 0
+	_, err := unbounded.run(ctx, "", "repo", "clone", repo, dir, "--", "--quiet")
+	return err
+}
+
 // Comment posts a comment and returns its URL. The body goes in on stdin, so
 // gh posts it byte for byte, whatever its size.
 func (c *Client) Comment(ctx context.Context, dir string, number int, body string) (string, error) {
-	out, err := c.exec(ctx, invocation{dir: dir, stdin: []byte(body), noTimeoutRetry: true},
+	out, err := c.exec(ctx, invocation{dir: dir, stdin: []byte(body), write: true},
 		"pr", "comment", fmt.Sprint(number), "--body-file", "-")
 	if err != nil {
 		return "", err
@@ -210,7 +220,9 @@ func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha str
 	default:
 		return fmt.Errorf("unsupported merge method %q", method)
 	}
-	out, err := c.run(ctx, "", "api", "--method", "PUT",
+	// A merge GitHub accepted answers a repeat with an error, which would read
+	// as a refusal; the caller re-reads the pull request after any failure.
+	out, err := c.exec(ctx, invocation{write: true}, "api", "--method", "PUT",
 		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
 		"-f", "merge_method="+string(method), "-f", "sha="+sha)
 	if err != nil {
@@ -315,10 +327,9 @@ func (c *Client) watchChecks(ctx context.Context, dir string, number int, requir
 	if required {
 		args = append(args, "--required")
 	}
-	cmd := exec.CommandContext(ctx, c.Bin, args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	text := string(out)
+	var out bytes.Buffer
+	err := proc.Run(ctx, 0, proc.Spec{Name: c.Bin, Args: args, Dir: dir, Stdout: &out, Stderr: &out})
+	text := out.String()
 
 	if ctx.Err() != nil {
 		return ChecksFail, text, ctx.Err()
