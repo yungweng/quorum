@@ -40,6 +40,14 @@ const (
 	CINone    = "none"
 )
 
+// States of the review that runs beside a CI wait.
+const (
+	SideReviewRunning  = "running"
+	SideReviewPosted   = "posted"
+	SideReviewFinished = "finished"
+	SideReviewFailed   = "failed"
+)
+
 // Progress is what a run publishes about itself while it runs.
 //
 // It exists for the same reason internal/review writes an events log: the
@@ -84,6 +92,11 @@ type Progress struct {
 	// way after a red one.
 	CI    string `json:"ci,omitempty"`
 	CIFix int    `json:"ci_fix,omitempty"`
+
+	// SideReview is the state of the review running beside a CI wait, one of
+	// the SideReview values. It is empty outside a CI wait and when no review
+	// runs beside it.
+	SideReview string `json:"side_review,omitempty"`
 
 	// Reviewed goes true with the first round result, which is what tells "no
 	// findings yet" apart from "no findings".

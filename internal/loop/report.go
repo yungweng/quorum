@@ -66,7 +66,9 @@ type Reporter interface {
 	// CIWait is called once when a CI wait starts, with elapsed zero, and then
 	// about once a second while it lasts. CIGreen carries how long that wait
 	// took, which is often half a run's wall clock and otherwise invisible.
-	CIWait(pr int, elapsed time.Duration)
+	// review describes the review running beside the wait, such as "review
+	// round 1 posted"; it is empty when none does.
+	CIWait(pr int, elapsed time.Duration, review string)
 	CIGreen(elapsed time.Duration)
 	CIRed(attempt, max int)
 	Info(string)
@@ -92,7 +94,7 @@ func (NopReporter) StepEnd(string, engine.Model, time.Duration, bool) {}
 func (NopReporter) Activity(string, time.Duration)                    {}
 func (NopReporter) ActivityDone()                                     {}
 func (NopReporter) RoundResult(int, review.Findings, bool)            {}
-func (NopReporter) CIWait(int, time.Duration)                         {}
+func (NopReporter) CIWait(int, time.Duration, string)                 {}
 func (NopReporter) CIGreen(time.Duration)                             {}
 func (NopReporter) CIRed(int, int)                                    {}
 func (NopReporter) Info(string)                                       {}
@@ -148,4 +150,13 @@ func joinLines(lines []string) string {
 		return ""
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// CIWaitNote is the suffix a permanent "waiting for CI" line carries for the
+// review running beside the wait; empty when none does.
+func CIWaitNote(review string) string {
+	if review == "" {
+		return ""
+	}
+	return " (" + review + ")"
 }

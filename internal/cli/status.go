@@ -846,6 +846,9 @@ func phaseSegment(w *ui.Writer, p loop.Progress, now time.Time) (string, string)
 		what = "preparing"
 	case loop.PhaseCI:
 		what = "waiting for CI"
+		if p.SideReview != "" {
+			what += ", review " + p.SideReview
+		}
 	case loop.PhaseReview:
 		what = "reviewing"
 	case loop.PhaseFix:

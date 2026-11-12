@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yungweng/quorum/internal/gh"
@@ -30,6 +31,9 @@ type bgReview struct {
 	started time.Time
 	cancel  context.CancelFunc
 	done    chan bgResult
+	// outcome is how the review ended, one of the SideReview values; unset
+	// while it runs. The CI wait reads it without taking the result off done.
+	outcome atomic.Value
 }
 
 type bgResult struct {
@@ -65,6 +69,14 @@ func (r *run) startReviewWith(round int, resumeDir string) {
 	opts.ResumeRun = resumeDir
 	go func() {
 		res, err := r.p.Review.Run(ctx, opts)
+		switch {
+		case err != nil:
+			br.outcome.Store(SideReviewFailed)
+		case res != nil && res.Posted:
+			br.outcome.Store(SideReviewPosted)
+		default:
+			br.outcome.Store(SideReviewFinished)
+		}
 		br.done <- bgResult{res, err}
 	}()
 }
@@ -307,7 +319,8 @@ func (r *run) ensureCIGreen() error {
 // Cancellation needs no extra case here: watchCI's own ctx handling makes it
 // return, which closes the wait through the same channel.
 func (r *run) awaitChecks(started time.Time) (gh.CheckState, error) {
-	r.rep.CIWait(r.pr.Number, 0)
+	defer func() { r.prog.SideReview = "" }()
+	r.rep.CIWait(r.pr.Number, 0, r.sideReview())
 	type checksResult struct {
 		state gh.CheckState
 		err   error
@@ -324,9 +337,28 @@ func (r *run) awaitChecks(started time.Time) (gh.CheckState, error) {
 		case out := <-done:
 			return out.state, out.err
 		case <-ticker.C:
-			r.rep.CIWait(r.pr.Number, time.Since(started))
+			r.rep.CIWait(r.pr.Number, time.Since(started), r.sideReview())
 		}
 	}
+}
+
+// sideReview describes the review running beside a CI wait, for the wait's
+// status line, and publishes its state when that changed. Without it a run
+// whose review already posted its comment reads as one that only waits.
+func (r *run) sideReview() string {
+	br := r.review
+	if br == nil {
+		return ""
+	}
+	state, ok := br.outcome.Load().(string)
+	if !ok {
+		state = SideReviewRunning
+	}
+	if r.prog.SideReview != state {
+		r.prog.SideReview = state
+		r.publish()
+	}
+	return fmt.Sprintf("review round %d %s", br.round, state)
 }
 
 // Poll intervals of the CI wait. Variables so tests can shorten them.

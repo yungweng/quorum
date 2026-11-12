@@ -92,9 +92,10 @@ func TestCIWaitPublishesItsPhase(t *testing.T) {
 		root:    root,
 		logDir:  logDir,
 		prog: Progress{
-			Phase: PhaseFix,
-			Since: before.Add(-time.Hour),
-			CI:    CIRed,
+			Phase:      PhaseFix,
+			Since:      before.Add(-time.Hour),
+			CI:         CIRed,
+			SideReview: SideReviewPosted,
 		},
 	}
 
@@ -110,6 +111,9 @@ func TestCIWaitPublishesItsPhase(t *testing.T) {
 	}
 	if got.CI != CIGreen {
 		t.Errorf("CI = %q, want %q", got.CI, CIGreen)
+	}
+	if got.SideReview != "" {
+		t.Errorf("side review %q outlived the CI wait", got.SideReview)
 	}
 }
 
@@ -156,5 +160,46 @@ echo 'checks passed'
 	}
 	if calls, err := os.ReadFile(countFile); err != nil || string(calls) != "2" {
 		t.Fatalf("watch calls = %q, err = %v", calls, err)
+	}
+}
+
+type postingReviewer struct{ release chan struct{} }
+
+func (f *postingReviewer) Run(context.Context, review.Options) (*review.Result, error) {
+	<-f.release
+	return &review.Result{Posted: true}, nil
+}
+
+// The first review runs beside the CI wait and posts its comment on its own. A
+// wait that does not say so reads as a run that posted and then forgot about it.
+func TestCIWaitReportsTheReviewBesideIt(t *testing.T) {
+	root := t.TempDir()
+	reviewer := &postingReviewer{release: make(chan struct{})}
+	r := &run{
+		p:    &Pipeline{Review: reviewer},
+		ctx:  context.Background(),
+		rep:  NopReporter{},
+		root: root,
+	}
+	if got := r.sideReview(); got != "" {
+		t.Fatalf("a wait without a review reported %q", got)
+	}
+
+	r.startReview(1)
+	if got := r.sideReview(); got != "review round 1 running" {
+		t.Errorf("running review reported as %q", got)
+	}
+	if got, _ := ReadProgress(root); got.SideReview != SideReviewRunning {
+		t.Errorf("published side review = %q, want %q", got.SideReview, SideReviewRunning)
+	}
+
+	close(reviewer.release)
+	out := <-r.review.done
+	r.review.done <- out
+	if got := r.sideReview(); got != "review round 1 posted" {
+		t.Errorf("posted review reported as %q", got)
+	}
+	if got, _ := ReadProgress(root); got.SideReview != SideReviewPosted {
+		t.Errorf("published side review = %q, want %q", got.SideReview, SideReviewPosted)
 	}
 }
