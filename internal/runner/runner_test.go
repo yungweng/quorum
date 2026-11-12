@@ -140,3 +140,34 @@ func TestAutoMergePendingPreservesReviewWithoutHandlingRequest(t *testing.T) {
 		t.Fatalf("review result was not preserved: %+v", rec)
 	}
 }
+
+// `quorum run` has no review request of its own. Its empty timestamp used to
+// be stored as the handled one, and the next poll reviewed the same pull
+// request again for a request the agent had long answered.
+func TestAManualRunDoesNotForgetTheHandledRequest(t *testing.T) {
+	const handled, newer = "2026-08-05T13:00:00Z", "2026-08-05T15:00:00Z"
+	for _, tc := range []struct {
+		name            string
+		recorded, seen  string
+		reqAt, wantReqA string
+	}{
+		{"the poll's request is recorded", handled, newer, newer, newer},
+		{"a manual run keeps the handled request", handled, handled, "", handled},
+		{"a manual run answers the newest request seen", handled, newer, "", newer},
+		{"a manual run before any poll records nothing", "", "", "", ""},
+	} {
+		rec := state.Record{ReqAt: tc.recorded, SeenReqAt: tc.seen}
+		markHandled(&rec, tc.reqAt)
+		if rec.ReqAt != tc.wantReqA {
+			t.Errorf("%s: ReqAt = %q, want %q", tc.name, rec.ReqAt, tc.wantReqA)
+		}
+	}
+}
+
+// REVIEWERS is checked when the config is read, against the review core's own
+// limit. The two must not drift.
+func TestConfigAndReviewAgreeOnTheReviewerLimit(t *testing.T) {
+	if config.MaxReviewers != review.MaxRuns {
+		t.Fatalf("config.MaxReviewers = %d, review.MaxRuns = %d", config.MaxReviewers, review.MaxRuns)
+	}
+}

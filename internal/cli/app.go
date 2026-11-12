@@ -141,7 +141,7 @@ func (a *app) run(args []string) int {
 
 func newApp(version string) *app {
 	p := paths.Resolve()
-	cfg, cfgErr := config.Load(p.Config)
+	cfg, cfgErr := config.Load(p.ConfigSource())
 	log := logbook.New(p.Log)
 	out := ui.New(os.Stdout)
 	// Only echo log lines to a terminal; under launchd they would just be
@@ -162,20 +162,45 @@ func newApp(version string) *app {
 
 func engineBinary(name string, bins spec.Bins, hint string) error {
 	e := spec.Get(name)
-	if e.Name == spec.Codex || bins.For(name) != "" {
+	if bins.For(name) != "" {
 		return nil
 	}
-	return fmt.Errorf("engine %s is selected (%s) but no %s binary was found on PATH; install %s or switch back to %s",
-		e.Name, hint, e.Bin, e.Install, spec.Codex)
+	advice := "install " + e.Install
+	if e.Name != spec.Codex {
+		advice += " or switch back to " + spec.Codex
+	}
+	return fmt.Errorf("engine %s is selected (%s) but no %s binary was found on PATH; %s",
+		e.Name, hint, e.Bin, advice)
+}
+
+// agentTools is findTools for the commands that run what the config says:
+// poll, run and install. They need the engines the config selects, and only
+// those; a setup that reviews and fixes with claude does not need codex.
+func (a *app) agentTools() (runner.Tools, error) {
+	t, err := a.findTools()
+	if err != nil {
+		return t, err
+	}
+	if err := engineBinary(a.cfg.ReviewEngine, t.Engines, "REVIEW_ENGINE"); err != nil {
+		return t, err
+	}
+	if a.cfg.AgentAction == config.ActionBabysit {
+		if err := engineBinary(a.cfg.FixEngine, t.Engines, "FIX_ENGINE"); err != nil {
+			return t, err
+		}
+	}
+	return t, nil
 }
 
 // findTools resolves the external binaries quorum drives. launchd starts jobs
 // with a minimal environment and never reads a shell profile, so PATH is
 // widened with the usual install locations before anything is looked up.
 //
-// gh, git and codex are required. The other engines are only needed when an
-// engine setting selects them, which engineBinary checks at that point, and
-// direnv only for repositories with an .envrc.
+// gh and git are required. An engine is only needed when a setting or a flag
+// selects it, which engineBinary checks at that point, and direnv only for
+// repositories with an .envrc. Requiring codex here regardless kept a
+// claude-only setup from running at all and the dashboard from learning merge
+// states.
 func (a *app) findTools() (runner.Tools, error) {
 	widenPath()
 	t := runner.Tools{Engines: spec.Bins{}}
@@ -195,14 +220,9 @@ func (a *app) findTools() (runner.Tools, error) {
 		*req.dst = path
 	}
 	for _, e := range spec.All {
-		path, err := exec.LookPath(e.Bin)
-		if err != nil {
-			if e.Name == spec.Codex {
-				missing = append(missing, e.Bin)
-			}
-			continue
+		if path, err := exec.LookPath(e.Bin); err == nil {
+			t.Engines[e.Name] = path
 		}
-		t.Engines[e.Name] = path
 	}
 	t.Direnv, _ = exec.LookPath("direnv")
 
@@ -303,7 +323,8 @@ A panel of Codex reviewers for your pull requests.
 
 Run quorum <command> --help for command options.
 
-Requires: gh (authenticated), git and codex. direnv is optional.
+Requires: gh (authenticated), git and the engine you review with (codex
+unless REVIEW_ENGINE says otherwise). direnv is optional.
 Config: %s
 `, a.out.Bold("quorum "+a.version), a.out.Bold("Usage:"),
 		a.out.Bold("Main commands:"), a.out.Bold("Agent:"), a.out.Bold("Setup:"),

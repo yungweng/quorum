@@ -1161,14 +1161,15 @@ func TestDecide(t *testing.T) {
 }
 
 func TestReadyNoticeDue(t *testing.T) {
-	if !ReadyNoticeDue(true, "", true, false) {
+	if !ReadyNoticeDue(true, "", true, false, false) {
 		t.Fatal("eligible run with no merge status owed no ready notice")
 	}
 	for _, tc := range []struct {
-		name            string
-		enabled         bool
-		status          string
-		eligible, draft bool
+		name              string
+		enabled           bool
+		status            string
+		eligible, draft   bool
+		suggestionCommits bool
 	}{
 		{name: "option off", status: "", eligible: true},
 		{name: "merged", enabled: true, status: Merged, eligible: true},
@@ -1176,8 +1177,10 @@ func TestReadyNoticeDue(t *testing.T) {
 		{name: "queued", enabled: true, status: Queued, eligible: true},
 		{name: "not eligible", enabled: true},
 		{name: "draft", enabled: true, eligible: true, draft: true},
+		// Nothing has reviewed what the suggestion round pushed.
+		{name: "suggestion commits", enabled: true, eligible: true, suggestionCommits: true},
 	} {
-		if ReadyNoticeDue(tc.enabled, tc.status, tc.eligible, tc.draft) {
+		if ReadyNoticeDue(tc.enabled, tc.status, tc.eligible, tc.draft, tc.suggestionCommits) {
 			t.Errorf("%s: ready notice was due", tc.name)
 		}
 	}

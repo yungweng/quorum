@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yungweng/quorum/internal/engine/spec"
@@ -27,8 +28,8 @@ func TestEngineKeysAcceptOnlyKnownEngines(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `FIX_ENGINE="gemini"`) {
+		t.Fatalf("Load reported %v, want the unknown FIX_ENGINE", err)
 	}
 	if cfg.ReviewEngine != spec.Claude {
 		t.Errorf("REVIEW_ENGINE=claude was not applied: %q", cfg.ReviewEngine)

@@ -75,11 +75,11 @@ func (a *app) resolvePR(arg string) (string, int, error) {
 		if err != nil {
 			return "", 0, fmt.Errorf("gh not found")
 		}
-		out, err := exec.Command(gh, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").Output()
+		repo, err := a.newGH(gh).CurrentRepo(context.Background(), "")
 		if err != nil {
 			return "", 0, fmt.Errorf("not inside a repository, use owner/repo#%d", n)
 		}
-		return strings.TrimSpace(string(out)), n, nil
+		return repo, n, nil
 	}
 	return "", 0, fmt.Errorf("cannot read %q as a pull request", arg)
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // fakeGH writes a script that stands in for the gh binary. The script prints
@@ -680,5 +682,64 @@ func TestCommentDoesNotRetryATimeoutButAReadDoes(t *testing.T) {
 	}
 	if got := calls(t, countFile); got != 3 {
 		t.Fatalf("read ran %d times, want 3", got)
+	}
+}
+
+// A 502 can follow a request GitHub accepted. Repeating a comment then posts
+// it twice, and repeating a merge that went through reads as a refusal.
+func TestWritesAreNotRepeatedOnceTheyMayHaveArrived(t *testing.T) {
+	bin, countFile := fakeGH(t, `echo "HTTP 502: Bad Gateway" >&2; exit 1`)
+	_, err := testClient(bin).Comment(context.Background(), t.TempDir(), 42, "body")
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("comment err = %v, want it marked temporary", err)
+	}
+	if got := calls(t, countFile); got != 1 {
+		t.Fatalf("the comment was sent %d times, want 1", got)
+	}
+
+	bin, countFile = fakeGH(t, `echo "HTTP 502: Bad Gateway" >&2; exit 1`)
+	err = testClient(bin).MergeHead(context.Background(), "acme/api", 42, "abc123", MergeMethodMerge)
+	if !errors.Is(err, ErrTransient) {
+		t.Fatalf("merge err = %v, want it marked temporary", err)
+	}
+	if got := calls(t, countFile); got != 1 {
+		t.Fatalf("the merge was sent %d times, want 1", got)
+	}
+}
+
+// A request that never left the machine is safe to send again, write or not.
+func TestWritesAreRetriedWhenTheyNeverLeft(t *testing.T) {
+	bin, countFile := fakeGH(t, `if [ "$n" -lt 3 ]; then echo "dial tcp 192.0.2.1:443: connect: connection refused" >&2; exit 1; fi
+echo "https://github.com/acme/api/pull/42#issuecomment-1"`)
+	url, err := testClient(bin).Comment(context.Background(), t.TempDir(), 42, "body")
+	if err != nil || url != "https://github.com/acme/api/pull/42#issuecomment-1" {
+		t.Fatalf("Comment = %q, %v", url, err)
+	}
+	if got := calls(t, countFile); got != 3 {
+		t.Fatalf("the comment was tried %d times, want 3", got)
+	}
+}
+
+// gh runs in its own process group, so the per-call timeout takes what gh
+// started with it. Killing gh alone left a credential helper or a clone's git
+// running.
+func TestTimeoutReachesWhatGHStarted(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	bin, _ := fakeGH(t, `sleep 60 &
+echo $! > `+pidFile+`
+wait`)
+	c := testClient(bin)
+	c.Attempts = 1
+	c.Timeout = 500 * time.Millisecond
+	if _, err := c.HeadSHA(context.Background(), t.TempDir(), 42); !errors.Is(err, ErrTransient) {
+		t.Fatalf("err = %v, want a transient timeout", err)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	if proc.Alive(pid) {
+		t.Fatalf("gh's child %d survived the timeout", pid)
 	}
 }

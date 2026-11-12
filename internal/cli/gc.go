@@ -20,12 +20,11 @@ import (
 )
 
 func (a *app) cmdGC(args []string) int {
-	dry := false
-	for _, arg := range args {
-		if arg == "--dry-run" || arg == "-n" {
-			dry = true
-		}
+	parsed, code, done := a.plainArgs("quorum gc [-n | --dry-run]", args, flagSet{"dry-run": noValue, "n": noValue}, 0)
+	if done {
+		return code
 	}
+	dry := parsed.boolean("dry-run", "n")
 	// Asked for by hand, so it must not answer from a remembered measurement.
 	// Forget it and walk the cache as it is now.
 	a.forgetCacheSize()

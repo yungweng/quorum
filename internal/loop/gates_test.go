@@ -119,3 +119,11 @@ func TestStepLabelNamesEveryTagShape(t *testing.T) {
 		}
 	}
 }
+
+// FIX_TIMEOUT=0 and --fix-timeout 0 are documented to switch the timeout off.
+// Filling in the default for zero made that impossible.
+func TestZeroFixTimeoutStaysOff(t *testing.T) {
+	if got := (Options{}).withDefaults().FixTimeout; got != 0 {
+		t.Fatalf("FixTimeout = %v, want 0 to mean no timeout", got)
+	}
+}

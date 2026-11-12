@@ -107,7 +107,7 @@ func TestLiveRunsAcceptsABranchWithoutAPRNumber(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("branch-only live review was rejected: %+v", runs)
 	}
-	if got := runs[0].Key(); got != "acme/api@feature/crumb-tray" {
+	if got := runs[0].Key(); got != "acme/api#branch:feature/crumb-tray" {
 		t.Errorf("branch key = %q", got)
 	}
 }

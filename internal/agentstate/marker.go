@@ -24,6 +24,10 @@ type Marker struct {
 	PID  int
 }
 
+// draftPrefix names a marker that is still being written. Live skips those; a
+// repository owner cannot start with a dot, so no real marker does.
+const draftPrefix = ".draft-"
+
 // safeName turns "owner/repo#123" into a single path element.
 func safeName(key string) string {
 	return strings.NewReplacer("/", "-", "#", "-").Replace(key)
@@ -55,11 +59,26 @@ func Acquire(dir, key string) (*Marker, bool, error) {
 		return nil, false, err
 	}
 	path := filepath.Join(dir, safeName(key))
+	// The marker has to appear with its content already in it. Created empty
+	// and written afterwards, it could be read in between by Live, which
+	// deletes what it cannot parse, and the next poll then started the same
+	// review a second time. A hard link is as exclusive as O_EXCL and only
+	// ever shows the finished file.
+	draft, err := os.CreateTemp(dir, draftPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	defer os.Remove(draft.Name())
+	_, err = fmt.Fprintf(draft, "%d\n%s\n", os.Getpid(), key)
+	if closeErr := draft.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return nil, false, err
+	}
 	for attempt := range 2 {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		err := os.Link(draft.Name(), path)
 		if err == nil {
-			fmt.Fprintf(f, "%d\n%s\n", os.Getpid(), key)
-			f.Close()
 			return &Marker{Key: key, Path: path, PID: os.Getpid()}, true, nil
 		}
 		if !os.IsExist(err) {
@@ -81,7 +100,19 @@ func Acquire(dir, key string) (*Marker, bool, error) {
 // is the detached child rather than the poll that created the marker.
 func (m *Marker) Adopt(pid int) error {
 	m.PID = pid
-	return os.WriteFile(m.Path, []byte(fmt.Sprintf("%d\n%s\n", pid, m.Key)), 0o644)
+	// Replaced in one rename, for the reason Acquire links: a marker caught
+	// truncated is a marker deleted. Only the holder adopts, so one draft name
+	// per marker is enough.
+	draft := filepath.Join(filepath.Dir(m.Path), draftPrefix+filepath.Base(m.Path))
+	if err := os.WriteFile(draft, []byte(fmt.Sprintf("%d\n%s\n", pid, m.Key)), 0o644); err != nil {
+		os.Remove(draft)
+		return err
+	}
+	if err := os.Rename(draft, m.Path); err != nil {
+		os.Remove(draft)
+		return err
+	}
+	return nil
 }
 
 func (m *Marker) Release() {
@@ -99,7 +130,7 @@ func Live(dir string) []Marker {
 	}
 	var out []Marker
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())

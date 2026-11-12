@@ -331,7 +331,8 @@ func TestRetiredMaxCodexIsDropped(t *testing.T) {
 // A config written before the effort levels became engine-specific can pair a
 // codex level with the claude engine. That combination must not fail every
 // run: the launchd agent has no terminal to report it in, so the symptom
-// would be an agent that silently stops reviewing.
+// would be an agent that silently stops reviewing. The dropped level is
+// reported as a problem, which is where doctor and status get it from.
 func TestLoadDropsAnEffortTheEngineCannotUse(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	body := `REVIEW_ENGINE="claude"
@@ -343,8 +344,8 @@ FIX_EFFORT="ultra"
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), `REVIEW_EFFORT="ultra" ignored`) || strings.Contains(err.Error(), "FIX_EFFORT") {
+		t.Fatalf("Load reported %v, want only the dropped REVIEW_EFFORT", err)
 	}
 	if cfg.ReviewEffort != "" {
 		t.Errorf("ReviewEffort = %q, want it dropped for the claude engine", cfg.ReviewEffort)
@@ -356,7 +357,8 @@ FIX_EFFORT="ultra"
 
 // LOOP_MODE gates whether babysit pushes once at the end (offline, the
 // default) or after every round. An unknown value keeps the default rather
-// than failing behind the launchd agent, matching AGENT_ACTION.
+// than failing behind the launchd agent, matching AGENT_ACTION, and is
+// reported.
 func TestLoopModeParsesAndSurvivesARewrite(t *testing.T) {
 	if got := Default().LoopMode; got != LoopOffline {
 		t.Fatalf("default LoopMode = %q, want %q", got, LoopOffline)
@@ -387,8 +389,8 @@ func TestLoopModeParsesAndSurvivesARewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err = Load(path)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "LOOP_MODE") {
+		t.Fatalf("an unknown LOOP_MODE was not reported: %v", err)
 	}
 	if cfg.LoopMode != LoopOffline {
 		t.Fatalf("an unknown LOOP_MODE changed the default: %q", cfg.LoopMode)

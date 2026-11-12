@@ -75,6 +75,16 @@ func fromState(key string, before, after state.Record, source string) (Run, bool
 		CommentURL: after.CommentURL,
 		RunDir:     after.RunDir,
 	}
+	// A fix loop the agent ran is a fix loop in the log, with its rounds, the
+	// same as one started from a terminal. Skips and give-ups are decisions
+	// about a pull request, whatever ran on it before.
+	if after.Kind == KindBabysit && (after.Status == state.OK || after.Status == state.Failed) {
+		run.Kind = KindBabysit
+		run.Rounds = int(after.Rounds)
+		if after.Status == state.OK && after.Converged {
+			run.Outcome = Converged
+		}
+	}
 	if after.Status == state.OK {
 		run.Reviewed = true
 		run.Blockers = int(after.Blockers)

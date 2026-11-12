@@ -77,9 +77,11 @@ func Decide(enabled, post, eligible, isDraft, suggestionCommits bool) (merge boo
 
 // ReadyNoticeDue says whether a finished run owes the ready-to-merge notice:
 // the option is on, auto-merge left no status, and the review would have
-// allowed a merge. A draft is not ready to merge.
-func ReadyNoticeDue(enabled bool, mergeStatus string, eligible, isDraft bool) bool {
-	return enabled && mergeStatus == "" && eligible && !isDraft
+// allowed a merge. A draft is not ready to merge, and neither is a head the
+// suggestion round pushed commits to after the final review: nothing has
+// reviewed those.
+func ReadyNoticeDue(enabled bool, mergeStatus string, eligible, isDraft, suggestionCommits bool) bool {
+	return enabled && mergeStatus == "" && eligible && !isDraft && !suggestionCommits
 }
 
 // run binds both side effects to reviewedSHA. It is safe to repeat: an

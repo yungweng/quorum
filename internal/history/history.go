@@ -81,7 +81,7 @@ type Run struct {
 
 // BranchKey returns the stable identity used for runs without a pull request.
 func BranchKey(repo, branch string) string {
-	return repo + "#branch:" + branch
+	return prkey.Branch(repo, branch)
 }
 
 // Key identifies a run: the pull request, or the branch when number is zero.

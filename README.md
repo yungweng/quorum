@@ -53,9 +53,10 @@ build includes uncommitted changes. If `~/.local/bin` precedes Homebrew in
 `PATH`, every new terminal uses this build. Check with `which quorum` and
 `quorum --version`.
 
-Requires `gh` (authenticated), `git` and `codex`. `claude` (Claude Code) and
-`grok` (Grok CLI) are optional and only needed when `REVIEW_ENGINE`/
-`FIX_ENGINE` or `--engine`/`--review-engine` select them.
+Requires `gh` (authenticated), `git` and the engine you run: `codex` by
+default, `claude` (Claude Code) or `grok` (Grok CLI) when `REVIEW_ENGINE`/
+`FIX_ENGINE` or `--engine`/`--review-engine` select them. An engine nothing
+selects does not need to be installed.
 `terminal-notifier` sends notifications from detached macOS agent runs.
 Foreground commands normally notify through the terminal. It also sends the
 two clickable action notifications: an own pull request needing another
@@ -366,7 +367,9 @@ with its default, every command flag, the exit codes, the files quorum reads and
 writes, and troubleshooting.
 
 An existing prbot config and state are picked up automatically, and `quorum
-install` unloads the old prbot agent so the two do not race.
+install` unloads the old prbot agent so the two do not race. They are only
+read: the first save writes `~/.config/quorum/config`, and the state moves to
+quorum's own directory on the first poll. The prbot files stay as they were.
 
 ## License
 

@@ -101,6 +101,12 @@ type Record struct {
 	// reads the events log under it to show reviewer progress while a review
 	// is in flight.
 	RunDir string `json:"run_dir,omitempty"`
+	// Kind, Rounds and Converged describe the current or last run for the
+	// history log: what the agent ran (history.KindReview when empty), and for
+	// a fix loop how many rounds it took and whether it ended clean.
+	Kind      string `json:"kind,omitempty"`
+	Rounds    Num    `json:"rounds,omitempty"`
+	Converged bool   `json:"converged,omitempty"`
 	// ResumableRun reports that RunDir holds completed reviewer output worth
 	// reusing: the last attempt failed at aggregation, verification or a
 	// usage limit, not for a reason that invalidates the reviewer passes.

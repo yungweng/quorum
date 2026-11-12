@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/yungweng/quorum/internal/firstline"
 	macnotify "github.com/yungweng/quorum/internal/notify"
 	"github.com/yungweng/quorum/internal/rundir"
 
@@ -71,6 +69,10 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	// The resume candidate must be read before Mark(Running) resets RunDir.
 	resumeDir := r.resumableRunDir(key, sha)
 
+	kind := history.KindReview
+	if r.Cfg.AgentAction == config.ActionBabysit {
+		kind = history.KindBabysit
+	}
 	r.Log.Printf("%s: reviewing %s (%s)", key, short(sha), title)
 	r.mutate(key, func(rec *state.Record) {
 		rec.Title = title
@@ -82,6 +84,8 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		// An orphaned run recovered later must never look resumable.
 		rec.ResumableRun = false
 		rec.StartedAt = state.Now()
+		rec.Kind = kind
+		rec.Rounds, rec.Converged = 0, false
 	})
 
 	var (
@@ -95,6 +99,14 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		res.LastFindings, res.RunDir, runErr = r.reviewOnce(ctx, key, clone, repo, number, resumeDir, runLog)
 	}
 	findings, runDir := res.LastFindings, res.RunDir
+	if kind == history.KindBabysit {
+		// Written while the record still says running, so whichever outcome is
+		// recorded below carries it into the history log.
+		r.mutate(key, func(rec *state.Record) {
+			rec.Rounds = state.Num(res.Rounds)
+			rec.Converged = res.Converged
+		})
+	}
 
 	if runErr == nil {
 		mergeStatus := ""
@@ -133,7 +145,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 			rec.Fails = 0
 			rec.ResumableRun = false
 			// Recording the request timestamp is what marks it as handled.
-			rec.ReqAt = reqAt
+			markHandled(rec, reqAt)
 		})
 		note := summaryLine(findings)
 		switch mergeStatus {
@@ -147,7 +159,7 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 		switch {
 		case mergeStatus == automerge.ApprovalRequired:
 			r.notifyAction(macnotify.ApprovalRequired(repo, number))
-		case automerge.ReadyNoticeDue(r.Cfg.NotifyReadyToMerge, mergeStatus, eligible, res.PR.IsDraft):
+		case automerge.ReadyNoticeDue(r.Cfg.NotifyReadyToMerge, mergeStatus, eligible, res.PR.IsDraft, res.SuggestionCommits):
 			r.notifyAction(macnotify.ReadyToMerge(repo, number))
 		default:
 			r.notify(fmt.Sprintf("Reviewed %s#%d", prkey.Name(repo), number), note, urlOf(findings))
@@ -196,6 +208,20 @@ func (r *Runner) Review(ctx context.Context, key, repo string, number int, sha, 
 	return fmt.Errorf("%s: %s", key, reason)
 }
 
+// markHandled records which review request a finished run answered. The poll
+// passes the request that started the run. `quorum run` has none: it answers
+// the newest request the poll has seen, and where there is none it leaves the
+// recorded one alone. Storing its empty timestamp instead made every request
+// the agent had already handled look new again on the next poll.
+func markHandled(rec *state.Record, reqAt string) {
+	if reqAt == "" {
+		reqAt = rec.SeenReqAt
+	}
+	if reqAt != "" {
+		rec.ReqAt = reqAt
+	}
+}
+
 func (r *Runner) recordDivergenceResult(key, sha, reqAt, runDir, runLog, reportURL string,
 	findings review.Findings, reason string,
 ) {
@@ -213,7 +239,7 @@ func (r *Runner) recordDivergenceResult(key, sha, reqAt, runDir, runLog, reportU
 		rec.ResumableRun = false
 		// Phase 1 is report-only. Mark this request handled so the agent
 		// cannot turn it into an unbounded sequence of fresh runs.
-		rec.ReqAt = reqAt
+		markHandled(rec, reqAt)
 	})
 }
 
@@ -240,7 +266,7 @@ func (r *Runner) recordAutoMergeFailure(key, reqAt, runDir string, findings revi
 		rec.RunDir = runDir
 		rec.CommentURL = urlOf(findings)
 		setCounts(rec, findings)
-		rec.ReqAt = reqAt
+		markHandled(rec, reqAt)
 		rec.Fails = 0
 		rec.ResumableRun = false
 	})
@@ -448,16 +474,17 @@ func (r *Runner) ensureClone(ctx context.Context, repo string) (string, error) {
 	}
 	defer unlock()
 
+	// Both go through the wrappers rather than the binaries: a cancelled run
+	// then reaches the transport git spawned, and the clone gets the same
+	// retry policy as every other GitHub call.
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-		cmd := exec.CommandContext(ctx, r.Tools.Git, "-C", dir, "fetch", "--prune", "--quiet", "origin")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("git fetch: %s", firstline.OrNoOutput(string(out)))
+		if err := r.Git.FetchAll(ctx, dir); err != nil {
+			return "", err
 		}
 		return dir, nil
 	}
-	cmd := exec.CommandContext(ctx, r.Tools.GH, "repo", "clone", repo, dir, "--", "--quiet")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("gh repo clone: %s", firstline.OrNoOutput(string(out)))
+	if err := r.GH.Clone(ctx, repo, dir); err != nil {
+		return "", err
 	}
 	return dir, nil
 }

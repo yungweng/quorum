@@ -26,7 +26,9 @@ import (
 const agentTTL = 30 * time.Second
 
 func (a *app) cmdStatus(args []string) int {
-	_ = args
+	if _, code, done := a.plainArgs("quorum status", args, nil, 0); done {
+		return code
+	}
 	a.dashboard(a.out, a.endsOnce())
 	return 0
 }

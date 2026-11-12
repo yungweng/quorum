@@ -116,7 +116,7 @@ func TestProgressStepModelFollowsThePhase(t *testing.T) {
 
 func TestBranchProgressKeyDoesNotInventPRZero(t *testing.T) {
 	p := Progress{Repo: "acme/api", Branch: "feature/crumb-tray"}
-	if got := p.Key(); got != "acme/api@feature/crumb-tray" {
+	if got := p.Key(); got != "acme/api#branch:feature/crumb-tray" {
 		t.Errorf("branch key = %q", got)
 	}
 }

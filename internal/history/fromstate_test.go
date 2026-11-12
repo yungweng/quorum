@@ -145,3 +145,46 @@ func TestAFailureCarriesNoCounts(t *testing.T) {
 		t.Errorf("run = %+v", run)
 	}
 }
+
+// A fix loop the agent ran used to reach the log as a plain review, so the
+// dashboard never counted one.
+func TestAnAgentFixLoopIsLoggedAsOne(t *testing.T) {
+	r := newRecorder(t)
+	r.apply(set(state.Record{Status: state.Running, Kind: KindBabysit}))
+	// The runner writes the loop's result while the record still says running.
+	if _, logged := r.apply(func(rec *state.Record) { rec.Rounds, rec.Converged = 3, true }); logged {
+		t.Fatal("the loop result alone was logged as a finished run")
+	}
+	run, ok := r.apply(func(rec *state.Record) { rec.Mark(state.OK, "") })
+	if !ok {
+		t.Fatal("the finished fix loop was not logged")
+	}
+	if run.Kind != KindBabysit || run.Rounds != 3 || run.Outcome != Converged || !run.Reviewed {
+		t.Errorf("logged %+v, want a converged babysit run of 3 rounds", run)
+	}
+
+	r = newRecorder(t)
+	r.apply(set(state.Record{Status: state.Running, Kind: KindBabysit, Rounds: 2}))
+	run, ok = r.apply(func(rec *state.Record) { rec.Mark(state.Failed, "review round 3 did not converge") })
+	if !ok || run.Kind != KindBabysit || run.Rounds != 2 || run.Outcome != Failed {
+		t.Errorf("logged %+v (%v), want a failed babysit run of 2 rounds", run, ok)
+	}
+}
+
+// Deciding not to review is not a fix loop, whatever ran on the pull request
+// before, and a review stays a review.
+func TestKindFollowsWhatWasRun(t *testing.T) {
+	r := newRecorder(t)
+	r.apply(set(state.Record{Status: state.OK, Kind: KindBabysit, Rounds: 2, Converged: true, At: "2026-08-05T13:00:00Z"}))
+	run, ok := r.apply(func(rec *state.Record) { rec.Mark(state.Skipped, "draft") })
+	if !ok || run.Kind != KindReview || run.Rounds != 0 {
+		t.Errorf("a skip was logged as %+v (%v)", run, ok)
+	}
+
+	r = newRecorder(t)
+	r.apply(set(state.Record{Status: state.Running}))
+	run, ok = r.apply(func(rec *state.Record) { rec.Mark(state.OK, "") })
+	if !ok || run.Kind != KindReview || run.Outcome != OK {
+		t.Errorf("a review was logged as %+v (%v)", run, ok)
+	}
+}

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,5 +73,45 @@ func TestEngineSwitchResetsModelAndEffort(t *testing.T) {
 	claude.apply(&cfg)
 	if cfg.ReviewModel != "opus" {
 		t.Fatalf("re-picking the same engine reset the model to %q", cfg.ReviewModel)
+	}
+}
+
+// codex is an engine like the others: needed when selected, and only then.
+func TestEngineBinaryNeedsCodexOnlyWhenSelected(t *testing.T) {
+	claudeOnly := spec.Bins{spec.Claude: "/bin/claude"}
+	if err := engineBinary(spec.Claude, claudeOnly, "REVIEW_ENGINE"); err != nil {
+		t.Errorf("claude without codex installed: %v", err)
+	}
+	want := "engine codex is selected (REVIEW_ENGINE) but no codex binary was found on PATH; install " + spec.Get(spec.Codex).Install
+	if err := engineBinary(spec.Codex, claudeOnly, "REVIEW_ENGINE"); err == nil || err.Error() != want {
+		t.Errorf("err = %v, want %q", err, want)
+	}
+}
+
+func TestAgentToolsRequireTheConfiguredEnginesOnly(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"gh", "git", "claude", "direnv"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isolateHome(t)
+	t.Setenv("PATH", dir)
+
+	a := &app{cfg: config.Default()}
+	if _, err := a.findTools(); err != nil {
+		t.Fatalf("findTools needed more than gh and git: %v", err)
+	}
+	if _, err := a.agentTools(); err == nil || !strings.Contains(err.Error(), "engine codex is selected (REVIEW_ENGINE)") {
+		t.Fatalf("the default config ran without codex: %v", err)
+	}
+	a.cfg.ReviewEngine = spec.Claude
+	if _, err := a.agentTools(); err != nil {
+		t.Fatalf("a claude review needed codex: %v", err)
+	}
+	// The fix engine only matters once the agent runs fix loops.
+	a.cfg.AgentAction = config.ActionBabysit
+	if _, err := a.agentTools(); err == nil || !strings.Contains(err.Error(), "FIX_ENGINE") {
+		t.Fatalf("a codex fix loop ran without codex: %v", err)
 	}
 }

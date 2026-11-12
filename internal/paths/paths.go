@@ -8,6 +8,8 @@ package paths
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/yungweng/quorum/internal/atomicfile"
 )
 
 // P holds the resolved locations for one process.
@@ -30,6 +32,21 @@ type P struct {
 	DepsCache   string // shared dependency trees, keyed by lock file hash
 
 	Plist string
+
+	// Where prbot kept the two files an upgrade starts from. Each is set only
+	// while quorum has no file of its own, see Resolve.
+	legacyConfig string
+	legacyState  string
+}
+
+// ConfigSource is the file the configuration is read from: quorum's own, or
+// prbot's while quorum has none. Saving always writes Config, after which this
+// is Config as well.
+func (p P) ConfigSource() string {
+	if p.legacyConfig != "" && !exists(p.Config) {
+		return p.legacyConfig
+	}
+	return p.Config
 }
 
 // LastPollFile is the heartbeat every finished poll writes.
@@ -59,7 +76,9 @@ func env(key, fallback string) string {
 // Resolve honours QUORUM_CONFIG, QUORUM_STATE_DIR and QUORUM_CLONE_DIR over the
 // XDG defaults. Where a quorum path does not exist yet but the prbot one does,
 // the old location is used, so an upgrade keeps its state instead of starting
-// from scratch. Writes always go to the new location.
+// from scratch. Writes always go to the new location: the config is read
+// through ConfigSource and saved to Config, and EnsureDirs copies the state
+// file over before the first process that writes it does so.
 func Resolve() P {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -96,17 +115,14 @@ func Resolve() P {
 	}
 
 	// Fall back to prbot's locations while quorum has none of its own. Only
-	// reads land there; the first save writes to the new path.
-	if !exists(p.Config) {
-		if legacy := filepath.Join(configHome, "prbot", "config"); exists(legacy) {
-			p.Config = legacy
-		}
+	// reads land there. The state file is the one path that names the old
+	// location in the meantime, because a command that only reads state never
+	// creates directories; EnsureDirs moves it on.
+	if legacy := filepath.Join(configHome, "prbot", "config"); !exists(p.Config) && exists(legacy) {
+		p.legacyConfig = legacy
 	}
-	if !exists(p.StateFile) {
-		legacyState := filepath.Join(stateHome, "prbot")
-		if exists(filepath.Join(legacyState, "state.json")) {
-			p.StateFile = filepath.Join(legacyState, "state.json")
-		}
+	if legacy := filepath.Join(stateHome, "prbot", "state.json"); !exists(p.StateFile) && exists(legacy) {
+		p.legacyState, p.StateFile = p.StateFile, legacy
 	}
 
 	return p
@@ -124,7 +140,11 @@ func (p P) RunRoots() []string { return []string{p.ReviewRuns, p.BabysitRuns} }
 
 // EnsureDirs creates everything a run needs. Callers that only read state can
 // skip it; poll, review and babysit cannot.
-func (p P) EnsureDirs() error {
+//
+// These are also the commands that write the state file, so this is where a
+// state file still read from prbot's location is copied to quorum's own. The
+// old file stays behind untouched.
+func (p *P) EnsureDirs() error {
 	dirs := append([]string{p.StateDir, p.RunningDir, p.ManualDir, p.RunLogDir, p.CloneDir},
 		append(p.RunRoots(), p.DepsCache)...)
 	for _, d := range dirs {
@@ -132,5 +152,19 @@ func (p P) EnsureDirs() error {
 			return err
 		}
 	}
+	if p.legacyState == "" {
+		return nil
+	}
+	own, legacy := p.legacyState, p.StateFile
+	if !exists(own) {
+		data, err := os.ReadFile(legacy)
+		if err != nil {
+			return err
+		}
+		if err := atomicfile.Write(own, data); err != nil {
+			return err
+		}
+	}
+	p.StateFile, p.legacyState = own, ""
 	return nil
 }

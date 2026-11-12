@@ -6,8 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // conflictRepo builds a real repository whose main and feature branches edited
@@ -403,5 +407,46 @@ func TestLsRemoteReportsAMissingRefAsErrRefNotFound(t *testing.T) {
 	}
 	if want := "could not resolve refs/heads/missing on " + dir; err.Error() != want {
 		t.Errorf("message = %q, want %q", err, want)
+	}
+}
+
+// git runs in its own process group, so cancelling a run takes what git
+// started with it: a pre-push hook in the middle of a test suite, a transport.
+// Killing git alone left those running.
+func TestCancelReachesWhatGitStarted(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	bin := filepath.Join(dir, "git")
+	script := "#!/bin/sh\nsleep 60 &\necho $! > " + pidFile + "\nwait\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := New(bin).Push(ctx, dir, "origin", "main", "abc123")
+		done <- err
+	}()
+
+	var pid int
+	for deadline := time.Now().Add(10 * time.Second); pid == 0; {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		}
+		if pid == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the hook never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Push returned %v, want the cancellation", err)
+	}
+	if proc.Alive(pid) {
+		t.Fatalf("the hook's child %d survived the cancelled push", pid)
 	}
 }

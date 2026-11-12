@@ -117,7 +117,7 @@ func (p Progress) Key() string {
 	if p.Number > 0 {
 		return prkey.Format(p.Repo, p.Number)
 	}
-	return p.Repo + "@" + p.Branch
+	return prkey.Branch(p.Repo, p.Branch)
 }
 
 func (p Progress) LogDir() string { return filepath.Join(p.RunDir, logsSubdir) }

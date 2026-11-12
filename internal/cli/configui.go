@@ -297,16 +297,18 @@ func readyToMergeSetting() setting {
 // cmdConfig shows every setting with its current value and lets one be changed
 // at a time. --path prints the file location instead, for scripts.
 func (a *app) cmdConfig(args []string) int {
-	for _, arg := range args {
-		if arg == "--path" || arg == "-p" {
-			if _, err := os.Stat(a.p.Config); os.IsNotExist(err) {
-				if err := a.cfg.Save(a.p.Config); err != nil {
-					return a.die("%v", err)
-				}
+	parsed, code, done := a.plainArgs("quorum config [-p | --path]", args, flagSet{"path": noValue, "p": noValue}, 0)
+	if done {
+		return code
+	}
+	if parsed.boolean("path", "p") {
+		if _, err := os.Stat(a.p.Config); os.IsNotExist(err) {
+			if err := a.cfg.Save(a.p.Config); err != nil {
+				return a.die("%v", err)
 			}
-			fmt.Println(a.p.Config)
-			return 0
 		}
+		fmt.Println(a.p.Config)
+		return 0
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !a.out.Color {
 		a.printSettings()

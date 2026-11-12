@@ -46,20 +46,78 @@ func parseArgs(argv []string, flags flagSet) (*args, error) {
 			return nil, fmt.Errorf("unknown option: %s", arg)
 		}
 		if key, value, ok := strings.Cut(name, "="); ok {
+			if takes, known := flags[key]; known && !takes {
+				// A switch is on by being there, so `--no-direnv=0` has to
+				// mean off rather than count as present.
+				on, err := switchValue(value)
+				if err != nil {
+					return nil, fmt.Errorf("--%s is a switch: %v", key, err)
+				}
+				if on {
+					a.opts[key] = "1"
+				} else {
+					delete(a.opts, key)
+				}
+				continue
+			}
 			a.opts[key] = value
 			continue
 		}
-		if takes, known := flags[name]; known && !takes {
+		takes, known := flags[name]
+		if known && !takes {
 			a.opts[name] = "1"
 			continue
 		}
 		if i+1 >= len(argv) {
+			if !known {
+				return nil, fmt.Errorf("unknown option: %s", arg)
+			}
 			return nil, fmt.Errorf("%s requires a value", arg)
 		}
 		i++
 		a.opts[name] = argv[i]
 	}
 	return a, nil
+}
+
+// switchValue reads the value written after a switch, as in `--post=0`.
+func switchValue(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("expected 1 or 0, got %q", v)
+}
+
+// plainArgs parses the arguments of a command that has no help page of its
+// own. Without it such a command ignored whatever followed its name, so
+// `quorum uninstall --help` removed the agent and `quorum gc --dryrun` deleted
+// cache. done reports that the command must not run: the usage line was asked
+// for and printed, or an argument was wrong.
+func (a *app) plainArgs(usage string, argv []string, flags flagSet, positionals int) (parsed *args, code int, done bool) {
+	accepted := flagSet{"h": noValue, "help": noValue}
+	for name, takes := range flags {
+		accepted[name] = takes
+	}
+	parsed, err := parseArgs(argv, accepted)
+	if err == nil {
+		if bad := parsed.unknown(accepted); len(bad) > 0 {
+			err = fmt.Errorf("unknown option: --%s", bad[0])
+		}
+	}
+	if err == nil && parsed.boolean("h", "help") {
+		fmt.Fprintln(a.out.Out, "usage: "+usage)
+		return nil, exitOK, true
+	}
+	if err == nil && len(parsed.pos) > positionals {
+		err = fmt.Errorf("unexpected argument: %s", parsed.pos[positionals])
+	}
+	if err != nil {
+		return nil, a.die("%v\nusage: %s", err, usage), true
+	}
+	return parsed, exitOK, false
 }
 
 func (a *args) has(names ...string) bool {

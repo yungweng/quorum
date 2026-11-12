@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,12 +28,11 @@ type check struct {
 }
 
 func (a *app) cmdDoctor(args []string) int {
-	fix := false
-	for _, arg := range args {
-		if arg == "--fix" {
-			fix = true
-		}
+	parsed, code, done := a.plainArgs("quorum doctor [--fix]", args, flagSet{"fix": noValue}, 0)
+	if done {
+		return code
 	}
+	fix := parsed.boolean("fix")
 
 	checks := a.runChecks()
 	worst := 0
@@ -76,7 +76,7 @@ func (a *app) cmdDoctor(args []string) int {
 		w.Printf("  state      cleared %d interrupted review(s)\n", n)
 	}
 	if runtime.GOOS == "darwin" {
-		for _, dir := range []string{a.p.ReviewRuns, filepath.Dir(a.p.CloneDir)} {
+		for _, dir := range a.cacheDirs() {
 			if isTimeMachineIncluded(dir) {
 				if err := exec.Command("tmutil", "addexclusion", dir).Run(); err == nil {
 					w.Printf("  backups    excluded %s from Time Machine\n", dir)
@@ -113,11 +113,7 @@ func (a *app) runChecks() []check {
 		{"git", "cloning and fetching", spec.Engine{}},
 	}
 	for _, e := range spec.All {
-		why := "the " + e.Name + " engine runs it"
-		if e.Name == spec.Codex {
-			why = "the reviewer panel runs it"
-		}
-		needs = append(needs, need{e.Bin, why, e})
+		needs = append(needs, need{e.Bin, "the " + e.Name + " engine runs it", e})
 	}
 	needs = append(needs, need{"direnv", "entering project environments", spec.Engine{}})
 	for _, t := range needs {
@@ -130,8 +126,9 @@ func (a *app) runChecks() []check {
 				// it, so pointing at it here would be advice that does nothing.
 				level, fix = 1, "install direnv, or pass --no-direnv"
 			}
-			if e := t.eng; e.Name != "" && e.Name != spec.Codex {
-				level, fix = 1, "install "+e.Install+", or leave REVIEW_ENGINE/FIX_ENGINE at "+spec.Codex
+			if e := t.eng; e.Name != "" {
+				// An engine nothing selects is worth knowing about, not broken.
+				level, fix = 1, "install "+e.Install+" to use the "+e.Name+" engine"
 				if a.cfg.ReviewEngine == e.Name || a.cfg.FixEngine == e.Name {
 					level, fix = 2, "install "+e.Install+"; your config selects the "+e.Name+" engine"
 				}
@@ -204,7 +201,7 @@ func (a *app) runChecks() []check {
 		out = append(out, check{"cache", fmt.Sprintf("%s of %s", ui.Bytes(size), ui.Bytes(limit)), 0, ""})
 	}
 
-	if runtime.GOOS == "darwin" && isTimeMachineIncluded(a.p.ReviewRuns) {
+	if runtime.GOOS == "darwin" && slices.ContainsFunc(a.cacheDirs(), isTimeMachineIncluded) {
 		out = append(out, check{"backups", "the review cache is being backed up by Time Machine", 1, "quorum doctor --fix"})
 	}
 
@@ -219,9 +216,9 @@ func (a *app) runChecks() []check {
 	// not the CPU count: roughly 150 MB per process from what runs have used.
 	codex := a.cfg.Codex()
 	budget := fmt.Sprintf("%d reviews x %d reviewers = up to %d Codex processes, about %s",
-		a.cfg.MaxConcurrent, a.cfg.Reviewers, codex, ui.Bytes(int64(codex)*150*1024*1024))
+		a.cfg.MaxConcurrent, a.cfg.Reviewers, codex, ui.Bytes(peakMemory(a.cfg)))
 	level, fixText := 0, ""
-	if mem, ok := totalMemory(); ok && int64(codex)*150*1024*1024 > mem/2 {
+	if mem, ok := totalMemory(); ok && peakMemory(a.cfg) > mem/2 {
 		level = 1
 		fixText = "lower MAX_CONCURRENT or REVIEWERS, this machine has " + ui.Bytes(mem) + " of memory"
 	}
@@ -270,6 +267,26 @@ func (a *app) countLog(phrase string) int {
 		}
 	}
 	return n
+}
+
+// peakMemory estimates what every reviewer pass of every concurrent review
+// needs together, at roughly 150 MB per process.
+func peakMemory(cfg config.Config) int64 {
+	return int64(cfg.Codex()) * 150 * 1024 * 1024
+}
+
+// cacheDirs are the directories that hold only what quorum can rebuild, which
+// is what makes them safe to keep out of backups: the cache root and the
+// managed clones. The clones sit below the root unless QUORUM_CLONE_DIR moves
+// them, and then it is that directory itself that counts. Its parent is
+// whatever the user happened to choose, a home directory for all quorum knows.
+func (a *app) cacheDirs() []string {
+	root := filepath.Dir(a.p.ReviewRuns)
+	dirs := []string{root}
+	if rel, err := filepath.Rel(root, a.p.CloneDir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		dirs = append(dirs, a.p.CloneDir)
+	}
+	return dirs
 }
 
 // isTimeMachineIncluded reports whether a directory would be backed up. The

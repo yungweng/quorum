@@ -24,3 +24,10 @@ func TestMalformedKey(t *testing.T) {
 		t.Fatal("a key without a number must keep its repo and report number 0")
 	}
 }
+
+func TestBranchBuildsTheKeyEveryStoreUses(t *testing.T) {
+	key := Branch("acme/api", "feature/login")
+	if key != "acme/api#branch:feature/login" || Repo(key) != "acme/api" || Number(key) != 0 {
+		t.Fatalf("Branch = %q, repo %q, number %d", key, Repo(key), Number(key))
+	}
+}

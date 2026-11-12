@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/firstline"
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // G runs git from a resolved binary.
@@ -48,14 +50,17 @@ func (g G) args(args []string) []string {
 	return append([]string{"-c", "core.hooksPath=" + g.hooksPath}, args...)
 }
 
+// start runs git in its own process group, so cancelling ctx reaches whatever
+// git spawned as well: a pre-push hook running a test suite, a credential
+// helper, a transport. A plain exec.CommandContext kills only git itself.
+func (g G) start(ctx context.Context, dir string, stdout, stderr io.Writer, args ...string) error {
+	return proc.Run(ctx, 0, proc.Spec{Name: g.Bin, Args: args, Dir: dir, Stdout: stdout, Stderr: stderr})
+}
+
 func (g G) run(ctx context.Context, dir string, args ...string) (string, error) {
 	args = g.args(args)
-	cmd := exec.CommandContext(ctx, g.Bin, args...)
-	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := g.start(ctx, dir, &stdout, &stderr, args...); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
@@ -69,10 +74,9 @@ func (g G) run(ctx context.Context, dir string, args ...string) (string, error) 
 // a push whose pre-push hook printed the reason.
 func (g G) runCombined(ctx context.Context, dir string, args ...string) (string, error) {
 	args = g.args(args)
-	cmd := exec.CommandContext(ctx, g.Bin, args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	var out bytes.Buffer
+	err := g.start(ctx, dir, &out, &out, args...)
+	return out.String(), err
 }
 
 func (g G) Toplevel(ctx context.Context, dir string) (string, error) {
@@ -95,6 +99,12 @@ func (g G) Fetch(ctx context.Context, dir, remote, refspec string) error {
 
 // FetchBranch updates origin's remote-tracking ref for branch, forcing it
 // when the branch was rewritten.
+// FetchAll refreshes every branch of origin and drops the ones deleted there.
+func (g G) FetchAll(ctx context.Context, dir string) error {
+	_, err := g.run(ctx, dir, "fetch", "--prune", "--quiet", "origin")
+	return err
+}
+
 func (g G) FetchBranch(ctx context.Context, dir, branch string) error {
 	return g.Fetch(ctx, dir, "origin", fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch))
 }
@@ -248,9 +258,7 @@ func (g G) UnmergedFiles(ctx context.Context, dir string) (string, error) {
 // MergeConflicts reports whether merging theirs into ours would conflict,
 // without touching the worktree or the index.
 func (g G) MergeConflicts(ctx context.Context, dir, ours, theirs string) (bool, error) {
-	cmd := exec.CommandContext(ctx, g.Bin, "merge-tree", "--write-tree", "--quiet", ours, theirs)
-	cmd.Dir = dir
-	err := cmd.Run()
+	err := g.start(ctx, dir, nil, nil, "merge-tree", "--write-tree", "--quiet", ours, theirs)
 	if err == nil {
 		return false, nil
 	}
@@ -267,9 +275,7 @@ func (g G) MergeConflicts(ctx context.Context, dir, ours, theirs string) (bool, 
 // ever moving the local ref, so falling behind is routine and loses nothing,
 // while own commits would be silently overtaken.
 func (g G) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
-	cmd := exec.CommandContext(ctx, g.Bin, "merge-base", "--is-ancestor", ancestor, descendant)
-	cmd.Dir = dir
-	err := cmd.Run()
+	err := g.start(ctx, dir, nil, nil, "merge-base", "--is-ancestor", ancestor, descendant)
 	if err == nil {
 		return true, nil
 	}

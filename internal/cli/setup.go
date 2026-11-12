@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/ui"
 	"golang.org/x/term"
 )
 
@@ -24,8 +25,17 @@ type option struct {
 	match func(config.Config) bool
 }
 
+// peakLoad describes what running concurrent reviews at once costs with the
+// configured number of reviewers, in the words doctor uses for the same sum.
+func peakLoad(cfg config.Config, concurrent int) string {
+	cfg.MaxConcurrent = concurrent
+	return fmt.Sprintf("up to %d Codex processes, about %s", cfg.Codex(), ui.Bytes(peakMemory(cfg)))
+}
+
 func (a *app) cmdSetup(args []string) int {
-	_ = args
+	if _, code, done := a.plainArgs("quorum setup", args, nil, 0); done {
+		return code
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !a.out.Color {
 		return a.die("setup needs a terminal; edit %s instead", a.p.Config)
 	}
@@ -60,13 +70,13 @@ func (a *app) cmdSetup(args []string) int {
 		{
 			"How many reviews should run at the same time?",
 			[]option{
-				{"3", "up to 18 Codex processes, about 2.6 GB",
+				{"3", peakLoad(cfg, 3),
 					func(c *config.Config) { c.MaxConcurrent = 3 },
 					func(c config.Config) bool { return c.MaxConcurrent <= 3 }},
-				{"6", "up to 36 Codex processes, about 5.3 GB",
+				{"6", peakLoad(cfg, 6),
 					func(c *config.Config) { c.MaxConcurrent = 6 },
 					func(c config.Config) bool { return c.MaxConcurrent > 3 && c.MaxConcurrent <= 6 }},
-				{"10", "up to 60 Codex processes, about 8.8 GB",
+				{"10", peakLoad(cfg, 10),
 					func(c *config.Config) { c.MaxConcurrent = 10 },
 					func(c config.Config) bool { return c.MaxConcurrent > 6 }},
 			},
