@@ -14,6 +14,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/prkey"
 	"github.com/yungweng/quorum/internal/ui"
 )
@@ -224,6 +225,9 @@ func (a *app) cmdWatch(args []string) int {
 }
 
 func (a *app) reload() {
+	// The paths as well: a watch opened before another command moved prbot's
+	// state over would otherwise keep reading the file nothing writes anymore.
+	a.p = paths.Resolve()
 	cfg, err := config.Load(a.p.ConfigSource())
 	a.cfg, a.configErr = cfg, err
 	a.out = ui.New(os.Stdout)

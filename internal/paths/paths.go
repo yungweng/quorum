@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/yungweng/quorum/internal/atomicfile"
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // P holds the resolved locations for one process.
@@ -156,6 +157,14 @@ func (p *P) EnsureDirs() error {
 		return nil
 	}
 	own, legacy := p.legacyState, p.StateFile
+	// Under the lock every state write takes: two commands starting together
+	// would otherwise both find no file, and the slower copy would replace
+	// what the faster one had already recorded.
+	unlock, err := proc.LockFile(own + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if !exists(own) {
 		data, err := os.ReadFile(legacy)
 		if err != nil {
