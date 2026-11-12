@@ -21,15 +21,15 @@ func TestAgoFrom(t *testing.T) {
 		{30 * 24 * time.Hour, "26 Jun"},
 	}
 	for _, c := range cases {
-		if got := AgoFrom(now, now.Add(-c.ago)); got != c.want {
+		if got := agoFrom(now, now.Add(-c.ago)); got != c.want {
 			t.Errorf("AgoFrom(-%s) = %q, want %q", c.ago, got, c.want)
 		}
 	}
-	if got := AgoFrom(now, time.Time{}); got != "" {
+	if got := agoFrom(now, time.Time{}); got != "" {
 		t.Errorf("zero time rendered as %q", got)
 	}
 	// Clock skew must not produce "-3m ago".
-	if got := AgoFrom(now, now.Add(time.Minute)); got != "just now" {
+	if got := agoFrom(now, now.Add(time.Minute)); got != "just now" {
 		t.Errorf("future time rendered as %q", got)
 	}
 }
@@ -119,7 +119,7 @@ func (c *countingWriter) String() string { return c.buf.String() }
 // it in one write, and must never clear first.
 func TestPaintDoesNotClearAndWritesOnce(t *testing.T) {
 	var c countingWriter
-	w := &Writer{Out: &c, Color: true, Links: true, Width: 80, Height: 24}
+	w := &Writer{Out: &c, Color: true, Links: true, Width: 80, height: 24}
 	w.Paint("first\nsecond\n")
 
 	got := c.String()
@@ -147,7 +147,7 @@ func TestPaintDoesNotClearAndWritesOnce(t *testing.T) {
 // cursor-home is in the wrong place.
 func TestPaintKeepsTheFrameOnScreen(t *testing.T) {
 	var b strings.Builder
-	w := &Writer{Out: &b, Color: true, Width: 80, Height: 3}
+	w := &Writer{Out: &b, Color: true, Width: 80, height: 3}
 	w.Paint("one\ntwo\nthree\nfour\nfive\n")
 
 	got := b.String()

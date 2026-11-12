@@ -24,7 +24,6 @@ import (
 	"github.com/yungweng/quorum/internal/proc"
 )
 
-// Prefix starts the name of every private temp directory.
 const Prefix = "quorum-"
 
 // New creates and claims a private temp directory. The returned function

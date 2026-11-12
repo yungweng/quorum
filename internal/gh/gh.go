@@ -16,9 +16,11 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yungweng/quorum/internal/firstline"
+	"github.com/yungweng/quorum/internal/prkey"
 )
 
 // Client runs gh. The zero value is unusable; use New.
@@ -33,6 +35,16 @@ type Client struct {
 
 func New(bin string) *Client {
 	return &Client{Bin: bin, Attempts: 3, Backoff: 2 * time.Second, Timeout: 120 * time.Second}
+}
+
+// NewDecoration returns a client for lookups that only decorate a screen: one
+// attempt, the given deadline, and no retry log, which would echo onto the
+// screen being drawn.
+func NewDecoration(bin string, timeout time.Duration) *Client {
+	c := New(bin)
+	c.Attempts = 1
+	c.Timeout = timeout
+	return c
 }
 
 func (c *Client) logf(format string, args ...any) {
@@ -79,12 +91,33 @@ func looksTransient(s string) bool {
 	return false
 }
 
-// run executes gh and returns stdout. A transient failure is retried with a
+// run executes gh in dir ("" for the process's own directory, otherwise gh
+// resolves the repository from that checkout) and returns stdout.
+func (c *Client) run(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return c.exec(ctx, invocation{dir: dir}, args...)
+}
+
+// invocation is how one gh command runs, beyond its arguments.
+type invocation struct {
+	dir   string
+	stdin []byte
+	// noTimeoutRetry reports a command killed by the per-call timeout with the
+	// error the kill produced, which is not transient, so it is not retried.
+	// A write that timed out may still have reached GitHub, and repeating one
+	// that is not idempotent posts it twice.
+	noTimeoutRetry bool
+}
+
+// RetryLogPhrase is in every log line of a retried gh command, which is what
+// doctor counts.
+const RetryLogPhrase = "retrying in"
+
+// exec runs gh and returns stdout. A transient failure is retried with a
 // linear backoff and finally reported wrapped in ErrTransient. A failed command
 // may still return stdout: GraphQL uses partial JSON responses when one field
 // fails, and callers that understand those responses must be able to inspect
 // them. All other callers discard stdout when err is non-nil.
-func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
+func (c *Client) exec(ctx context.Context, inv invocation, args ...string) ([]byte, error) {
 	attempts := max(c.Attempts, 1)
 
 	var lastErr error
@@ -92,6 +125,10 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	for attempt := 1; attempt <= attempts; attempt++ {
 		runCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 		cmd := exec.CommandContext(runCtx, c.Bin, args...)
+		cmd.Dir = inv.dir
+		if inv.stdin != nil {
+			cmd.Stdin = bytes.NewReader(inv.stdin)
+		}
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -114,17 +151,17 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 		// cancel() has already run, so runCtx.Err() is non-nil either way. Only
 		// DeadlineExceeded means the command really ran out of time; Canceled
 		// just means it finished first.
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		if !inv.noTimeoutRetry && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			msg = "timed out after " + c.Timeout.String()
 		}
-		lastErr = fmt.Errorf("gh %s: %s", strings.Join(args, " "), firstLine(msg))
+		lastErr = fmt.Errorf("gh %s: %s", strings.Join(args, " "), firstline.Trimmed(msg))
 
 		if !looksTransient(msg) {
 			return lastOut, lastErr
 		}
 		if attempt < attempts {
 			wait := time.Duration(attempt) * c.Backoff
-			c.logf("gh %s failed (%s), retrying in %s", args[0], firstLine(msg), wait)
+			c.logf("gh %s failed (%s), "+RetryLogPhrase+" %s", args[0], firstline.Trimmed(msg), wait)
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
@@ -133,13 +170,6 @@ func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
 		}
 	}
 	return lastOut, fmt.Errorf("%w: %v", ErrTransient, lastErr)
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return strings.TrimSpace(s)
 }
 
 // PR is one search result.
@@ -159,13 +189,13 @@ type PR struct {
 }
 
 // Key is the "owner/repo#number" identity used everywhere else.
-func (p PR) Key() string { return fmt.Sprintf("%s#%d", p.Repository.NameWithOwner, p.Number) }
+func (p PR) Key() string { return prkey.Format(p.Repository.NameWithOwner, p.Number) }
 
 const searchFields = "number,repository,title,author,updatedAt,isDraft,url"
 
 // Login is the authenticated user's handle.
 func (c *Client) Login(ctx context.Context) (string, error) {
-	out, err := c.run(ctx, "api", "user", "--jq", ".login")
+	out, err := c.run(ctx, "", "api", "user", "--jq", ".login")
 	if err != nil {
 		return "", err
 	}
@@ -178,7 +208,7 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 
 // Teams lists "org/slug" for every team the user belongs to.
 func (c *Client) Teams(ctx context.Context) ([]string, error) {
-	out, err := c.run(ctx, "api", "user/teams", "--paginate",
+	out, err := c.run(ctx, "", "api", "user/teams", "--paginate",
 		"--jq", `.[] | "\(.organization.login)/\(.slug)"`)
 	if err != nil {
 		return nil, err
@@ -208,7 +238,7 @@ func (c *Client) SearchTeamReviewRequested(ctx context.Context, team string, sco
 }
 
 func (c *Client) searchPRs(ctx context.Context, args []string) ([]PR, error) {
-	out, err := c.run(ctx, args...)
+	out, err := c.run(ctx, "", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +254,6 @@ func (c *Client) searchPRs(ctx context.Context, args []string) ([]PR, error) {
 	return prs, nil
 }
 
-// Details are the fields the search API does not carry.
 type LatestReview struct {
 	State  string `json:"state"`
 	Author struct {
@@ -232,6 +261,7 @@ type LatestReview struct {
 	} `json:"author"`
 }
 
+// Details are the fields the search API does not carry.
 type Details struct {
 	BaseRefName       string         `json:"baseRefName"`
 	HeadRefOid        string         `json:"headRefOid"`
@@ -252,10 +282,9 @@ type Details struct {
 	} `json:"author"`
 }
 
-// PRDetails fetches the head SHA and the fork flag for one pull request.
 func (c *Client) PRDetails(ctx context.Context, repo string, number int) (Details, error) {
 	var d Details
-	out, err := c.run(ctx, "pr", "view", fmt.Sprint(number), "--repo", repo,
+	out, err := c.run(ctx, "", "pr", "view", fmt.Sprint(number), "--repo", repo,
 		"--json", "baseRefName,headRefOid,isDraft,isCrossRepository,author,state,title,mergeable,mergeStateStatus,reviewDecision,latestReviews,autoMergeRequest")
 	if err != nil {
 		return d, err
@@ -315,7 +344,7 @@ func (c *Client) MergePolicy(ctx context.Context, repo string, number int, headS
     }
   }
 }`
-	out, err := c.run(ctx, "api", "graphql", "-f", "query="+query,
+	out, err := c.run(ctx, "", "api", "graphql", "-f", "query="+query,
 		"-F", "owner="+owner, "-F", "name="+name, "-F", "number="+fmt.Sprint(number))
 	if err != nil {
 		return MergeSettings{}, err
@@ -386,6 +415,16 @@ const (
 	StateUnavailable = "UNAVAILABLE"
 )
 
+// ValidPRState reports whether state is one PRStates can answer.
+func ValidPRState(state string) bool {
+	switch state {
+	case StateOpen, StateAutoMerge, StateClosed, StateMerged, StateUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
 // safeRepo matches the owner/name shapes GitHub actually allows. Repository
 // names reach PRStates from the state file and are interpolated into a query,
 // so anything else is dropped rather than quoted and hoped for.
@@ -410,12 +449,8 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 	var q strings.Builder
 	q.WriteString("query {")
 	for _, key := range keys {
-		repo, numText, ok := strings.Cut(key, "#")
-		if !ok || !safeRepo.MatchString(repo) {
-			continue
-		}
-		number, err := strconv.Atoi(numText)
-		if err != nil || number <= 0 {
+		repo, number := prkey.Repo(key), prkey.Number(key)
+		if !safeRepo.MatchString(repo) || number <= 0 {
 			continue
 		}
 		owner, name, _ := strings.Cut(repo, "/")
@@ -429,7 +464,7 @@ func (c *Client) PRStates(ctx context.Context, keys []string) (map[string]string
 		return map[string]string{}, nil
 	}
 
-	out, runErr := c.run(ctx, "api", "graphql", "-f", "query="+q.String())
+	out, runErr := c.run(ctx, "", "api", "graphql", "-f", "query="+q.String())
 	var resp struct {
 		Data map[string]*struct {
 			PullRequest *struct {
@@ -518,7 +553,7 @@ type timelineEvent struct {
 // This timestamp is the trigger: a request quorum has not recorded yet means
 // review now, and re-requesting a review produces a fresh one on purpose.
 func (c *Client) LatestReviewRequest(ctx context.Context, repo string, number int, login string, teamSlugs []string) (string, error) {
-	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/issues/%d/timeline", repo, number), "--paginate")
+	out, err := c.run(ctx, "", "api", fmt.Sprintf("repos/%s/issues/%d/timeline", repo, number), "--paginate")
 	if err != nil {
 		return "", err
 	}
@@ -527,18 +562,8 @@ func (c *Client) LatestReviewRequest(ctx context.Context, repo string, number in
 		wanted[s] = true
 	}
 
-	// gh merges paginated arrays into one, but has not always done so. Decoding
-	// successive top-level values reads either shape.
-	dec := json.NewDecoder(bytes.NewReader(out))
 	latest := ""
-	for {
-		var page []timelineEvent
-		if err := dec.Decode(&page); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return "", fmt.Errorf("timeline %s#%d: %w", repo, number, err)
-		}
+	if err := decodePages(out, func(page []timelineEvent) bool {
 		for _, e := range page {
 			if e.Event != "review_requested" {
 				continue
@@ -549,8 +574,33 @@ func (c *Client) LatestReviewRequest(ctx context.Context, repo string, number in
 				latest = e.CreatedAt
 			}
 		}
+		return true
+	}); err != nil {
+		return "", fmt.Errorf("timeline %s#%d: %w", repo, number, err)
 	}
 	return latest, nil
+}
+
+// decodePages hands each page of a --paginate response to page until page
+// returns false or the output ends.
+//
+// gh merges paginated arrays into one, but has not always done so, and object
+// responses arrive as one top-level value per page. Decoding successive
+// top-level values reads every shape.
+func decodePages[T any](out []byte, page func(T) bool) error {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var v T
+		if err := dec.Decode(&v); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if !page(v) {
+			return nil
+		}
+	}
 }
 
 // TeamSlugsFor returns the slugs of teams that belong to the given owner, since

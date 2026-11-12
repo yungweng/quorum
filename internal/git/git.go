@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/yungweng/quorum/internal/cachefs"
+	"github.com/yungweng/quorum/internal/firstline"
 )
 
 // G runs git from a resolved binary.
@@ -47,7 +48,6 @@ func (g G) args(args []string) []string {
 	return append([]string{"-c", "core.hooksPath=" + g.hooksPath}, args...)
 }
 
-// run executes git in dir and returns trimmed stdout.
 func (g G) run(ctx context.Context, dir string, args ...string) (string, error) {
 	args = g.args(args)
 	cmd := exec.CommandContext(ctx, g.Bin, args...)
@@ -60,7 +60,7 @@ func (g G) run(ctx context.Context, dir string, args ...string) (string, error) 
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), firstLine(msg))
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), firstline.Trimmed(msg))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -75,12 +75,10 @@ func (g G) runCombined(ctx context.Context, dir string, args ...string) (string,
 	return string(out), err
 }
 
-// Toplevel resolves the repository root containing dir.
 func (g G) Toplevel(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "rev-parse", "--show-toplevel")
 }
 
-// RevParse resolves a revision to a full SHA.
 func (g G) RevParse(ctx context.Context, dir, rev string) (string, error) {
 	return g.run(ctx, dir, "rev-parse", rev)
 }
@@ -90,14 +88,33 @@ func (g G) CurrentBranch(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
-// Fetch runs a fetch with an explicit refspec.
 func (g G) Fetch(ctx context.Context, dir, remote, refspec string) error {
 	_, err := g.run(ctx, dir, "fetch", "-q", remote, refspec)
 	return err
 }
 
+// FetchBranch updates origin's remote-tracking ref for branch, forcing it
+// when the branch was rewritten.
+func (g G) FetchBranch(ctx context.Context, dir, branch string) error {
+	return g.Fetch(ctx, dir, "origin", fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch))
+}
+
+// ErrRefNotFound reports that the remote has no such ref.
+var ErrRefNotFound = errors.New("ref not found on remote")
+
+// refNotFoundError keeps the message naming the ref and remote while matching
+// ErrRefNotFound.
+type refNotFoundError struct{ ref, remote string }
+
+func (e refNotFoundError) Error() string {
+	return fmt.Sprintf("could not resolve %s on %s", e.ref, e.remote)
+}
+
+func (e refNotFoundError) Is(target error) bool { return target == ErrRefNotFound }
+
 // LsRemote asks the remote what a ref currently points at, without fetching.
 // This is how head drift is detected: the local worktree cannot answer it.
+// A ref the remote does not have is reported as ErrRefNotFound.
 func (g G) LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
 	out, err := g.run(ctx, dir, "ls-remote", remote, ref)
 	if err != nil {
@@ -105,7 +122,7 @@ func (g G) LsRemote(ctx context.Context, dir, remote, ref string) (string, error
 	}
 	sha, _, ok := strings.Cut(out, "\t")
 	if !ok || sha == "" {
-		return "", fmt.Errorf("could not resolve %s on %s", ref, remote)
+		return "", refNotFoundError{ref: ref, remote: remote}
 	}
 	return sha, nil
 }
@@ -130,7 +147,6 @@ func (g G) ShowFile(ctx context.Context, dir, rev, path string) (string, bool, e
 	return out, true, nil
 }
 
-// WorktreeAdd creates a detached worktree at path checked out at sha.
 func (g G) WorktreeAdd(ctx context.Context, repoRoot, path, sha string) error {
 	_, err := g.run(ctx, repoRoot, "worktree", "add", "--quiet", "--detach", path, sha)
 	return err
@@ -145,12 +161,10 @@ func (g G) WorktreeRemove(ctx context.Context, repoRoot, path string) {
 	}
 }
 
-// WorktreePrune clears worktree registrations whose directories are gone.
 func (g G) WorktreePrune(ctx context.Context, repoRoot string) {
 	_, _ = g.run(ctx, repoRoot, "worktree", "prune")
 }
 
-// Dirty reports whether the working tree has uncommitted changes.
 func (g G) Dirty(ctx context.Context, dir string) (bool, error) {
 	out, err := g.StatusPorcelain(ctx, dir)
 	if err != nil {
@@ -159,7 +173,6 @@ func (g G) Dirty(ctx context.Context, dir string) (bool, error) {
 	return out != "", nil
 }
 
-// StatusPorcelain returns the stable, machine-readable working tree status.
 func (g G) StatusPorcelain(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "status", "--porcelain")
 }
@@ -221,7 +234,6 @@ func (g G) PrePush(ctx context.Context, dir, remote, branch, sha, remoteSHA stri
 	return g.runCombined(ctx, dir, "hook", "run", "--ignore-missing", "--to-stdin="+filepath.Clean(path), "pre-push", "--", remote, url)
 }
 
-// PrePushPath resolves the configured pre-push hook path.
 func (g G) PrePushPath(ctx context.Context, dir string) (string, error) {
 	return g.run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push")
 }
@@ -268,14 +280,11 @@ func (g G) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bo
 	return false, fmt.Errorf("git merge-base --is-ancestor: %v", err)
 }
 
-// HasLocalBranch reports whether a local branch of that name exists.
 func (g G) HasLocalBranch(ctx context.Context, dir, branch string) bool {
 	_, err := g.run(ctx, dir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	return err == nil
 }
 
-// ChangedFiles lists paths that differ between two revisions, limited to
-// pathspecs when given.
 func (g G) ChangedFiles(ctx context.Context, dir, revRange string, pathspecs ...string) (string, error) {
 	args := append([]string{"diff", "--name-only", revRange}, appendPathspecs(pathspecs)...)
 	return g.run(ctx, dir, args...)
@@ -286,14 +295,12 @@ func (g G) ChangedFilesNoRenames(ctx context.Context, dir, revRange string) (str
 	return g.run(ctx, dir, "diff", "--no-renames", "--name-only", revRange)
 }
 
-// Diff renders the diff against a revision, limited to pathspecs when given.
 func (g G) Diff(ctx context.Context, dir, rev string, pathspecs ...string) string {
 	args := append([]string{"diff", rev}, appendPathspecs(pathspecs)...)
 	out, _ := g.run(ctx, dir, args...)
 	return out
 }
 
-// IsIgnored reports whether a path is covered by gitignore.
 func (g G) IsIgnored(ctx context.Context, dir, path string) bool {
 	_, err := g.run(ctx, dir, "check-ignore", "-q", "--", path)
 	return err == nil
@@ -304,11 +311,4 @@ func appendPathspecs(pathspecs []string) []string {
 		return nil
 	}
 	return append([]string{"--"}, pathspecs...)
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return strings.TrimSpace(s)
 }

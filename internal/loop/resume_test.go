@@ -69,7 +69,7 @@ func testRunWith(t *testing.T, fake *fakeReviewer) *run {
 		p:   &Pipeline{Review: fake},
 		o:   Options{},
 		ctx: context.Background(),
-		rep: NopReporter{},
+		rep: nopReporter{},
 	}
 }
 

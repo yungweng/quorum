@@ -8,14 +8,30 @@ import (
 // Markers the fix session uses to signal state back to the pipeline. They are
 // matched at the start of a line in the session's final message.
 const (
-	// MarkerQuestions means the session stopped for a product decision.
-	MarkerQuestions = "OPEN QUESTIONS:"
-	// MarkerDisputed means the session believes the remaining Blocker/Critical
+	// markerQuestions means the session stopped for a product decision.
+	markerQuestions = "OPEN QUESTIONS:"
+	// markerDisputed means the session believes the remaining Blocker/Critical
 	// findings are wrong and no code change is warranted.
-	MarkerDisputed = "DISPUTED FINDINGS:"
-	// MarkerComment introduces the fix-log text the pipeline posts to the PR.
-	MarkerComment = "PR COMMENT:"
+	markerDisputed = "DISPUTED FINDINGS:"
+	// markerComment introduces the fix-log text the pipeline posts to the PR.
+	markerComment = "PR COMMENT:"
 )
+
+// promptTarget is what the fix prompts say about the run's target: the pull
+// request or the PR-less branch, and whether rounds push or stay local.
+type promptTarget struct {
+	number     int
+	branch     string
+	branchOnly bool
+	offline    bool
+}
+
+func (t promptTarget) name() string {
+	if t.branchOnly {
+		return "branch " + t.branch
+	}
+	return fmt.Sprintf("PR #%d", t.number)
+}
 
 // standingRules are sent once, with the first prompt, and stay in effect for
 // every later step because all of them resume the same session.
@@ -27,16 +43,16 @@ const (
 //     itself via gh so it appears as a normal comment from the user;
 //   - the DISPUTED FINDINGS contract, which is the only way a round with no
 //     commits is allowed to end without stopping the run.
-func standingRules(branch string, autonomous, branchOnly, offline bool, repoRules string) string {
+func standingRules(t promptTarget, autonomous bool, repoRules string) string {
 	target := "an existing pull request"
 	pipeline := "CI checks -> external code review -> fix rounds"
 	record := "in the PR comment section of your final message"
-	if branchOnly {
+	if t.branchOnly {
 		target = "a pushed branch that has no open pull request"
 		pipeline = "external code review -> fix rounds"
 		record = "in your final message"
 	}
-	if offline {
+	if t.offline {
 		pipeline = "external code review -> fix rounds -> local tests, with one push and one CI run at the very end"
 	}
 	decision := `- Only for product decisions you cannot responsibly make yourself (data semantics, user-visible policy, migration of existing data): stop and end your final message with a line that is exactly:
@@ -47,12 +63,12 @@ followed by short numbered questions. Use this marker for nothing else. You will
 	}
 
 	pushRules := fmt.Sprintf(`- You are on a detached checkout, so push with exactly: git push origin HEAD:refs/heads/%s
-- Only push when a step explicitly tells you to. Never create or edit PRs or comments, never rewrite published history.`, branch)
-	if offline {
+- Only push when a step explicitly tells you to. Never create or edit PRs or comments, never rewrite published history.`, t.branch)
+	if t.offline {
 		// CI repair steps after the run's single final push are the one place
 		// a step still tells the session to push.
 		pushRules = fmt.Sprintf(`- Do not push. The pipeline pushes the branch itself, once, at the end of the run. Only when a step explicitly tells you to push, push with exactly: git push origin HEAD:refs/heads/%s
-- Never create or edit PRs or comments, never rewrite published history.`, branch)
+- Never create or edit PRs or comments, never rewrite published history.`, t.branch)
 	}
 	rules := fmt.Sprintf(`You are the fix agent for %s, running unattended inside a pipeline (%s), in a dedicated git worktree on a detached checkout of the pushed branch head.
 
@@ -79,16 +95,12 @@ This repository additionally defines its own rules below. The external review en
 	return rules
 }
 
-// firstPrompt wraps the opening step in the standing rules and PR context.
 func firstPrompt(rules, prContext, step string) string {
 	return fmt.Sprintf("%s\n\n## Pull request\n\n%s\n\n## Current step\n\n%s", rules, prContext, step)
 }
 
-// ciFixPrompt asks the session to fix red checks.
-//
-// The closing sentence matters for cost: an earlier version had Codex watch CI
-// itself, which was pure idle time billed to the fix session while the pipeline
-// was already watching the same checks.
+// The closing sentence matters for cost: a session that watches CI itself
+// bills idle time while the pipeline is already watching the same checks.
 func ciFixPrompt(number int, failsJSON string) string {
 	return fmt.Sprintf(`CI on PR #%d is red. Failing checks as JSON:
 
@@ -99,7 +111,7 @@ Inspect the failures with gh (for example: gh run view <run-id> --log-failed; th
 End your final message with a line that is exactly:
 %s
 followed by a short log comment for the PR: what failed, what you changed and how, and which checks you ran. Write it in the language of the PR description, plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
-		number, failsJSON, MarkerComment)
+		number, failsJSON, markerComment)
 }
 
 // testFixPrompt asks the session to repair the repository's local test
@@ -120,7 +132,7 @@ Fix the problems, run the command yourself to confirm it passes, and commit. Do 
 End your final message with a line that is exactly:
 %s
 followed by a short log comment for the PR: what failed, what you changed and how. Write it plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
-		testCmd, logTail, MarkerComment)
+		testCmd, logTail, markerComment)
 }
 
 // pushFixPrompt asks the session to repair whatever the repository's own
@@ -144,7 +156,7 @@ Hard rules for this step:
 End your final message with a line that is exactly:
 %s
 followed by a short log comment for the PR: what the check reported, what you changed and how. Write it plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
-		branch, logTail, MarkerComment)
+		branch, logTail, markerComment)
 }
 
 // fixRoundPrompt hands a review round's findings to the session.
@@ -152,15 +164,15 @@ followed by a short log comment for the PR: what the check reported, what you ch
 // Suggestions and Questions are handed over once per round but never keep the
 // loop alive; only Blockers and Critical do. The PR COMMENT block is what the
 // pipeline posts afterwards.
-func fixRoundPrompt(number int, branch string, branchOnly, offline bool, comment string) string {
+func fixRoundPrompt(t promptTarget, comment string) string {
 	finish := "Run the affected checks, commit your work, and push. Do not wait for CI; the pipeline watches the checks for you."
 	finishBranch := "Run the affected checks, commit your work, and push."
-	if offline {
+	if t.offline {
 		finish = "Run the affected checks and commit your work. Do not push."
 		finishBranch = finish
 	}
-	if branchOnly {
-		return fmt.Sprintf(`An external code review of branch %s found issues. The full review report follows below.
+	if t.branchOnly {
+		return fmt.Sprintf(`An external code review of %s found issues. The full review report follows below.
 
 Please check for each finding whether it is a real issue or might be intended behavior.
 - For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
@@ -170,9 +182,9 @@ Please check for each finding whether it is a real issue or might be intended be
 
 ---
 
-%s`, branch, finishBranch, comment)
+%s`, t.name(), finishBranch, comment)
 	}
-	return fmt.Sprintf(`An external code review of PR #%d found issues. The full review comment follows below.
+	return fmt.Sprintf(`An external code review of %s found issues. The full review comment follows below.
 
 Please check for each finding whether it is a real issue or might be intended behavior.
 - For every real issue that is not intended: plan and fix it. This is mandatory for Blockers and Critical findings.
@@ -186,7 +198,7 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 
 ---
 
-%s`, number, finish, MarkerComment, comment)
+%s`, t.name(), finish, markerComment, comment)
 }
 
 // suggestionRoundPrompt hands the Suggestions of the final, otherwise clean
@@ -196,15 +208,15 @@ followed by a short log comment for the PR: what you fixed and how, which checks
 // Suggestion can be an artifact of the reviewers' isolated worktree (a missing
 // service, an unprovisioned test database), and changing nothing stays an
 // explicitly allowed outcome.
-func suggestionRoundPrompt(number int, branch string, branchOnly, offline bool, comment string) string {
+func suggestionRoundPrompt(t promptTarget, comment string) string {
 	finish := "If you changed code: run the affected checks, commit, and push. Do not wait for CI; the pipeline watches the checks for you."
 	finishBranch := "If you changed code: run the affected checks, commit, and push."
-	if offline {
+	if t.offline {
 		finish = "If you changed code: run the affected checks and commit. Do not push."
 		finishBranch = finish
 	}
-	if branchOnly {
-		return fmt.Sprintf(`The final external code review of branch %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
+	if t.branchOnly {
+		return fmt.Sprintf(`The final external code review of %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review report follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
 
 Suggestions that survive a clean review usually point at a real improvement, so lean towards implementing them. For each Suggestion, first decide whether it is worth implementing: implement it when it improves the code and you can verify the change with the affected checks. Skip it only when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk clearly outweighs its value. Changing nothing is still a valid outcome when no Suggestion holds up.
 
@@ -212,9 +224,9 @@ Suggestions that survive a clean review usually point at a real improvement, so 
 
 ---
 
-%s`, branch, finishBranch, comment)
+%s`, t.name(), finishBranch, comment)
 	}
-	return fmt.Sprintf(`The final external code review of PR #%d found no Blockers and no Critical issues, but it still lists Suggestions. The full review comment follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
+	return fmt.Sprintf(`The final external code review of %s found no Blockers and no Critical issues, but it still lists Suggestions. The full review comment follows below. This is the last step of the run and no further review will check your work, so keep each change focused and run the checks it affects.
 
 Suggestions that survive a clean review usually point at a real improvement, so lean towards implementing them. For each Suggestion, first decide whether it is worth implementing: implement it when it improves the code and you can verify the change with the affected checks. Skip it only when it describes intended behavior, stems from the reviewers' isolated environment (for example a missing service or an unprovisioned test database), or its risk clearly outweighs its value. Changing nothing is still a valid outcome when no Suggestion holds up.
 
@@ -226,26 +238,22 @@ If you changed nothing, do not commit or push, do not use the marker, and briefl
 
 ---
 
-%s`, number, finish, MarkerComment, comment)
+%s`, t.name(), finish, markerComment, comment)
 }
 
 // conflictFixPrompt asks the session to resolve the base merge the pipeline
 // already started. The direction is base into head: it keeps the branch's own
 // history intact and is the merge GitHub would attempt for the PR.
-func conflictFixPrompt(number int, base, branch string, branchOnly, offline bool) string {
-	target := fmt.Sprintf("PR #%d", number)
-	if branchOnly {
-		target = "branch " + branch
-	}
+func conflictFixPrompt(t promptTarget, base string) string {
 	finish := ", and push."
-	if offline {
+	if t.offline {
 		finish = ". Do not push."
 	}
 	prompt := fmt.Sprintf(`The pipeline started merging base branch %s into %s, but Git stopped with conflicts.
 
 Continue the active merge; do not abort or restart it. Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge %s into %s"%s`,
-		base, target, base, branch, finish)
-	if branchOnly {
+		base, t.name(), base, t.branch, finish)
+	if t.branchOnly {
 		return prompt
 	}
 	return prompt + fmt.Sprintf(`
@@ -253,13 +261,11 @@ Continue the active merge; do not abort or restart it. Resolve every conflict so
 End your final message with a line that is exactly:
 %s
 followed by a short log comment for the PR: which files conflicted and how the conflicts were resolved. Write it in the language of the PR description, plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
-		MarkerComment)
+		markerComment)
 }
 
-// commitPrompt asks the session to commit what it left in the working tree.
 const commitPrompt = `There are uncommitted changes in the worktree. Review them and commit everything that belongs to the task (git add + git commit with a descriptive message). Move disposable QA artifacts that you created to $TMPDIR or /tmp, or delete them. Do not push. Finish with an empty git status --porcelain.`
 
-// bounceQuestionsPrompt sends open questions back in autonomous mode.
 const bounceQuestionsPrompt = `No human is available during this automated run. Decide these questions yourself: pick the most conservative reasonable option for each, apply it, and record the decision in the PR comment section of your final message. Continue with the current step. All rules from the initial instructions still apply.`
 
 // finalDescriptionPrompt asks a fresh read-only session to replace the PR body
@@ -284,7 +290,6 @@ Return only the complete Markdown PR description. Do not wrap it in a code fence
 // declaring the findings wrong, and the run would finish on its own say-so.
 const forceRecheckPrompt = `Re-examine your disputed findings adversarially, as if a colleague insisted they are real. For each one, actively try to construct the failure scenario the reviewer describes and check the code against it. If a finding turns out to be real after all, implement the fix and commit. Only if you remain confident it is wrong after this re-check, explain why and end your message with the DISPUTED FINDINGS: marker again. All rules from the initial instructions still apply.`
 
-// answersPrompt feeds a human's answers back into the session.
 func answersPrompt(answers string) string {
 	return fmt.Sprintf(`Answers from the user to your open questions:
 
@@ -292,7 +297,6 @@ func answersPrompt(answers string) string {
 Continue with the current step using these decisions. All rules from the initial instructions still apply.`, answers)
 }
 
-// disputeReplyPrompt feeds a human's pushback on a dispute back into the session.
 func disputeReplyPrompt(reply string) string {
 	return fmt.Sprintf(`The user does not accept your dispute as-is and replies:
 
@@ -300,7 +304,6 @@ func disputeReplyPrompt(reply string) string {
 Reconsider the disputed findings with this input. If the user is right, implement the fix and commit. If you still believe a finding is wrong, explain why and end your message with the DISPUTED FINDINGS: marker again. All rules from the initial instructions still apply.`, reply)
 }
 
-// prContext describes the pull request to the session.
 func prContext(number int, title, branch, base, url, body, extra string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "PR #%d: %s\nBranch: %s (base: %s)\nURL: %s\n\nPR description:\n\n%s",
@@ -331,7 +334,6 @@ func section(text, marker string) string {
 	return ""
 }
 
-// hasMarker reports whether a marker appears at the start of any line.
 func hasMarker(text, marker string) bool {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, marker) {

@@ -179,7 +179,6 @@ func (a *app) cmdSetup(args []string) int {
 	return 0
 }
 
-// ask draws a list and returns the chosen index.
 func (a *app) ask(in *bufio.Reader, title string, opts []option, cfg config.Config) (int, error) {
 	cursor := 0
 	for i, o := range opts {
@@ -254,7 +253,6 @@ func (a *app) ask(in *bufio.Reader, title string, opts []option, cfg config.Conf
 	}
 }
 
-// askText reads one line, showing what is currently set.
 func (a *app) askText(in *bufio.Reader, prompt, current string) (string, error) {
 	w := a.out
 	fmt.Fprintln(w.Out)

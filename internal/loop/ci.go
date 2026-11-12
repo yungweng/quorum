@@ -41,16 +41,13 @@ type bgResult struct {
 	err error
 }
 
-// startReview kicks off a review in the background.
+// startReviewWith kicks off a review in the background, reusing resumeDir's
+// completed reviewer output when it is non-empty.
 //
 // A review only needs the pushed PR head, not green checks, so it overlaps the
-// CI wait instead of queueing behind it. It must never overlap a Codex fix
+// CI wait instead of queueing behind it. It must never overlap a fix
 // session: a fix moves the head sha out from under the findings, which is why
 // ensureCIGreen cancels a running review before it starts one.
-func (r *run) startReview(round int) { r.startReviewWith(round, "") }
-
-// startReviewWith starts a review in the background, reusing resumeDir's
-// completed reviewer output when it is non-empty.
 func (r *run) startReviewWith(round int, resumeDir string) {
 	if r.review != nil {
 		return
@@ -71,41 +68,35 @@ func (r *run) startReviewWith(round int, resumeDir string) {
 		res, err := r.p.Review.Run(ctx, opts)
 		switch {
 		case err != nil:
-			br.outcome.Store(SideReviewFailed)
+			br.outcome.Store(sideReviewFailed)
 		case res != nil && res.Posted:
 			br.outcome.Store(SideReviewPosted)
 		default:
-			br.outcome.Store(SideReviewFinished)
+			br.outcome.Store(sideReviewFinished)
 		}
 		br.done <- bgResult{res, err}
 	}()
 }
 
 func (r *run) reviewOptions() review.Options {
-	o := review.Options{
-		Repo:             r.o.Repo,
-		Number:           r.pr.Number,
-		Branch:           branchOnlyValue(r.target.BranchOnly, r.branch),
-		HeadSHA:          branchOnlyValue(r.target.BranchOnly, r.headSHA),
-		RepoRoot:         r.o.RepoRoot,
-		Runs:             r.o.Reviewers,
-		Engine:           r.o.ReviewEngine,
-		Model:            r.o.ReviewModel,
-		Effort:           r.o.ReviewEffort,
-		Rules:            r.o.Rules,
-		BaseBranch:       r.pr.BaseRefName,
-		Post:             r.o.Post && !r.target.BranchOnly,
-		UseDirenv:        r.o.UseDirenv,
-		AllowEnvrcChange: r.o.AllowEnvrcChange,
-		RunsDir:          r.o.ReviewRunsDir,
-		SharedRunsDirs:   []string{r.o.RunsDir},
-		DepsDir:          r.o.DepsDir,
-		CodexBin:         r.o.CodexBin,
-		ClaudeBin:        r.o.ClaudeBin,
-		GrokBin:          r.o.GrokBin,
-		DirenvBin:        r.o.DirenvBin,
-		ReviewTimeout:    review.DefaultReviewTimeout,
-	}
+	o := r.o.Review
+	o.Repo = r.o.Repo
+	o.Number = r.pr.Number
+	o.Branch = branchOnlyValue(r.target.BranchOnly, r.branch)
+	o.HeadSHA = branchOnlyValue(r.target.BranchOnly, r.headSHA)
+	o.LocalHead = false
+	o.LocalPR = nil
+	o.RepoRoot = r.o.RepoRoot
+	o.Rules = r.o.Rules
+	o.BaseBranch = r.pr.BaseRefName
+	o.Post = r.o.Post && !r.target.BranchOnly
+	o.KeepWorktree = false
+	o.UseDirenv = r.o.UseDirenv
+	o.AllowEnvrcChange = r.o.AllowEnvrcChange
+	o.ResumeRun = ""
+	o.DepsDir = r.o.DepsDir
+	o.Bins = r.o.Bins
+	o.DirenvBin = r.o.DirenvBin
 	if r.o.Offline {
 		// Offline rounds review the worktree's unpushed head. An unresolvable
 		// HEAD leaves HeadSHA empty, which the review's own validation refuses
@@ -140,7 +131,7 @@ func branchOnlyValue(branchOnly bool, branch string) string {
 // retried: a resume fixes neither.
 func (r *run) finishReview(round int) (review.Findings, string, error) {
 	if r.review == nil {
-		r.startReview(round)
+		r.startReviewWith(round, "")
 	}
 	br := r.review
 	label := fmt.Sprintf("Review round %d", round)
@@ -149,7 +140,7 @@ func (r *run) finishReview(round int) (review.Findings, string, error) {
 	out := r.waitReview(br, label)
 	r.review = nil
 	if out.err != nil {
-		if br.resume != "" && resumeFallbackEligible(out.err) {
+		if br.resume != "" && review.ResumeFallbackEligible(out.err) {
 			// The handed-in directory was unusable, which says nothing about
 			// the pull request; one fresh fan-out replaces it, mirroring the
 			// agent's fallback for a stale cross-poll resume.
@@ -171,45 +162,35 @@ func (r *run) finishReview(round int) (review.Findings, string, error) {
 	return out.res.Findings, out.res.CommentBody, nil
 }
 
-// resumeFallbackEligible reports whether a resumed round failed for a
-// resume-specific reason - the directory turned out unusable or held too
-// little reviewer output - rather than the round itself being the problem.
-func resumeFallbackEligible(err error) bool {
-	return errors.Is(err, review.ErrResumeUnusable) || errors.Is(err, review.ErrTooFewReviewers)
-}
-
 // resumableRunDir reports whether err is a round failure whose completed
-// reviewer output is worth resuming, and where it lives.
+// reviewer output is worth resuming, and where it lives. Beyond what review
+// counts as resumable, a usage limit is too: it says nothing about the output
+// the round completed before it.
 func resumableRunDir(err error) (string, bool) {
-	if !errors.Is(err, review.ErrAggregatorInvalid) &&
-		!errors.Is(err, review.ErrVerifierInvalid) &&
-		!errors.Is(err, usagelimit.Err) {
+	if dir, ok := review.ResumableRunDir(err); ok {
+		return dir, true
+	}
+	if !errors.Is(err, usagelimit.Err) {
 		return "", false
 	}
-	var rd *review.RunDirError
-	if !errors.As(err, &rd) || rd.RunDir == "" {
-		return "", false
-	}
-	return rd.RunDir, true
+	dir := review.RunDirOf(err)
+	return dir, dir != ""
 }
 
-// waitReview blocks on a background review while the status line ticks.
+// waitReview blocks on a background review while the status line ticks. The
+// review's context derives from the run's, so a cancelled run ends it too.
 func (r *run) waitReview(br *bgReview, label string) bgResult {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case out := <-br.done:
-			r.rep.StepEnd(label, r.reviewModel, time.Since(br.started), out.err == nil)
-			return out
-		case <-ticker.C:
-			r.rep.StepTick(label, r.reviewModel, time.Since(br.started))
-		case <-r.ctx.Done():
-			br.cancel()
-			out := <-br.done
-			return out
-		}
+	var out bgResult
+	err := r.awaitStep(label, r.reviewModel, br.started, func() error {
+		out = <-br.done
+		return out.err
+	})
+	if r.ctx.Err() != nil {
+		br.cancel()
+		return out
 	}
+	r.rep.StepEnd(label, r.reviewModel, time.Since(br.started), err == nil)
+	return out
 }
 
 // discardReview cancels a review whose findings a CI fix is about to invalidate
@@ -239,7 +220,6 @@ func (r *run) killReview() {
 	<-br.done
 }
 
-// ensureCIGreen waits for CI and repairs it, up to MaxCIFixes attempts.
 func (r *run) ensureCIGreen() error {
 	for attempt := 0; ; {
 		r.prog.CI = CIWaiting
@@ -287,15 +267,9 @@ func (r *run) ensureCIGreen() error {
 			return err
 		}
 		fixNumber := r.ciFixTotal + 1
-		tag := fmt.Sprintf("ci-fix-%d", fixNumber)
 		r.enter(PhaseCIFix)
-		if err := r.codexCall(tag, ciFixPrompt(r.pr.Number, string(failsJSON))); err != nil {
-			return err
-		}
-		if err := r.questionGate(tag); err != nil {
-			return err
-		}
-		if err := r.ensureCommitted(tag); err != nil {
+		step, err := r.fixStep(fmt.Sprintf("ci-fix-%d", fixNumber), ciFixPrompt(r.pr.Number, string(failsJSON)))
+		if err != nil {
 			return err
 		}
 		r.ciFixTotal = fixNumber
@@ -305,9 +279,9 @@ func (r *run) ensureCIGreen() error {
 			return err
 		}
 		if r.o.DivergenceScan {
-			r.traceCIFix(preSHA, r.headSHA, tag)
+			r.traceCIFix(preSHA, r.headSHA, step.first)
 		}
-		if err := r.postFixComment(tag, label, "", "", preSHA); err != nil {
+		if err := r.postFixComment(step, label, "", "", preSHA); err != nil {
 			return err
 		}
 	}
@@ -316,30 +290,22 @@ func (r *run) ensureCIGreen() error {
 // awaitChecks runs watchCI in the background so the reporter can tick the CI
 // wait the way waitReview ticks a review: `gh pr checks --watch` blocks for as
 // long as CI runs, so the elapsed time cannot come from inside the poll loop.
-// Cancellation needs no extra case here: watchCI's own ctx handling makes it
-// return, which closes the wait through the same channel.
+// On cancellation the wait joins watchCI, whose own ctx handling makes it
+// return.
 func (r *run) awaitChecks(started time.Time) (gh.CheckState, error) {
 	defer func() { r.prog.SideReview = "" }()
-	r.rep.CIWait(r.pr.Number, 0, r.sideReview())
-	type checksResult struct {
-		state gh.CheckState
-		err   error
-	}
-	done := make(chan checksResult, 1)
-	go func() {
-		state, err := r.watchCI()
-		done <- checksResult{state, err}
-	}()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case out := <-done:
-			return out.state, out.err
-		case <-ticker.C:
-			r.rep.CIWait(r.pr.Number, time.Since(started), r.sideReview())
+	var state gh.CheckState
+	err := r.await(func(elapsed time.Duration) {
+		if elapsed > 0 {
+			elapsed = time.Since(started)
 		}
-	}
+		r.rep.CIWait(r.pr.Number, elapsed, r.sideReview())
+	}, func() error {
+		var err error
+		state, err = r.watchCI()
+		return err
+	})
+	return state, err
 }
 
 // sideReview describes the review running beside a CI wait, for the wait's
@@ -352,7 +318,7 @@ func (r *run) sideReview() string {
 	}
 	state, ok := br.outcome.Load().(string)
 	if !ok {
-		state = SideReviewRunning
+		state = sideReviewRunning
 	}
 	if r.prog.SideReview != state {
 		r.prog.SideReview = state
@@ -360,12 +326,6 @@ func (r *run) sideReview() string {
 	}
 	return fmt.Sprintf("review round %d %s", br.round, state)
 }
-
-// Poll intervals of the CI wait. Variables so tests can shorten them.
-var (
-	ciPendingPoll  = 10 * time.Second
-	ciNoChecksPoll = 20 * time.Second
-)
 
 // watchCI blocks until the checks settle and GitHub confirms them for the
 // exact head.
@@ -394,7 +354,7 @@ func (r *run) watchCI() (gh.CheckState, error) {
 
 		switch state {
 		case gh.ChecksPending:
-			if err := r.sleep(ciPendingPoll); err != nil {
+			if err := r.sleep(r.timing.ciPending()); err != nil {
 				return state, err
 			}
 			continue
@@ -414,9 +374,9 @@ func (r *run) watchCI() (gh.CheckState, error) {
 		}
 		switch confirmed {
 		case gh.ChecksPending:
-			poll := ciPendingPoll
+			poll := r.timing.ciPending()
 			if state == gh.ChecksNone {
-				poll = ciNoChecksPoll
+				poll = r.timing.ciNoChecks()
 			}
 			if err := r.sleep(poll); err != nil {
 				return confirmed, err
@@ -465,7 +425,7 @@ func (r *run) confirmCI(cw *ciWait) (gh.CheckState, error) {
 	if err != nil {
 		return gh.ChecksPending, fmt.Errorf("reading the workflow runs of %s: %w", sha, err)
 	}
-	inWindow := time.Since(cw.started) < noChecksTimeout
+	inWindow := time.Since(cw.started) < r.timing.noChecksWindow()
 
 	bucket := make(map[string]string, len(checks))
 	for _, ch := range checks {
@@ -514,7 +474,7 @@ func (r *run) confirmCI(cw *ciWait) (gh.CheckState, error) {
 			return gh.ChecksPending, nil
 		}
 		return gh.ChecksPending, fmt.Errorf("%w: required check(s) %s of %s did not report for %s after %s",
-			ErrCIUnconfirmed, strings.Join(missing, ", "), r.pr.BaseRefName, sha, noChecksTimeout)
+			ErrCIUnconfirmed, strings.Join(missing, ", "), r.pr.BaseRefName, sha, r.timing.noChecksWindow())
 	}
 	if len(runs) == 0 && inWindow && r.workflowsExpected(cw) {
 		r.announceCIRegistration(cw, "waiting for GitHub Actions to register the runs of "+sha)
@@ -543,7 +503,7 @@ func (r *run) workflowsExpected(cw *ciWait) bool {
 }
 
 func (r *run) announceCIRegistration(cw *ciWait, msg string) {
-	if cw.announced || r.rep == nil {
+	if cw.announced {
 		return
 	}
 	cw.announced = true
@@ -559,7 +519,6 @@ func (r *run) sleep(d time.Duration) error {
 	}
 }
 
-// writeTail keeps the last n lines of gh's output for inspection.
 func writeTail(path, text string, n int) {
 	lines := splitLines(text)
 	if len(lines) > n {

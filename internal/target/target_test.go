@@ -66,7 +66,7 @@ case "$*" in
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac`)
 	got, err := ResolveLocal(context.Background(), gh.New(bin),
-		branchGit(t, false, "head-sha"), t.TempDir(), "")
+		branchGit(t, false, "head-sha"), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ case "$*" in
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac`)
 	_, err := ResolveLocal(context.Background(), gh.New(bin),
-		branchGit(t, true, "head-sha"), t.TempDir(), "")
+		branchGit(t, true, "head-sha"), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
 		t.Fatalf("dirty local checkout resolved anyway: %v", err)
 	}
@@ -131,8 +131,18 @@ func TestResolveFallsBackWhenTheAssociatedPRIsClosed(t *testing.T) {
 	}
 }
 
+// gh answers a search with a fork PR whose head branch has the same name. Only
+// the current branch's own PR may select a PR target; a same-named branch in a
+// fork is a different change.
 func TestResolveDoesNotSearchForSameNamedForkPRs(t *testing.T) {
-	got, err := Resolve(context.Background(), branchGH(t, ""),
+	ghc := gh.New(fakeTool(t, "gh", `
+case "$*" in
+  "pr view --json "*) echo 'no pull requests found for branch "example-user:feature/crumb-tray"' >&2; exit 1 ;;
+  "pr list "*) echo '[{"number":43,"title":"Fork change","state":"OPEN","isCrossRepository":true,"headRefName":"feature/crumb-tray","headRefOid":"fork-head-sha","baseRefName":"main","baseRefOid":"base-sha"}]' ;;
+  "repo view --json defaultBranchRef -q .defaultBranchRef.name") echo "main" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac`))
+	got, err := Resolve(context.Background(), ghc,
 		branchGit(t, false, "head-sha"), t.TempDir(), 0, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -231,10 +241,13 @@ func TestResolveLocalFetchesTheRemoteHeadForTheAncestorCheck(t *testing.T) {
 	run(work, "push", "-q", "origin", "feature")
 	remoteHead := run(work, "rev-parse", "HEAD")
 
-	// gh must never run: the base branch is given, and a local run never asks
-	// for the PR.
-	got, err := ResolveLocal(context.Background(), gh.New(filepath.Join(base, "gh-must-not-run")),
-		git.New("git"), clone, "main")
+	// gh only names the default branch: a local run never asks for the PR.
+	ghBin := fakeTool(t, "gh", `
+case "$*" in
+  "repo view --json defaultBranchRef -q .defaultBranchRef.name") echo "main" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac`)
+	got, err := ResolveLocal(context.Background(), gh.New(ghBin), git.New("git"), clone)
 	if err != nil {
 		t.Fatalf("a checkout merely behind origin was refused: %v", err)
 	}

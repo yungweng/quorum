@@ -12,39 +12,37 @@ import (
 	"syscall"
 	"time"
 
+	macnotify "github.com/yungweng/quorum/internal/notify"
+
 	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
+	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/rundir"
+	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/ui"
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
-var reviewBoolFlags = map[string]bool{
-	"dry-run": true, "keep-worktree": true, "no-direnv": true,
-	"allow-envrc-change": true, "no-notify": true, "h": true, "help": true,
+var reviewFlags = flagSet{
+	"n": takesValue, "runs": takesValue, "concurrency": takesValue,
+	"engine": takesValue, "model": takesValue, "effort": takesValue,
+	"base": takesValue, "dry-run": noValue, "keep-worktree": noValue,
+	"resume-run": takesValue, "review-timeout": takesValue, "min-successful": takesValue,
+	"no-direnv": noValue, "allow-envrc-change": noValue, "no-notify": noValue,
+	"h": noValue, "help": noValue,
 	// Retired no-ops, accepted so old invocations do not break. They describe
 	// the default behaviour now.
-	"post": true, "cleanup": true, "allow-base-drift": true,
+	"post": noValue, "cleanup": noValue, "allow-base-drift": noValue,
 }
 
-var reviewFlags = map[string]bool{
-	"n": true, "runs": true, "concurrency": true, "engine": true, "model": true,
-	"effort": true, "base": true, "review-timeout": true, "min-successful": true,
-	"resume-run": true,
-}
+// reviewRetiredFlags are the accepted no-ops, which no help text mentions.
+var reviewRetiredFlags = []string{"post", "cleanup", "allow-base-drift"}
 
 func (a *app) cmdReview(argv []string) int {
-	allowed := map[string]bool{}
-	for k := range reviewBoolFlags {
-		allowed[k] = true
-	}
-	for k := range reviewFlags {
-		allowed[k] = true
-	}
-
-	args, err := parseArgs(argv, reviewBoolFlags)
+	args, err := parseArgs(argv, reviewFlags)
 	if err != nil {
 		return a.die("%v", err)
 	}
@@ -52,7 +50,7 @@ func (a *app) cmdReview(argv []string) int {
 		a.reviewUsage()
 		return exitOK
 	}
-	if bad := args.unknown(allowed); len(bad) > 0 {
+	if bad := args.unknown(reviewFlags); len(bad) > 0 {
 		return a.die("unknown option: --%s", bad[0])
 	}
 	if len(args.pos) > 1 {
@@ -73,22 +71,7 @@ func (a *app) cmdReview(argv []string) int {
 		return a.die("%v", err)
 	}
 
-	o := review.Options{
-		Repo: repo, Number: number, RepoRoot: repoRoot,
-		Engine:         a.cfg.ReviewEngine,
-		Model:          a.cfg.ReviewModel,
-		Effort:         a.cfg.ReviewEffort,
-		Runs:           a.cfg.Reviewers,
-		Post:           a.cfg.Post,
-		UseDirenv:      t.Direnv != "",
-		RunsDir:        a.p.ReviewRuns,
-		SharedRunsDirs: []string{a.p.BabysitRuns},
-		DepsDir:        a.p.DepsCache,
-		CodexBin:       t.Codex,
-		ClaudeBin:      t.Claude,
-		GrokBin:        t.Grok,
-		DirenvBin:      t.Direnv,
-	}
+	o := runner.ReviewOptions(a.cfg, a.p, t, repo, repoRoot, number)
 	if o.Runs, err = args.intVal(o.Runs, "n", "runs"); err != nil {
 		return a.die("%v", err)
 	}
@@ -98,18 +81,18 @@ func (a *app) cmdReview(argv []string) int {
 	if o.MinSuccessful, err = args.intVal(0, "min-successful"); err != nil {
 		return a.die("%v", err)
 	}
-	if o.ReviewTimeout, err = args.duration(a.cfg.ReviewTimeout, "review-timeout"); err != nil {
+	if o.ReviewTimeout, err = args.duration(o.ReviewTimeout, "review-timeout"); err != nil {
 		return a.die("%v", err)
 	}
 	o.Engine = args.str(o.Engine, "engine")
-	if _, err := engineBinary(o.Engine, t, "--engine/REVIEW_ENGINE"); err != nil {
+	if err := engineBinary(o.Engine, t.Engines, "--engine/REVIEW_ENGINE"); err != nil {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
 	// The configured effort is kept only if the engine this run resolved to
 	// accepts it, because --engine can point at the other engine's set of
 	// levels. One passed on the command line is not dropped: it fails.
-	o.Effort = args.str(engine.KnownEffort(o.Engine, o.Effort), "effort")
+	o.Effort = args.str(spec.KnownEffort(o.Engine, o.Effort), "effort")
 	o.BaseBranch = args.str("", "base")
 	o.ResumeRun = args.str("", "resume-run")
 	o.KeepWorktree = args.boolean("keep-worktree")
@@ -119,9 +102,6 @@ func (a *app) cmdReview(argv []string) int {
 	}
 	if args.boolean("no-direnv") {
 		o.UseDirenv = false
-	}
-	if o.UseDirenv && t.Direnv == "" {
-		return a.die("direnv is not installed; rerun with --no-direnv")
 	}
 	if o.Rules, err = config.RepoRules(a.p.RulesDir, o.Repo); err != nil {
 		return a.die("reading the review rules for %s: %v", o.Repo, err)
@@ -138,8 +118,8 @@ func (a *app) cmdReview(argv []string) int {
 	defer live.Close()
 
 	client := a.newGH(t.GH)
-	runner := &review.Runner{
-		GH: client, Git: a.newGit(t.Git), Rep: live,
+	rev := &review.Runner{
+		GH: client, Git: git.New(t.Git), Rep: live,
 	}
 	a.out.Printf("%s\n", a.out.Bold("quorum "+a.version))
 
@@ -147,7 +127,7 @@ func (a *app) cmdReview(argv []string) int {
 	// A finished run is the only thing that grows the cache, so the next
 	// collector has to measure instead of trusting a size from before it.
 	defer a.forgetCacheSize()
-	res, err := runner.Run(ctx, o)
+	res, err := rev.Run(ctx, o)
 	if err != nil {
 		rep.clear()
 		a.logRun(rep.historyRun(repo, started, history.Failed, err.Error(), nil))
@@ -158,8 +138,12 @@ func (a *app) cmdReview(argv []string) int {
 	}
 	number = res.Findings.PR
 	mergeStatus := ""
-	if automerge.Allowed(a.cfg.AutoMerge, a.cfg.Post, res.Findings) {
-		mergeResult, mergeErr := a.autoMerge(ctx, client, repoRoot, repo, number, res.Findings.HeadSHA)
+	// A review never pushes, and the draft state is not known here; the merge
+	// path refuses a draft itself.
+	eligible := res.Findings.MergeEligible()
+	if merge, _ := automerge.Decide(a.cfg.AutoMerge, a.cfg.Post, eligible, false, false); merge {
+		mergeResult, mergeErr := automerge.Complete(ctx, client, repoRoot, repo, number, res.Findings.HeadSHA,
+			a.cfg.AutoMergeAuthors, a.cfg.AutoMergeTimeout, nil)
 		if mergeErr != nil {
 			// The review finished and was posted. Keep that result in OPEN;
 			// the merge error remains the reason and the command still fails.
@@ -172,14 +156,14 @@ func (a *app) cmdReview(argv []string) int {
 		mergeStatus = mergeResult.Status
 		if mergeStatus == automerge.ApprovalRequired {
 			a.out.Printf("auto-merge: %s\n", a.out.Yellow(mergeStatus))
-			a.notifyApprovalRequired(notify, repo, number, "")
+			a.notifyAction(notify, macnotify.ApprovalRequired(repo, number))
 		} else {
 			a.out.Printf("auto-merge: %s\n", a.out.Green(mergeStatus+queuePosition(mergeResult)))
 		}
 	}
 	a.logRun(rep.historyRun(repo, started, history.OK, "", res))
-	if notify && a.cfg.NotifyReadyToMerge && mergeStatus == "" && automerge.Eligible(res.Findings) {
-		a.notifyReadyToMerge(notify, repo, number, "")
+	if notify && automerge.ReadyNoticeDue(a.cfg.NotifyReadyToMerge, mergeStatus, eligible, false) {
+		a.notifyAction(notify, macnotify.ReadyToMerge(repo, number))
 		return exitOK
 	}
 	if notify && mergeStatus != automerge.ApprovalRequired {
@@ -222,14 +206,12 @@ func (t *termReporter) historyRun(repo string, started time.Time, outcome, reaso
 	if repo == "" || number == 0 && branch == "" {
 		return history.Run{}
 	}
-	key := fmt.Sprintf("%s#%d", repo, number)
 	historyBranch := ""
 	if number == 0 {
-		key = history.BranchKey(repo, branch)
 		historyBranch = branch
 	}
 	run := history.Run{
-		Key:       key,
+		Key:       history.Key(repo, number, branch),
 		Branch:    historyBranch,
 		Title:     title,
 		Author:    author,
@@ -257,7 +239,7 @@ func (t *termReporter) historyRun(repo string, started time.Time, outcome, reaso
 func (a *app) reviewExit(err error) int {
 	fmt.Fprintf(os.Stderr, "quorum: %v\n", err)
 	switch {
-	case errors.Is(err, review.ErrEnvrcChanged):
+	case errors.Is(err, rundir.ErrEnvrcChanged):
 		return 2
 	case errors.Is(err, review.ErrHeadDrifted):
 		return 3
@@ -270,8 +252,10 @@ func (a *app) reviewExit(err error) int {
 	}
 }
 
-func (a *app) reviewUsage() {
-	fmt.Printf(`Usage:
+func (a *app) reviewUsage() { fmt.Print(a.reviewUsageText()) }
+
+func (a *app) reviewUsageText() string {
+	return fmt.Sprintf(`Usage:
   quorum review [pr-number|github-pr-url] [options]
 
 Reviews an open PR and posts the result. Without a PR argument, quorum uses the
@@ -306,12 +290,11 @@ Exit codes:
   4  the aggregator or verifier could not produce a valid report
   8  the engine refused: its usage limit is exhausted
 `, a.cfg.Reviewers, orText(a.cfg.ReviewEngine, "codex"),
-		review.DefaultModel, review.ClaudeDefaultModel, review.GrokDefaultModel,
+		spec.Get(spec.Codex).ReviewModel, spec.Get(spec.Claude).ReviewModel, spec.Get(spec.Grok).ReviewModel,
 		effortDefaultText(a.cfg.ReviewEngine, a.cfg.ReviewEffort),
 		durationText(a.cfg.ReviewTimeout))
 }
 
-// orText substitutes fallback for an empty configured value in help text.
 func orText(v, fallback string) string {
 	if v == "" {
 		return fallback
@@ -324,12 +307,12 @@ func orText(v, fallback string) string {
 // Codex has an opinionated default for either, so quoting Codex's numbers at a
 // Claude run would describe a setting that never applies.
 func modelDefaultText(eng, configured string) string {
-	_, model, _ := review.ReviewEngineDefaults(eng, configured, "")
+	_, model, _ := spec.ReviewDefaults(eng, configured, "")
 	return model
 }
 
 func effortDefaultText(eng, configured string) string {
-	_, _, effort := review.ReviewEngineDefaults(eng, "", configured)
+	_, _, effort := spec.ReviewDefaults(eng, "", configured)
 	return orText(effort, "the engine's own")
 }
 
@@ -361,7 +344,7 @@ type termReporter struct {
 	author string
 	repo   string
 	branch string
-	model  engine.Model
+	model  spec.Model
 
 	mu       sync.Mutex
 	tick     int
@@ -376,7 +359,7 @@ func (t *termReporter) Header(h review.RunHeader) {
 	t.author = h.Author
 	t.repo = h.Repo
 	t.branch = h.Branch
-	t.model = engine.Model{Engine: h.Engine, Name: h.Model, Effort: h.Effort}
+	t.model = h.Model
 	t.reviewer = map[int]*reviewerState{}
 	t.mu.Unlock()
 
@@ -401,7 +384,7 @@ func (t *termReporter) Header(h review.RunHeader) {
 	// blank where a level belongs.
 	o.Row("reviewers", fmt.Sprintf("%d %s", h.Runs,
 		o.Dim(fmt.Sprintf("· %s · effort %s · concurrency %d · timeout %s",
-			h.Model, orText(h.Effort, engineName(h.Engine)+"'s own"),
+			h.Model.Name, orText(h.Model.Effort, spec.Get(h.Model.Engine).Name+"'s own"),
 			h.Concurrency, durationText(h.Timeout)))))
 	// The path is long, always absolute and rarely typed out: the name is
 	// enough to recognise the run, and the link opens the rest.
@@ -432,7 +415,6 @@ func (t *termReporter) ReviewerStarted(idx int) {
 	t.mu.Unlock()
 }
 
-// draw repaints the reviewer panel.
 func (t *termReporter) draw(done, failed, running int, elapsed time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -1,13 +1,10 @@
 // Package proc runs external commands with a timeout and kills everything they
 // spawned when that timeout hits.
 //
-// This replaces the run_with_timeout / kill_tree / force_kill_tree trio that
-// existed in slightly different forms in both shell tools. Those walked `ps`
-// output recursively and killed pid by pid, which races: a child spawned
-// between the walk and the kill survives and keeps the run alive. Here the
-// command becomes the leader of its own process group, every descendant
-// inherits that group, and one kill to the negative pid reaches all of them
-// atomically. Codex spawns MCP servers and language toolchains below itself, so
+// Walking `ps` output and killing pid by pid races: a child spawned between
+// the walk and the kill survives and keeps the run alive. Here the command
+// becomes the leader of its own process group, every descendant inherits that
+// group, and one kill to the negative pid reaches all of them atomically. Codex spawns MCP servers and language toolchains below itself, so
 // leaking one of those means leaking whatever it was doing.
 package proc
 
@@ -29,13 +26,13 @@ import (
 // The shell version signalled this as exit 124, which callers still surface.
 var ErrTimeout = errors.New("timed out")
 
-// TimeoutExitCode is what the shell tools returned on a timeout, kept because
+// timeoutExitCode is what the shell tools returned on a timeout, kept because
 // the babysit pipeline distinguishes a timeout from an ordinary failure.
-const TimeoutExitCode = 124
+const timeoutExitCode = 124
 
 // graceTime is how long a process group gets to honour SIGTERM before SIGKILL.
-// The shell version slept 2 seconds between the two, and Codex needs roughly
-// that to flush its rollout file, which is what session recovery reads later.
+// Codex needs roughly that long to flush its rollout file, which is what
+// session recovery reads later.
 const graceTime = 2 * time.Second
 
 // Spec describes one command to run.
@@ -178,13 +175,7 @@ func Claim(dir string) (func(), error) {
 		return fail(err)
 	}
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-			f.Close()
-		})
-	}, nil
+	return unlocker(f), nil
 }
 
 // Claimed reports whether a process still holds a directory's claim lock.
@@ -222,24 +213,67 @@ func LockDir(dir string) (func(), error) {
 		f.Close()
 		return nil, fmt.Errorf("locking %s: %w", dir, err)
 	}
+	return unlocker(f), nil
+}
+
+// LockFile takes an exclusive cross-process lock on the file at path, creating
+// it and its directory if needed, and blocks until the lock is free. The file
+// stays on disk; the kernel drops the lock when the holder exits.
+func LockFile(path string) (func(), error) {
+	f, err := openLockFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("could not lock %s: %w", path, err)
+	}
+	return unlocker(f), nil
+}
+
+// TryLockFile is LockFile without the wait. held is false, with no error,
+// when another process has the lock.
+func TryLockFile(path string) (release func(), held bool, err error) {
+	f, err := openLockFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("could not lock %s: %w", path, err)
+	}
+	return unlocker(f), true, nil
+}
+
+func openLockFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+}
+
+func unlocker(f *os.File) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 			f.Close()
 		})
-	}, nil
+	}
 }
 
 // ExitCode extracts the exit status from a Run error. A timeout reports
-// TimeoutExitCode, matching what the shell tools produced; anything that is
+// timeoutExitCode, matching what the shell tools produced; anything that is
 // not an exit status at all reports 1.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
 	if errors.Is(err, ErrTimeout) {
-		return TimeoutExitCode
+		return timeoutExitCode
 	}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {

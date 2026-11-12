@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
 )
@@ -31,7 +31,7 @@ func (l *logReporter) printf(format string, args ...any) {
 func (l *logReporter) Header(h review.RunHeader) {
 	l.printf("reviewing %s#%d %q by @%s", h.Repo, h.Number, h.Title, h.Author)
 	l.printf("base %s (%s), head %s", h.BaseRef, short(h.BaseSHA), short(h.HeadSHA))
-	l.printf("%d reviewers, model %s, effort %s", h.Runs, h.Model, h.Effort)
+	l.printf("%d reviewers, model %s, effort %s", h.Runs, h.Model.Name, h.Model.Effort)
 	l.printf("run dir %s", h.RunDir)
 	if l.onRunDir != nil {
 		l.onRunDir(h.RunDir)
@@ -100,22 +100,21 @@ func (l *loopLogReporter) Header(h loop.Header) {
 	l.printf("babysitting %s#%d %q", h.Repo, h.Number, h.Title)
 	l.printf("branch %s -> %s at %s", h.Branch, h.Base, short(h.HeadSHA))
 	l.printf("review model %s, fix model %s",
-		engine.Model{Engine: h.ReviewEngine, Name: h.ReviewModel, Effort: h.ReviewEffort}.Tag(),
-		engine.Model{Engine: h.Engine, Name: h.Model, Effort: h.Effort}.Tag())
+		h.Review.Tag(), h.Fix.Tag())
 	l.printf("max %d review rounds, %d CI fixes, %s per fix step", h.MaxIter, h.MaxCIFixes, h.FixTimeout)
 	l.printf("run dir %s", h.RunDir)
 }
 
 func (l *loopLogReporter) Step(title string) { l.printf("==> %s", title) }
 
-func (l *loopLogReporter) StepStart(label string, m engine.Model) {
+func (l *loopLogReporter) StepStart(label string, m spec.Model) {
 	l.printf("%s: running on %s", label, m.Tag())
 }
 
 // StepTick is dropped: it exists to animate a terminal spinner.
-func (l *loopLogReporter) StepTick(string, engine.Model, time.Duration) {}
+func (l *loopLogReporter) StepTick(string, spec.Model, time.Duration) {}
 
-func (l *loopLogReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
+func (l *loopLogReporter) StepEnd(label string, m spec.Model, elapsed time.Duration, ok bool) {
 	status := "failed"
 	if ok {
 		status = "done"

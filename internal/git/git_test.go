@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -386,5 +387,21 @@ printf '%s\n' "$@" > "` + argsPath + `"
 	want := "push\n-q\n--no-verify\norigin\nverified-sha:refs/heads/feature/crumb-tray\n"
 	if got := string(data); got != want {
 		t.Fatalf("git arguments = %q, want %q", got, want)
+	}
+}
+
+func TestLsRemoteReportsAMissingRefAsErrRefNotFound(t *testing.T) {
+	dir := conflictRepo(t)
+	g := New("git")
+	ctx := context.Background()
+	if sha, err := g.LsRemote(ctx, dir, dir, "refs/heads/main"); err != nil || sha == "" {
+		t.Fatalf("existing ref: sha = %q, err = %v", sha, err)
+	}
+	_, err := g.LsRemote(ctx, dir, dir, "refs/heads/missing")
+	if !errors.Is(err, ErrRefNotFound) {
+		t.Fatalf("err = %v, want ErrRefNotFound", err)
+	}
+	if want := "could not resolve refs/heads/missing on " + dir; err.Error() != want {
+		t.Errorf("message = %q, want %q", err, want)
 	}
 }

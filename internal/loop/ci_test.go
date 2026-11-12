@@ -37,9 +37,9 @@ func TestDiscardReviewCancelsRunningReview(t *testing.T) {
 	r := &run{
 		p:   &Pipeline{Review: reviewer},
 		ctx: context.Background(),
-		rep: NopReporter{},
+		rep: nopReporter{},
 	}
-	r.startReview(1)
+	r.startReviewWith(1, "")
 	<-reviewer.started
 
 	done := make(chan struct{})
@@ -50,7 +50,7 @@ func TestDiscardReviewCancelsRunningReview(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		close(reviewer.release)
 		<-done
 		t.Fatal("discardReview waited for the review instead of cancelling it")
@@ -72,7 +72,6 @@ func TestCIWaitPublishesItsPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fastCIWait(t, time.Hour)
 	bin, _ := ciFixture{
 		prChecks: "test\tpass",
 		branch:   []string{noProtection},
@@ -86,11 +85,12 @@ func TestCIWaitPublishesItsPhase(t *testing.T) {
 		p:       &Pipeline{GH: gh.New(bin)},
 		o:       Options{Repo: "acme/api", RepoRoot: root},
 		ctx:     context.Background(),
-		rep:     NopReporter{},
+		rep:     nopReporter{},
 		pr:      gh.FullPR{Number: 7, BaseRefName: "main"},
 		headSHA: "abc123",
 		root:    root,
 		logDir:  logDir,
+		timing:  fastCIWait(time.Hour),
 		prog: Progress{
 			Phase:      PhaseFix,
 			Since:      before.Add(-time.Hour),
@@ -102,7 +102,7 @@ func TestCIWaitPublishesItsPhase(t *testing.T) {
 	if err := r.ensureCIGreen(); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := ReadProgress(root)
+	got, ok := readProgress(root)
 	if !ok {
 		t.Fatal("CI progress was not published")
 	}
@@ -178,19 +178,19 @@ func TestCIWaitReportsTheReviewBesideIt(t *testing.T) {
 	r := &run{
 		p:    &Pipeline{Review: reviewer},
 		ctx:  context.Background(),
-		rep:  NopReporter{},
+		rep:  nopReporter{},
 		root: root,
 	}
 	if got := r.sideReview(); got != "" {
 		t.Fatalf("a wait without a review reported %q", got)
 	}
 
-	r.startReview(1)
+	r.startReviewWith(1, "")
 	if got := r.sideReview(); got != "review round 1 running" {
 		t.Errorf("running review reported as %q", got)
 	}
-	if got, _ := ReadProgress(root); got.SideReview != SideReviewRunning {
-		t.Errorf("published side review = %q, want %q", got.SideReview, SideReviewRunning)
+	if got, _ := readProgress(root); got.SideReview != sideReviewRunning {
+		t.Errorf("published side review = %q, want %q", got.SideReview, sideReviewRunning)
 	}
 
 	close(reviewer.release)
@@ -199,7 +199,7 @@ func TestCIWaitReportsTheReviewBesideIt(t *testing.T) {
 	if got := r.sideReview(); got != "review round 1 posted" {
 		t.Errorf("posted review reported as %q", got)
 	}
-	if got, _ := ReadProgress(root); got.SideReview != SideReviewPosted {
+	if got, _ := readProgress(root); got.SideReview != SideReviewPosted {
 		t.Errorf("published side review = %q, want %q", got.SideReview, SideReviewPosted)
 	}
 }

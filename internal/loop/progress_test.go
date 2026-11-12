@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -36,12 +36,12 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 		PID: os.Getpid(), Repo: "acme/api", Number: 7, Title: "a fix", Author: "example-user",
 		Branch: "feature", StartedAt: started, MaxIter: 12, MaxCIFixes: 3,
 		Round: 2, CI: CIGreen, Reviewed: true, Blockers: 1, Critical: 2, Commits: 4,
-		Review: engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"},
-		Fix:    engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"},
+		Review: spec.Model{Engine: spec.Codex, Name: "gpt-5.6-terra", Effort: "max"},
+		Fix:    spec.Model{Engine: spec.Claude, Name: "opus", Effort: "high"},
 	}}
 	r.enter(PhaseFix)
 
-	got, ok := ReadProgress(root)
+	got, ok := readProgress(root)
 	if !ok {
 		t.Fatal("a published run could not be read back")
 	}
@@ -81,8 +81,8 @@ func TestPublishedProgressIsReadBack(t *testing.T) {
 // both. Review, divergence and the final PR description are review-side steps,
 // and nothing about the last two says so from their names.
 func TestProgressStepModelFollowsThePhase(t *testing.T) {
-	rev := engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"}
-	fix := engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"}
+	rev := spec.Model{Engine: spec.Codex, Name: "gpt-5.6-terra", Effort: "max"}
+	fix := spec.Model{Engine: spec.Claude, Name: "opus", Effort: "high"}
 	for _, tc := range []struct {
 		phase string
 		want  string // the tag, or empty for "no model at all"
@@ -186,7 +186,7 @@ func TestPublishSurvivesAnUnwritableRunDir(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "gone")
 	r := &run{root: root, prog: Progress{Repo: "acme/api", Number: 7}}
 	r.enter(PhaseFix) // the directory does not exist
-	if _, ok := ReadProgress(root); ok {
+	if _, ok := readProgress(root); ok {
 		t.Error("progress was published into a directory that is not there")
 	}
 }

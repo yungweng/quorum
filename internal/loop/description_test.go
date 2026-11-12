@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/target"
 )
 
@@ -123,9 +124,9 @@ esac
 		p: &Pipeline{GH: client, Git: g},
 		o: Options{
 			Repo: "acme/api", RepoRoot: worktree, Post: true,
-			ReviewModel: "test-model", ReviewEffort: "low", CodexBin: codexBin,
+			Review: review.Options{Model: "test-model", Effort: "low"}, Bins: spec.Bins{spec.Codex: codexBin},
 		},
-		ctx: context.Background(), rep: NopReporter{},
+		ctx: context.Background(), rep: nopReporter{},
 		target: target.Target{PR: originalPR}, pr: originalPR,
 		worktree: worktree, msgDir: filepath.Join(root, "messages"), logDir: filepath.Join(root, "logs"),
 		env: envexec.Env{Worktree: worktree},
@@ -291,8 +292,9 @@ func TestReadFinalPRDescriptionRejectsUnsafeShape(t *testing.T) {
 
 func TestFinishPRDescriptionGrokReceivesDiffWithoutShellTools(t *testing.T) {
 	r, result, paths := descriptionFixture(t, "Bound retries.", "Bounds retry attempts.")
-	r.reviewModel = engine.Model{Engine: engine.Grok, Name: "test-model", Effort: "medium"}
-	r.o.GrokBin = filepath.Join(t.TempDir(), "grok")
+	r.reviewModel = spec.Model{Engine: spec.Grok, Name: "test-model", Effort: "medium"}
+	grokBin := filepath.Join(t.TempDir(), "grok")
+	r.o.Bins = spec.Bins{spec.Grok: grokBin}
 	script := `#!/bin/sh
 set -eu
 case " $* " in
@@ -308,7 +310,7 @@ while [ "$#" -gt 0 ]; do
 done
 printf '%s\n' '{"text":"Bounds retry attempts."}'
 `
-	if err := os.WriteFile(r.o.GrokBin, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(grokBin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.finishPRDescription(result); err != nil {

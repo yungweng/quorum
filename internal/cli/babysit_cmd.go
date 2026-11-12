@@ -8,47 +8,40 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	macnotify "github.com/yungweng/quorum/internal/notify"
+
 	"github.com/yungweng/quorum/internal/automerge"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
+	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/loop"
 	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/ui"
 	"github.com/yungweng/quorum/internal/usagelimit"
 
 	"golang.org/x/term"
 )
 
-var babysitBoolFlags = map[string]bool{
-	"sandboxed": true, "interactive": true, "verbose": true, "no-notify": true,
-	"no-direnv": true, "allow-envrc-change": true, "keep-worktree": true, "divergence-scan": true,
-	"draft": true, "local": true, "no-resolve-conflicts": true, "no-fix-suggestions": true,
-	"offline": true, "online": true,
-	"h": true, "help": true,
-}
-
-var babysitValueFlags = map[string]bool{
-	"engine": true, "model": true, "effort": true, "reviewers": true,
-	"review-engine": true, "review-model": true, "review-effort": true,
-	"max-iter": true, "max-ci-fixes": true, "fix-timeout": true, "test-cmd": true,
+var babysitFlags = flagSet{
+	"engine": takesValue, "model": takesValue, "effort": takesValue, "reviewers": takesValue,
+	"review-engine": takesValue, "review-model": takesValue, "review-effort": takesValue,
+	"max-iter": takesValue, "max-ci-fixes": takesValue, "fix-timeout": takesValue,
+	"offline": noValue, "online": noValue, "test-cmd": takesValue,
+	"divergence-scan": noValue, "draft": noValue, "local": noValue,
+	"no-resolve-conflicts": noValue, "no-fix-suggestions": noValue,
+	"sandboxed": noValue, "interactive": noValue, "verbose": noValue, "no-notify": noValue,
+	"no-direnv": noValue, "allow-envrc-change": noValue, "keep-worktree": noValue,
+	"h": noValue, "help": noValue,
 }
 
 func (a *app) cmdBabysit(argv []string) int {
-	allowed := map[string]bool{}
-	for k := range babysitBoolFlags {
-		allowed[k] = true
-	}
-	for k := range babysitValueFlags {
-		allowed[k] = true
-	}
-
-	args, err := parseArgs(argv, babysitBoolFlags)
+	args, err := parseArgs(argv, babysitFlags)
 	if err != nil {
 		return a.die("%v", err)
 	}
@@ -56,7 +49,7 @@ func (a *app) cmdBabysit(argv []string) int {
 		a.babysitUsage()
 		return exitOK
 	}
-	if bad := args.unknown(allowed); len(bad) > 0 {
+	if bad := args.unknown(babysitFlags); len(bad) > 0 {
 		return a.die("unknown option: --%s", bad[0])
 	}
 
@@ -82,53 +75,31 @@ func (a *app) cmdBabysit(argv []string) int {
 		return a.die("--offline and --online exclude each other")
 	}
 
-	o := loop.Options{
-		Repo: repo, RepoRoot: repoRoot, Number: number,
-		Context:              strings.Join(extraContext, " "),
-		Engine:               a.cfg.FixEngine,
-		Model:                a.cfg.FixModel,
-		Effort:               a.cfg.FixEffort,
-		Reviewers:            a.cfg.Reviewers,
-		ReviewEngine:         a.cfg.ReviewEngine,
-		ReviewModel:          a.cfg.ReviewModel,
-		ReviewEffort:         a.cfg.ReviewEffort,
-		Bypass:               !a.cfg.Sandboxed,
-		UseDirenv:            t.Direnv != "",
-		RunsDir:              a.p.BabysitRuns,
-		ReviewRunsDir:        a.p.ReviewRuns,
-		DepsDir:              a.p.DepsCache,
-		CodexBin:             t.Codex,
-		ClaudeBin:            t.Claude,
-		GrokBin:              t.Grok,
-		DirenvBin:            t.Direnv,
-		Post:                 a.cfg.Post,
-		AllowDraft:           a.cfg.BabysitDrafts || args.boolean("draft"),
-		Local:                args.boolean("local"),
-		ResolveConflicts:     a.cfg.ResolveConflicts && !args.boolean("no-resolve-conflicts"),
-		BaseUpdateOnConflict: a.cfg.BaseUpdate == config.BaseUpdateConflicts,
-		FixSuggestions:       a.cfg.FixSuggestions && !args.boolean("no-fix-suggestions"),
-		DivergenceScan:       a.cfg.DivergenceScan || args.boolean("divergence-scan"),
-		DivergenceEscalateTo: slices.Clone(a.cfg.DivergenceEscalateTo),
-		DivergenceTimeout:    a.cfg.ReviewTimeout,
-	}
-	if o.MaxIter, err = args.intVal(a.cfg.MaxIter, "max-iter"); err != nil {
+	o := runner.LoopOptions(a.cfg, a.p, t, repo, repoRoot, number)
+	o.Context = strings.Join(extraContext, " ")
+	o.AllowDraft = a.cfg.BabysitDrafts || args.boolean("draft")
+	o.Local = args.boolean("local")
+	o.ResolveConflicts = o.ResolveConflicts && !args.boolean("no-resolve-conflicts")
+	o.FixSuggestions = o.FixSuggestions && !args.boolean("no-fix-suggestions")
+	o.DivergenceScan = o.DivergenceScan || args.boolean("divergence-scan")
+	if o.MaxIter, err = args.intVal(o.MaxIter, "max-iter"); err != nil {
 		return a.die("%v", err)
 	}
-	if o.MaxCIFixes, err = args.intVal(a.cfg.MaxCIFixes, "max-ci-fixes"); err != nil {
+	if o.MaxCIFixes, err = args.intVal(o.MaxCIFixes, "max-ci-fixes"); err != nil {
 		return a.die("%v", err)
 	}
-	if o.Reviewers, err = args.intVal(o.Reviewers, "reviewers"); err != nil {
+	if o.Review.Runs, err = args.intVal(o.Review.Runs, "reviewers"); err != nil {
 		return a.die("%v", err)
 	}
-	if o.FixTimeout, err = args.duration(a.cfg.FixTimeout, "fix-timeout"); err != nil {
+	if o.FixTimeout, err = args.duration(o.FixTimeout, "fix-timeout"); err != nil {
 		return a.die("%v", err)
 	}
 	o.Engine = args.str(o.Engine, "engine")
-	o.ReviewEngine = args.str(o.ReviewEngine, "review-engine")
-	if _, err := engineBinary(o.Engine, t, "--engine/FIX_ENGINE"); err != nil {
+	o.Review.Engine = args.str(o.Review.Engine, "review-engine")
+	if err := engineBinary(o.Engine, t.Engines, "--engine/FIX_ENGINE"); err != nil {
 		return a.die("%v", err)
 	}
-	if _, err := engineBinary(o.ReviewEngine, t, "--review-engine/REVIEW_ENGINE"); err != nil {
+	if err := engineBinary(o.Review.Engine, t.Engines, "--review-engine/REVIEW_ENGINE"); err != nil {
 		return a.die("%v", err)
 	}
 	o.Model = args.str(o.Model, "model")
@@ -136,9 +107,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	// accepts it: --engine and --review-engine can each point at the other
 	// engine's set of levels. One passed on the command line is not dropped:
 	// it fails.
-	o.Effort = args.str(engine.KnownEffort(o.Engine, o.Effort), "effort")
-	o.ReviewModel = args.str(o.ReviewModel, "review-model")
-	o.ReviewEffort = args.str(engine.KnownEffort(o.ReviewEngine, o.ReviewEffort), "review-effort")
+	o.Effort = args.str(spec.KnownEffort(o.Engine, o.Effort), "effort")
+	o.Review.Model = args.str(o.Review.Model, "review-model")
+	o.Review.Effort = args.str(spec.KnownEffort(o.Review.Engine, o.Review.Effort), "review-effort")
 	o.Interactive = args.boolean("interactive")
 	o.Verbose = args.boolean("verbose")
 	o.Out = os.Stdout
@@ -150,13 +121,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	if args.boolean("no-direnv") {
 		o.UseDirenv = false
 	}
-	if o.UseDirenv && t.Direnv == "" {
-		return a.die("direnv is not installed; rerun with --no-direnv")
-	}
 	if o.Rules, err = config.RepoRules(a.p.RulesDir, o.Repo); err != nil {
 		return a.die("reading the review rules for %s: %v", o.Repo, err)
 	}
-	o.Offline = a.cfg.LoopMode != config.LoopOnline
 	if args.boolean("online") {
 		o.Offline = false
 	}
@@ -185,8 +152,8 @@ func (a *app) cmdBabysit(argv []string) int {
 	client := a.newGH(t.GH)
 	pipe := &loop.Pipeline{
 		GH:     client,
-		Git:    a.newGit(t.Git),
-		Review: &review.Runner{GH: client, Git: a.newGit(t.Git), Rep: review.NopReporter{}},
+		Git:    git.New(t.Git),
+		Review: &review.Runner{GH: client, Git: git.New(t.Git), Rep: review.NopReporter{}},
 		Rep:    rep,
 	}
 	// Interactive gates need a real terminal. Handing them a closed or piped
@@ -206,24 +173,19 @@ func (a *app) cmdBabysit(argv []string) int {
 	rep.ActivityDone()
 	var mergeResult automerge.Result
 	var mergeErr error
-	if err == nil && res != nil && automerge.Allowed(a.cfg.AutoMerge, a.cfg.Post, res.LastFindings) {
-		if res.PR.IsDraft {
-			// The auto-merge path refuses drafts outright; a converged draft
-			// run must not turn that refusal into a failure of the whole run.
-			rep.Info("auto-merge: skipped, the PR is a draft")
-		} else if res.SuggestionCommits {
-			// Auto-merge approves the reviewed head only. The suggestion round
-			// pushed commits past it, so merging now would claim a review that
-			// never saw them; the drift refusal inside automerge would fail the
-			// run for the same reason, less legibly.
-			rep.Info("auto-merge: skipped, the suggestion round pushed commits the final review has not seen")
-		} else {
+	if err == nil && res != nil {
+		merge, skip := automerge.Decide(a.cfg.AutoMerge, a.cfg.Post, res.LastFindings.MergeEligible(),
+			res.PR.IsDraft, res.SuggestionCommits)
+		if skip != "" {
+			rep.Info("auto-merge: skipped, " + skip)
+		} else if merge {
 			rep.Activity("finishing auto-merge", 0)
-			finished, finishErr := a.autoMerge(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA)
+			finished, finishErr := automerge.Complete(ctx, client, repoRoot, repo, res.PR.Number, res.LastFindings.HeadSHA,
+				a.cfg.AutoMergeAuthors, a.cfg.AutoMergeTimeout, nil)
 			rep.ActivityDone()
 			mergeResult, mergeErr = finished, finishErr
 			if mergeErr == nil && mergeResult.Status == automerge.ApprovalRequired {
-				a.notifyApprovalRequired(rep.notify, repo, res.PR.Number, res.PR.URL)
+				a.notifyAction(rep.notify, macnotify.ApprovalRequired(repo, res.PR.Number))
 			}
 			if mergeErr != nil {
 				err = mergeErr
@@ -231,9 +193,9 @@ func (a *app) cmdBabysit(argv []string) int {
 		}
 	}
 
-	if err == nil && res != nil && a.cfg.NotifyReadyToMerge && mergeResult.Status == "" &&
-		!res.PR.IsDraft && automerge.Eligible(res.LastFindings) {
-		a.notifyReadyToMerge(rep.notify, repo, res.PR.Number, res.PR.URL)
+	if err == nil && res != nil && automerge.ReadyNoticeDue(a.cfg.NotifyReadyToMerge, mergeResult.Status,
+		res.LastFindings.MergeEligible(), res.PR.IsDraft) {
+		a.notifyAction(rep.notify, macnotify.ReadyToMerge(repo, res.PR.Number))
 		rep.readySent = rep.notify
 	}
 
@@ -296,11 +258,7 @@ func babysitHistory(repo string, number int, started time.Time, res *loop.Result
 	if repo == "" || number == 0 && run.Branch == "" {
 		return history.Run{}
 	}
-	if number == 0 {
-		run.Key = history.BranchKey(repo, run.Branch)
-	} else {
-		run.Key = fmt.Sprintf("%s#%d", repo, number)
-	}
+	run.Key = history.Key(repo, number, run.Branch)
 	return run
 }
 
@@ -322,7 +280,6 @@ func resolveBabysitTarget(positionals []string, repo string) (int, []string, err
 	return number, extraContext, nil
 }
 
-// babysitExit maps a failure onto babysit's exit codes.
 func (a *app) babysitExit(err error) int {
 	fmt.Fprintf(os.Stderr, "quorum: %v\n", err)
 	switch {
@@ -349,8 +306,10 @@ func (a *app) babysitExit(err error) int {
 	}
 }
 
-func (a *app) babysitUsage() {
-	fmt.Printf(`Usage:
+func (a *app) babysitUsage() { fmt.Print(a.babysitUsageText()) }
+
+func (a *app) babysitUsageText() string {
+	return fmt.Sprintf(`Usage:
   quorum babysit [options] [pr-number|pr-url] [extra context...]
 
 Runs the review-fix cycle until a review reports zero Blockers and Critical
@@ -437,7 +396,6 @@ Exit codes:
 		a.cfg.MaxIter, a.cfg.MaxCIFixes, durationText(a.cfg.FixTimeout))
 }
 
-// loopTermReporter renders a pipeline run to a terminal.
 type loopTermReporter struct {
 	out     *ui.Writer
 	status  *ui.Status
@@ -451,7 +409,7 @@ type loopTermReporter struct {
 	// duration and findings instead of two lines repeating each other.
 	pending struct {
 		label   string
-		model   engine.Model
+		model   spec.Model
 		elapsed time.Duration
 	}
 	hasPending bool
@@ -527,8 +485,8 @@ func (l *loopTermReporter) Header(h loop.Header) {
 	}
 	o.Row("repo", h.Repo)
 	o.Row("branch", h.Branch+o.Dim(" → ")+h.Base)
-	o.Row("review model", modelDesc(h.ReviewEngine, h.ReviewModel, h.ReviewEffort))
-	o.Row("fix model", modelDesc(h.Engine, h.Model, h.Effort))
+	o.Row("review model", modelDesc(h.Review))
+	o.Row("fix model", modelDesc(h.Fix))
 	// The sandbox line is the one thing here worth reading twice: bypassed
 	// means these sessions push and run tests unattended.
 	if h.Bypass {
@@ -572,7 +530,7 @@ func (l *loopTermReporter) Step(title string) {
 	l.out.Step(title)
 }
 
-func (l *loopTermReporter) StepStart(label string, m engine.Model) {
+func (l *loopTermReporter) StepStart(label string, m spec.Model) {
 	if !l.out.Color {
 		l.out.Printf("running: %s · %s\n", label, m.Tag())
 		return
@@ -580,7 +538,7 @@ func (l *loopTermReporter) StepStart(label string, m engine.Model) {
 	l.setActive(label+" · "+m.Tag(), 0)
 }
 
-func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.Duration) {
+func (l *loopTermReporter) StepTick(label string, m spec.Model, elapsed time.Duration) {
 	l.setActive(label+" · "+m.Tag(), elapsed)
 }
 
@@ -591,7 +549,7 @@ func (l *loopTermReporter) StepTick(label string, m engine.Model, elapsed time.D
 // cancelled round is crossed out, so a rerun of the same number below it does
 // not read as the run counting twice. A failed step stays on the timeline in
 // red, so the summary's error has a line to point at.
-func (l *loopTermReporter) StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool) {
+func (l *loopTermReporter) StepEnd(label string, m spec.Model, elapsed time.Duration, ok bool) {
 	l.clearActive()
 	o := l.out
 	dur := ui.Duration(elapsed)
@@ -887,8 +845,9 @@ func babysitTargetLabel(res *loop.Result) string {
 // the fix session's model or effort, so an empty one means the engine's CLI
 // decides and the row says whose choice it is rather than "engine default",
 // which reads as a setting quorum knows.
-func modelDesc(eng, model, effort string) string {
-	own := engineName(eng) + "'s own choice"
+func modelDesc(m spec.Model) string {
+	model, effort := m.Name, m.Effort
+	own := spec.Get(m.Engine).Name + "'s own choice"
 	switch {
 	case model != "" && effort != "":
 		return fmt.Sprintf("%s (effort %s)", model, effort)

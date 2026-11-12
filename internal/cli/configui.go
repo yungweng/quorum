@@ -8,8 +8,7 @@ import (
 	"strings"
 
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/engine"
-	"github.com/yungweng/quorum/internal/review"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/ui"
 	"golang.org/x/term"
 )
@@ -24,7 +23,6 @@ type setting struct {
 	edit  func(*app, *bufio.Reader, *config.Config) error
 }
 
-// settingGroup is one titled section of the config screen.
 type settingGroup struct {
 	title string
 	items []setting
@@ -44,7 +42,7 @@ func (a *app) settingGroups() []settingGroup {
 			}, (*app).editScope},
 
 			{"never review", func(c config.Config) string {
-				return orNone(strings.Join(c.ExcludeRepos, " "))
+				return orText(strings.Join(c.ExcludeRepos, " "), "none")
 			}, func(a *app, in *bufio.Reader, c *config.Config) error {
 				v, err := a.askText(in, "repositories to never review, as owner/name", strings.Join(c.ExcludeRepos, " "))
 				if err != nil {
@@ -112,7 +110,7 @@ func (a *app) settingGroups() []settingGroup {
 
 		{"review", []setting{
 			{"review engine", func(c config.Config) string {
-				return engineDesc(c.ReviewEngine)
+				return spec.Get(c.ReviewEngine).Desc
 			}, func(a *app, in *bufio.Reader, c *config.Config) error {
 				return a.pick(in, "Which engine runs the reviewers, aggregator and verifier? (switching resets model and effort to the engine's default)", c,
 					engineOptions(
@@ -125,7 +123,7 @@ func (a *app) settingGroups() []settingGroup {
 			{"review model", reviewModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
 				v, err := a.askText(in, fmt.Sprintf(
 					"model for the reviewers, aggregator and verifier: %s (enter keeps, - resets to the engine's default)",
-					modelHint(c.ReviewEngine)), c.ReviewModel)
+					spec.Get(c.ReviewEngine).ModelHint), c.ReviewModel)
 				if err != nil {
 					return err
 				}
@@ -153,7 +151,7 @@ func (a *app) settingGroups() []settingGroup {
 
 		{"fix", []setting{
 			{"fix engine", func(c config.Config) string {
-				return engineDesc(c.FixEngine)
+				return spec.Get(c.FixEngine).Desc
 			}, func(a *app, in *bufio.Reader, c *config.Config) error {
 				return a.pick(in, "Which engine runs the fix sessions? (switching resets model and effort to the engine's default)", c,
 					engineOptions(
@@ -166,7 +164,7 @@ func (a *app) settingGroups() []settingGroup {
 			{"fix model", fixModelDesc, func(a *app, in *bufio.Reader, c *config.Config) error {
 				v, err := a.askText(in, fmt.Sprintf(
 					"model for the fix sessions: %s (enter keeps, - resets to the engine's default)",
-					modelHint(c.FixEngine)), c.FixModel)
+					spec.Get(c.FixEngine).ModelHint), c.FixModel)
 				if err != nil {
 					return err
 				}
@@ -216,7 +214,6 @@ func (a *app) settings() []setting {
 	return out
 }
 
-// settingNameWidth is the name column, sized by the longest row name.
 func settingNameWidth(groups []settingGroup) int {
 	w := 0
 	for _, g := range groups {
@@ -312,7 +309,6 @@ func (a *app) cmdConfig(args []string) int {
 		}
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !a.out.Color {
-		// Not a terminal: print the settings instead of trying to draw a menu.
 		a.printSettings()
 		return 0
 	}
@@ -441,7 +437,6 @@ func (a *app) settingsMenu() int {
 	}
 }
 
-// key codes the menu understands.
 type keyCode int
 
 const (
@@ -552,13 +547,6 @@ func skipEdit(title string, set func(*config.Config, bool), skipped func(config.
 	}
 }
 
-func orNone(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "none"
-	}
-	return s
-}
-
 func fieldsOrNil(s string) []string {
 	f := strings.Fields(s)
 	if len(f) == 0 {
@@ -577,43 +565,18 @@ func clearable(v string) string {
 	return v
 }
 
-// engineDesc names an engine for a settings row.
-func engineDesc(name string) string {
-	switch name {
-	case config.EngineClaude:
-		return "claude (Claude Code)"
-	case config.EngineGrok:
-		return "grok (Grok CLI)"
-	default:
-		return "codex"
-	}
-}
-
-// engineName is the bare engine name, with the empty default resolved, for
-// prompts that talk about one engine's own settings.
-func engineName(name string) string {
-	switch name {
-	case config.EngineClaude:
-		return config.EngineClaude
-	case config.EngineGrok:
-		return config.EngineGrok
-	default:
-		return config.EngineCodex
-	}
-}
-
 // reviewModelDesc and fixModelDesc render what a run will really use. A plain
 // "engine default" hid two different things behind one label: an empty review
 // model is filled in by quorum before the engine ever sees it, while an empty
 // fix model is left to the CLI's own choice, which quorum does not know.
 func reviewModelDesc(c config.Config) string {
-	_, model, effort := review.ReviewEngineDefaults(c.ReviewEngine, c.ReviewModel, c.ReviewEffort)
+	_, model, effort := spec.ReviewDefaults(c.ReviewEngine, c.ReviewModel, c.ReviewEffort)
 	if c.ReviewModel == "" {
 		model += " (quorum's default)"
 	}
 	switch {
 	case c.ReviewEffort == "" && effort == "":
-		effort = engineName(c.ReviewEngine) + "'s own"
+		effort = spec.Get(c.ReviewEngine).Name + "'s own"
 	case c.ReviewEffort == "":
 		effort += " (quorum's default)"
 	}
@@ -621,26 +584,12 @@ func reviewModelDesc(c config.Config) string {
 }
 
 func fixModelDesc(c config.Config) string {
-	eng := engineName(c.FixEngine)
+	eng := spec.Get(c.FixEngine).Name
 	if c.FixModel == "" && c.FixEffort == "" {
 		return eng + "'s own choice"
 	}
 	return fmt.Sprintf("%s, effort %s",
 		orText(c.FixModel, eng+"'s own choice"), orText(c.FixEffort, eng+"'s own"))
-}
-
-// modelHint gives the model prompt the examples that engine accepts. The
-// name spaces have nothing in common, and a model typed for the wrong engine
-// is only found out when the run fails.
-func modelHint(eng string) string {
-	switch eng {
-	case config.EngineClaude:
-		return "an alias such as opus, sonnet or fable, or a full name such as claude-opus-5"
-	case config.EngineGrok:
-		return "a Grok model name such as " + review.GrokDefaultModel
-	default:
-		return "a Codex model name such as " + review.DefaultModel
-	}
 }
 
 // engineOptions builds the engine picker for one engine field and the model
@@ -664,11 +613,11 @@ func engineOptions(engineField, modelField, effortField func(*config.Config) *st
 			return *engineField(&cc) == v
 		}
 	}
-	return []option{
-		{"codex", "OpenAI's Codex CLI", set(config.EngineCodex), is(config.EngineCodex)},
-		{"claude", "Anthropic's Claude Code CLI", set(config.EngineClaude), is(config.EngineClaude)},
-		{"grok", "xAI's Grok CLI", set(config.EngineGrok), is(config.EngineGrok)},
+	out := make([]option, 0, len(spec.All))
+	for _, e := range spec.All {
+		out = append(out, option{e.Name, e.Label, set(e.Name), is(e.Name)})
 	}
+	return out
 }
 
 // effortOptions builds the reasoning-effort picker for whichever field the
@@ -677,7 +626,7 @@ func engineOptions(engineField, modelField, effortField func(*config.Config) *st
 // silently drop is how a panel ends up running at the wrong setting.
 func effortOptions(eng string, field func(*config.Config) *string) []option {
 	var out []option
-	for _, level := range engine.Efforts(eng) {
+	for _, level := range spec.Efforts(eng) {
 		out = append(out, option{level, "", func(c *config.Config) {
 			*field(c) = level
 		}, func(c config.Config) bool {
@@ -690,7 +639,7 @@ func effortOptions(eng string, field func(*config.Config) *string) []option {
 
 func defaultEffortOptions(eng string, field func(*config.Config) *string) []option {
 	out := []option{{
-		label:  "your " + engineName(eng) + " default",
+		label:  "your " + spec.Get(eng).Name + " default",
 		detail: "do not override the reasoning effort",
 		apply:  func(c *config.Config) { *field(c) = "" },
 		match: func(c config.Config) bool {

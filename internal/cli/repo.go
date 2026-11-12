@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/git"
+	"github.com/yungweng/quorum/internal/runner"
 )
 
 // hereRepo resolves the repository the current working directory belongs to.
@@ -18,13 +20,13 @@ import (
 // `quorum review` and `quorum babysit` both work on the checkout you are
 // standing in: they create their worktree from it, and its remote decides which
 // repository the PR argument is read against.
-func (a *app) hereRepo(t tools) (root, repo string, err error) {
+func (a *app) hereRepo(t runner.Tools) (root, repo string, err error) {
 	ctx := context.Background()
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", "", err
 	}
-	root, err = a.newGit(t.Git).Toplevel(ctx, wd)
+	root, err = git.New(t.Git).Toplevel(ctx, wd)
 	if err != nil {
 		return "", "", fmt.Errorf("run this from inside the target git repository")
 	}
@@ -82,7 +84,6 @@ func (a *app) resolvePR(arg string) (string, int, error) {
 	return "", 0, fmt.Errorf("cannot read %q as a pull request", arg)
 }
 
-// durationText renders a timeout the way the help and headers show it.
 func durationText(d time.Duration) string {
 	if d == 0 {
 		return "off"

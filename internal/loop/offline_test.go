@@ -20,7 +20,7 @@ import (
 // final push are the one place a step tells the session to push, and a bare
 // `git push` fails on the detached checkout.
 func TestStandingRulesOfflineDeferThePushToThePipeline(t *testing.T) {
-	rules := standingRules("feature/crumb-tray", true, false, true, "")
+	rules := standingRules(promptTarget{branch: "feature/crumb-tray", branchOnly: false, offline: true}, true, "")
 	if !strings.Contains(rules, "Do not push. The pipeline pushes the branch itself") {
 		t.Error("offline standing rules do not defer the push to the pipeline")
 	}
@@ -31,7 +31,7 @@ func TestStandingRulesOfflineDeferThePushToThePipeline(t *testing.T) {
 		t.Error("offline standing rules do not describe the offline pipeline")
 	}
 
-	online := standingRules("feature/crumb-tray", true, false, false, "")
+	online := standingRules(promptTarget{branch: "feature/crumb-tray", branchOnly: false, offline: false}, true, "")
 	if !strings.Contains(online, "Only push when a step explicitly tells you to") {
 		t.Error("online standing rules changed")
 	}
@@ -39,10 +39,10 @@ func TestStandingRulesOfflineDeferThePushToThePipeline(t *testing.T) {
 
 func TestOfflineRoundPromptsForbidPushing(t *testing.T) {
 	for name, prompt := range map[string]string{
-		"fix round pr":      fixRoundPrompt(12, "", false, true, "## Summary\n\nfine"),
-		"fix round branch":  fixRoundPrompt(0, "feature/crumb-tray", true, true, "## Summary\n\nfine"),
-		"suggestion pr":     suggestionRoundPrompt(12, "", false, true, "## Summary\n\nfine"),
-		"suggestion branch": suggestionRoundPrompt(0, "feature/crumb-tray", true, true, "## Summary\n\nfine"),
+		"fix round pr":      fixRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: true}, "## Summary\n\nfine"),
+		"fix round branch":  fixRoundPrompt(promptTarget{number: 0, branch: "feature/crumb-tray", branchOnly: true, offline: true}, "## Summary\n\nfine"),
+		"suggestion pr":     suggestionRoundPrompt(promptTarget{number: 12, branch: "", branchOnly: false, offline: true}, "## Summary\n\nfine"),
+		"suggestion branch": suggestionRoundPrompt(promptTarget{number: 0, branch: "feature/crumb-tray", branchOnly: true, offline: true}, "## Summary\n\nfine"),
 	} {
 		if !strings.Contains(prompt, "Do not push") {
 			t.Errorf("%s prompt does not forbid pushing", name)
@@ -54,7 +54,7 @@ func TestOfflineRoundPromptsForbidPushing(t *testing.T) {
 			t.Errorf("%s prompt mentions a CI wait no offline round has", name)
 		}
 	}
-	conflict := conflictFixPrompt(12, "main", "feature/crumb-tray", false, true)
+	conflict := conflictFixPrompt(promptTarget{number: 12, branch: "feature/crumb-tray", offline: true}, "main")
 	if !strings.Contains(conflict, "Do not push") || strings.Contains(conflict, ", and push") {
 		t.Errorf("offline conflict prompt still tells the session to push: %q", conflict)
 	}
@@ -66,7 +66,7 @@ func TestTestFixPromptCarriesCommandOutputAndCommentContract(t *testing.T) {
 		"make check",
 		"FAIL: TestCrumbTray",
 		"Do not push",
-		"a line that is exactly:\n" + MarkerComment,
+		"a line that is exactly:\n" + markerComment,
 		"never mention AI",
 	} {
 		if !strings.Contains(got, want) {
@@ -86,7 +86,7 @@ func TestEnsureTestsGreenGatesOnTheConfiguredCommand(t *testing.T) {
 	}
 	r := &run{
 		ctx:    context.Background(),
-		rep:    NopReporter{},
+		rep:    nopReporter{},
 		logDir: dir,
 		env:    envexec.Env{Worktree: dir},
 		p:      &Pipeline{Git: git.New(gitBin)},
@@ -163,7 +163,7 @@ func TestEnsureTestsGreenRejectsWorktreeChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &run{
-		ctx: context.Background(), rep: NopReporter{}, logDir: dir,
+		ctx: context.Background(), rep: nopReporter{}, logDir: dir,
 		env: envexec.Env{Worktree: dir},
 		p:   &Pipeline{Git: git.New(gitBin)},
 		o:   Options{TestCmd: "true"},
@@ -181,7 +181,7 @@ func TestEnsureTestsGreenRejectsChangesFromAFailedTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &run{
-		ctx: context.Background(), rep: NopReporter{}, logDir: dir,
+		ctx: context.Background(), rep: nopReporter{}, logDir: dir,
 		env: envexec.Env{Worktree: dir},
 		p:   &Pipeline{Git: git.New(gitBin)},
 		o:   Options{TestCmd: "false", MaxCIFixes: 1},
@@ -195,7 +195,7 @@ func TestEnsureTestsGreenRejectsChangesFromAFailedTest(t *testing.T) {
 func TestFinalOfflineReviewCommentSkipsAHeadMovedBySuggestions(t *testing.T) {
 	r := &run{
 		o:       Options{Post: true},
-		rep:     NopReporter{},
+		rep:     nopReporter{},
 		headSHA: "suggestion-head",
 	}
 	res := &Result{}
@@ -224,7 +224,7 @@ func TestFinalOfflineReviewCommentRejectsHeadDrift(t *testing.T) {
 		p:       &Pipeline{GH: gh.New(bin)},
 		o:       Options{RepoRoot: dir, Post: true},
 		ctx:     context.Background(),
-		rep:     NopReporter{},
+		rep:     nopReporter{},
 		pr:      gh.FullPR{Number: 42},
 		headSHA: "pushed-head",
 	}
@@ -250,7 +250,7 @@ func TestFinalOfflineReviewCommentPostsTheVerifiedTextAfterItsRunDirectoryWasCol
 	bin := filepath.Join(dir, "gh")
 	script := "#!/bin/sh\n" +
 		"if test \"$1\" = pr && test \"$2\" = view; then printf pushed-head; exit 0; fi\n" +
-		"if test \"$1 $2 $3 $4\" = 'pr comment 42 --body'; then printf '%s' \"$5\" >> '" + posted + "'; " +
+		"if test \"$*\" = 'pr comment 42 --body-file -'; then cat >> '" + posted + "'; " +
 		"echo https://github.com/acme/api/pull/42#issuecomment-1; exit 0; fi\n" +
 		"echo \"unexpected: $*\" >&2; exit 1\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -264,7 +264,7 @@ func TestFinalOfflineReviewCommentPostsTheVerifiedTextAfterItsRunDirectoryWasCol
 		p:       &Pipeline{GH: gh.New(bin)},
 		o:       Options{RepoRoot: dir, Post: true},
 		ctx:     context.Background(),
-		rep:     NopReporter{},
+		rep:     nopReporter{},
 		pr:      gh.FullPR{Number: 42},
 		headSHA: "pushed-head",
 	}
@@ -293,7 +293,7 @@ func TestFinalOfflineReviewCommentPostsTheVerifiedTextAfterItsRunDirectoryWasCol
 func TestFinalOfflineReviewCommentRefusesAnEmptyComment(t *testing.T) {
 	r := &run{
 		o:       Options{Post: true},
-		rep:     NopReporter{},
+		rep:     nopReporter{},
 		pr:      gh.FullPR{Number: 42},
 		headSHA: "pushed-head",
 	}

@@ -2,13 +2,14 @@ package loop
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/atomicfile"
+	"github.com/yungweng/quorum/internal/engine/spec"
+	"github.com/yungweng/quorum/internal/prkey"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -42,10 +43,10 @@ const (
 
 // States of the review that runs beside a CI wait.
 const (
-	SideReviewRunning  = "running"
+	sideReviewRunning  = "running"
 	SideReviewPosted   = "posted"
-	SideReviewFinished = "finished"
-	SideReviewFailed   = "failed"
+	sideReviewFinished = "finished"
+	sideReviewFailed   = "failed"
 )
 
 // Progress is what a run publishes about itself while it runs.
@@ -55,7 +56,7 @@ const (
 // run started from a terminal never touches the state file, so for those this
 // is the only trace there is.
 //
-// It is deliberately small and rewritten whole on every change. The Codex logs
+// It is deliberately small and rewritten whole on every change. The engine logs
 // beside it reach megabytes within minutes, and a dashboard that redraws every
 // three seconds cannot parse those.
 type Progress struct {
@@ -81,8 +82,8 @@ type Progress struct {
 	// The two models the run works with, written once at startup. A watcher
 	// cannot ask the run what it is spending, and the configuration it would
 	// otherwise read can have changed since this run started.
-	Review engine.Model `json:"review_model,omitzero"`
-	Fix    engine.Model `json:"fix_model,omitzero"`
+	Review spec.Model `json:"review_model,omitzero"`
+	Fix    spec.Model `json:"fix_model,omitzero"`
 
 	// Phase is what the run is doing now, Since when it started doing it.
 	Phase string    `json:"phase,omitempty"`
@@ -114,13 +115,20 @@ type Progress struct {
 // Key identifies either a pull request or a branch-only run.
 func (p Progress) Key() string {
 	if p.Number > 0 {
-		return fmt.Sprintf("%s#%d", p.Repo, p.Number)
+		return prkey.Format(p.Repo, p.Number)
 	}
 	return p.Repo + "@" + p.Branch
 }
 
-// LogDir is where the run's Codex logs are.
-func (p Progress) LogDir() string { return filepath.Join(p.RunDir, "logs") }
+func (p Progress) LogDir() string { return filepath.Join(p.RunDir, logsSubdir) }
+
+// logsSubdir holds a run's per-step engine logs, messagesSubdir their final
+// messages, and pushLogFile in the logs the output of the latest push.
+const (
+	logsSubdir     = "logs"
+	messagesSubdir = "messages"
+	pushLogFile    = "push-last.log"
+)
 
 // StepModel is the model whatever the run is doing now runs on.
 //
@@ -128,18 +136,16 @@ func (p Progress) LogDir() string { return filepath.Join(p.RunDir, "logs") }
 // the divergence report and the final PR description are review-side steps, and
 // nothing about their names says so. A phase that is not an engine step at all -
 // starting up, waiting for GitHub - reports none.
-func (p Progress) StepModel() (engine.Model, bool) {
+func (p Progress) StepModel() (spec.Model, bool) {
 	switch p.Phase {
 	case PhaseReview, PhaseDivergence, PhaseDescription:
 		return p.Review, true
 	case PhaseFix, PhaseCIFix, PhaseConflictFix:
 		return p.Fix, true
 	}
-	return engine.Model{}, false
+	return spec.Model{}, false
 }
 
-// publish rewrites the run's progress file.
-//
 // A reader may be reading it at any moment, so it is replaced in one rename
 // rather than truncated and written in place: a dashboard that caught it
 // half-written would show a run that does not exist. Failures are silent on
@@ -154,13 +160,7 @@ func (r *run) publish() {
 	if err != nil {
 		return
 	}
-	tmp := filepath.Join(r.root, fmt.Sprintf(".%s.%d", ProgressFile, os.Getpid()))
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, filepath.Join(r.root, ProgressFile)); err != nil {
-		os.Remove(tmp)
-	}
+	_ = atomicfile.Write(filepath.Join(r.root, ProgressFile), b)
 }
 
 // enter records a change of phase and stamps when it began, which is what lets
@@ -171,9 +171,9 @@ func (r *run) enter(phase string) {
 	r.publish()
 }
 
-// ReadProgress reads one run's progress file. A run that has not published yet
+// readProgress reads one run's progress file. A run that has not published yet
 // simply reports nothing.
-func ReadProgress(runDir string) (Progress, bool) {
+func readProgress(runDir string) (Progress, bool) {
 	b, err := os.ReadFile(filepath.Join(runDir, ProgressFile))
 	if err != nil {
 		return Progress{}, false
@@ -208,7 +208,7 @@ func LiveRuns(dir string) []Progress {
 		}
 		// A run claims its directory before it publishes, so for a moment a
 		// live run has no progress file. Skipping it costs one redraw.
-		if p, ok := ReadProgress(runDir); ok {
+		if p, ok := readProgress(runDir); ok {
 			out = append(out, p)
 		}
 	}

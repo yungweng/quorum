@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,8 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/config"
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
 	"github.com/yungweng/quorum/internal/logbook"
@@ -20,7 +22,6 @@ import (
 	"github.com/yungweng/quorum/internal/paths"
 	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/review"
-	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
 )
@@ -45,19 +46,44 @@ func testApp(t *testing.T) *app {
 	return &app{cfg: cfg, p: p, log: logbook.New(p.Log)}
 }
 
-func TestRecentReviewedPRKeysIncludesEveryEligibleRecord(t *testing.T) {
+// plainWriter is a writer without colour, whatever the test binary's stdout
+// is. ui.New(os.Stdout) turns colour on when the tests run on a terminal,
+// which made every exact-text assertion depend on how go test was started.
+func plainWriter(out io.Writer) *ui.Writer {
+	return &ui.Writer{Out: out, Width: 100}
+}
+
+// watch asks GitHub about every recent review that could belong under OPEN,
+// not only the ones that fit on screen: the open section stops at openLimit
+// and the history at the configured size, and a review cut off by either
+// would otherwise never learn it was merged.
+func TestDashboardTracksEveryRecentReviewBeyondWhatFitsOnScreen(t *testing.T) {
+	a := testApp(t)
 	now := time.Now()
-	file := state.File{PRs: map[string]state.Record{}}
-	for i := 1; i <= 25; i++ {
-		file.PRs[fmt.Sprintf("acme/api#%d", i)] = state.Record{
-			Status: state.OK,
-			At:     now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339),
+	const reviews = 25
+	if reviews <= openLimit || reviews <= a.cfg.History {
+		t.Fatalf("%d reviews fit on screen; the test needs more", reviews)
+	}
+	for i := 1; i <= reviews; i++ {
+		record(t, a, fmt.Sprintf("acme/api#%d", i), func(r *state.Record) {
+			r.Mark(state.OK, "")
+			r.At = now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)
+		})
+	}
+	record(t, a, "acme/api#99", func(r *state.Record) {
+		r.Mark(state.OK, "")
+		r.At = now.Add(-openWindow - time.Hour).Format(time.RFC3339)
+	})
+
+	_, tracked := render(t, a, nil)
+	for i := 1; i <= reviews; i++ {
+		if key := fmt.Sprintf("acme/api#%d", i); !slices.Contains(tracked, key) {
+			t.Errorf("recent review %s is not tracked; tracked = %v", key, tracked)
 		}
 	}
-
-	keys := recentReviewedPRKeys(reviewedPRs(file, nil), now)
-	if len(keys) != 25 {
-		t.Fatalf("recent reviewed PR keys = %d, want 25", len(keys))
+	// Outside the window and off screen, it is not worth a lookup.
+	if slices.Contains(tracked, "acme/api#99") {
+		t.Errorf("a review older than the open window is tracked: %v", tracked)
 	}
 }
 
@@ -242,7 +268,7 @@ func manualReview(t *testing.T, a *app, p review.LiveRun, events string) {
 // marker fakes the claim the agent takes on a review slot.
 func marker(t *testing.T, a *app, key string, pid int) {
 	t.Helper()
-	m, got, err := runner.Acquire(a.p.RunningDir, key)
+	m, got, err := agentstate.Acquire(a.p.RunningDir, key)
 	if err != nil || !got {
 		t.Fatalf("could not claim %s: %v", key, err)
 	}
@@ -546,8 +572,8 @@ func TestDashboardNamesTheModelBehindThePhase(t *testing.T) {
 			PID: 999999, Repo: "acme/api", Number: 42, Title: "tenant scoping",
 			StartedAt: now.Add(-90 * time.Minute), MaxIter: 12, Round: 3,
 			Phase: phase, Since: now.Add(-18 * time.Minute), CI: loop.CIGreen,
-			Review: engine.Model{Engine: engine.Codex, Name: "gpt-5.6-terra", Effort: "max"},
-			Fix:    engine.Model{Engine: engine.Claude, Name: "opus", Effort: "high"},
+			Review: spec.Model{Engine: spec.Codex, Name: "gpt-5.6-terra", Effort: "max"},
+			Fix:    spec.Model{Engine: spec.Claude, Name: "opus", Effort: "high"},
 		}
 	}
 
@@ -583,7 +609,7 @@ func TestDashboardNamesTheModelBehindThePhase(t *testing.T) {
 	// would put a model on screen that the run may well not be using.
 	a4 := testApp(t)
 	old := models(loop.PhaseFix)
-	old.Review, old.Fix = engine.Model{}, engine.Model{}
+	old.Review, old.Fix = spec.Model{}, spec.Model{}
 	babysit(t, a4, old)
 	screen, _ = render(t, a4, nil)
 	if strings.Contains(screen, "default") {
@@ -798,8 +824,6 @@ func TestDashboardRendersWithoutAnyMergeInformation(t *testing.T) {
 	}
 }
 
-// Every line has to fit the terminal: watch paints a fixed number of rows, and
-// a line that wraps pushes the rest of the frame off the bottom.
 // The point of the history log: runs are listed one by one, so reviewing the
 // same pull request twice leaves two lines instead of the second overwriting
 // the first, and a run started in a terminal appears at all.
@@ -1000,6 +1024,8 @@ func TestAnIdleDashboardStaysCompact(t *testing.T) {
 	}
 }
 
+// Every line has to fit the terminal: watch paints a fixed number of rows, and
+// a line that wraps pushes the rest of the frame off the bottom.
 func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	a := testApp(t)
 	longKey := "acme/" + strings.Repeat("r", 100) + "#1"
@@ -1053,7 +1079,6 @@ func TestDashboardLinesFitTheTerminal(t *testing.T) {
 	}
 }
 
-// lineWith returns the single screen line containing want.
 // sectionBadge returns the count a section heading carries at its right edge,
 // or "" when it carries none. The gap in between depends on the terminal
 // width, so the badge has to be read off the line rather than matched as one
@@ -1110,6 +1135,7 @@ func sectionOf(t *testing.T, screen, heading string) string {
 	return ""
 }
 
+// lineWith returns the first screen line containing want.
 func lineWith(t *testing.T, screen, want string) string {
 	t.Helper()
 	for _, line := range strings.Split(screen, "\n") {

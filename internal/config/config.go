@@ -1,10 +1,9 @@
 // Package config reads and writes quorum's configuration file.
 //
 // The file is the same shell-syntax KEY=value file prbot used, so upgrading
-// does not ask the user to migrate anything. It now also carries the review and
-// babysit settings that used to be command-line flags on two separate tools. It is parsed
-// here rather than sourced: only assignments are understood, and anything else
-// in the file is reported instead of executed.
+// does not ask the user to migrate anything. It is parsed here rather than
+// sourced: only assignments are understood, and anything else in the file is
+// reported instead of executed.
 package config
 
 import (
@@ -17,7 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/atomicfile"
+	"github.com/yungweng/quorum/internal/engine/spec"
 )
 
 // Config is the fully resolved configuration: file values on top of defaults.
@@ -47,9 +47,8 @@ type Config struct {
 	SkipBots   bool
 	SkipOwn    bool
 
-	// Review settings. These used to be flags on a separate binary that the
-	// daemon passed through as an opaque REVIEW_ARGS string. An empty model
-	// or effort means the selected engine's own default.
+	// Review settings. An empty model or effort means the selected engine's
+	// own default.
 	ReviewEngine  string // codex, claude or grok
 	ReviewModel   string
 	ReviewEffort  string
@@ -67,10 +66,9 @@ type Config struct {
 	// Escalation targets are GitHub users or org/team slugs without a leading @.
 	DivergenceScan       bool
 	DivergenceEscalateTo []string
-	// Sandboxed opts the fix sessions out of
-	// --dangerously-bypass-approvals-and-sandbox. They then run under the
-	// user's own codex config, which must allow commands, network and push or
-	// every fix round fails.
+	// Sandboxed opts the fix sessions out of the engine's sandbox and
+	// permission bypass. They then run under the user's own engine config,
+	// which must allow commands, network and push or every fix round fails.
 	Sandboxed bool
 	// BabysitDrafts lets `quorum babysit` work on a draft pull request without
 	// passing --draft each time.
@@ -78,7 +76,7 @@ type Config struct {
 	// ResolveConflicts has babysit merge the latest base before reviewing and
 	// resolve conflicts through the fix session.
 	ResolveConflicts bool
-	// BaseUpdate is when ResolveConflicts merges the base: BaseUpdateAlways
+	// BaseUpdate is when ResolveConflicts merges the base: baseUpdateAlways
 	// (the default) whenever the branch is behind, BaseUpdateConflicts only
 	// when the merge would conflict.
 	BaseUpdate string
@@ -95,7 +93,6 @@ type Config struct {
 
 	// AgentAction is what the daemon does with a pull request that asks for a
 	// review: "review" posts one and stops, "babysit" runs the full fix loop.
-	// Only possible now that both live in one binary.
 	AgentAction string
 
 	// AutoMerge is one opt-in for every source: agent runs, `quorum review`
@@ -104,8 +101,8 @@ type Config struct {
 	AutoMerge        bool
 	AutoMergeTimeout time.Duration
 	// AutoMergeAuthors limits auto-merge to pull requests whose author is one
-	// of these GitHub logins, compared case-insensitively. Empty keeps the old
-	// behaviour: every author with a clean review qualifies.
+	// of these GitHub logins, compared case-insensitively. Empty lets every
+	// author with a clean review qualify.
 	AutoMergeAuthors []string
 
 	Notify bool
@@ -114,13 +111,13 @@ type Config struct {
 	// to merge" survives until the user opens the PR or dismisses it.
 	NotifyReadyToMerge bool
 
-	// ReviewArgs is the retired pass-through string. It is still read so an
+	// reviewArgs is the retired pass-through string. It is still read so an
 	// existing config keeps working, and dropped when the file is rewritten.
-	ReviewArgs string
+	reviewArgs string
 
-	// Unknown keeps assignments quorum does not recognise so that rewriting the
+	// unknown keeps assignments quorum does not recognise so that rewriting the
 	// file never silently drops something the user put there.
-	Unknown map[string]string
+	unknown map[string]string
 }
 
 // Agent actions.
@@ -137,27 +134,13 @@ const (
 
 // Base update modes.
 const (
-	BaseUpdateAlways    = "always"
+	baseUpdateAlways    = "always"
 	BaseUpdateConflicts = "conflicts"
 )
 
-// The engines reviews and fix sessions can run on. Defined here rather than
-// imported so config keeps its zero internal dependencies.
-const (
-	EngineCodex  = "codex"
-	EngineClaude = "claude"
-	EngineGrok   = "grok"
-)
-
-// knownEngine reports whether v is a recognised engine name.
-func knownEngine(v string) bool {
-	return v == EngineCodex || v == EngineClaude || v == EngineGrok
-}
-
-// Default mirrors the defaults the shell version shipped, with the resource
-// limits added. LoadLimit is off by default: the point of the agent is that a
-// review starts when it is requested, and MaxConcurrent is the honest place to
-// say how many of them you want at once.
+// LoadLimit is off by default: the point of the agent is that a review starts
+// when it is requested, and MaxConcurrent is the honest place to say how many
+// of them you want at once.
 func Default() Config {
 	return Config{
 		IncludeTeams:  true,
@@ -177,16 +160,16 @@ func Default() Config {
 		// Model and effort stay empty on purpose: empty means the selected
 		// engine's own default, so switching REVIEW_ENGINE never feeds one
 		// engine another engine's model name.
-		ReviewEngine:  EngineCodex,
+		ReviewEngine:  spec.Codex,
 		ReviewTimeout: 45 * time.Minute,
 		Post:          true,
 
-		FixEngine:        EngineCodex,
+		FixEngine:        spec.Codex,
 		MaxIter:          12,
 		MaxCIFixes:       3,
 		FixTimeout:       2 * time.Hour,
 		ResolveConflicts: true,
-		BaseUpdate:       BaseUpdateAlways,
+		BaseUpdate:       baseUpdateAlways,
 		FixSuggestions:   true,
 		LoopMode:         LoopOffline,
 
@@ -194,7 +177,7 @@ func Default() Config {
 		AutoMergeTimeout: 2 * time.Hour,
 
 		Notify:  true,
-		Unknown: map[string]string{},
+		unknown: map[string]string{},
 	}
 }
 
@@ -219,7 +202,6 @@ func ParseDuration(v string) (time.Duration, error) {
 	return d, nil
 }
 
-// FormatDuration renders a duration the way the config file writes it.
 func FormatDuration(d time.Duration) string {
 	switch {
 	case d == 0:
@@ -276,8 +258,8 @@ func Load(path string) (Config, error) {
 	// the alternative is a tool that refuses to start on its own config - with
 	// no terminal to say so behind the launchd agent. What the run then uses is
 	// still visible: the run headers name the resolved model and effort.
-	cfg.ReviewEffort = engine.KnownEffort(cfg.ReviewEngine, cfg.ReviewEffort)
-	cfg.FixEffort = engine.KnownEffort(cfg.FixEngine, cfg.FixEffort)
+	cfg.ReviewEffort = spec.KnownEffort(cfg.ReviewEngine, cfg.ReviewEffort)
+	cfg.FixEffort = spec.KnownEffort(cfg.FixEngine, cfg.FixEffort)
 	if len(problems) > 0 {
 		return cfg, fmt.Errorf("%s: %s", path, strings.Join(problems, "; "))
 	}
@@ -372,7 +354,7 @@ func (c *Config) set(key, value string) {
 	case "CACHE_BUDGET_GB":
 		c.CacheBudgetGB = floatOr(value, c.CacheBudgetGB)
 	case "REVIEW_ENGINE":
-		if v := strings.TrimSpace(strings.ToLower(value)); knownEngine(v) {
+		if v := strings.TrimSpace(strings.ToLower(value)); v != "" && spec.Valid(v) {
 			c.ReviewEngine = v
 		}
 	case "REVIEW_MODEL":
@@ -384,7 +366,7 @@ func (c *Config) set(key, value string) {
 	case "POST":
 		c.Post = truthy(value)
 	case "FIX_ENGINE":
-		if v := strings.TrimSpace(strings.ToLower(value)); knownEngine(v) {
+		if v := strings.TrimSpace(strings.ToLower(value)); v != "" && spec.Valid(v) {
 			c.FixEngine = v
 		}
 	case "FIX_MODEL":
@@ -408,7 +390,7 @@ func (c *Config) set(key, value string) {
 	case "RESOLVE_CONFLICTS":
 		c.ResolveConflicts = truthy(value)
 	case "BASE_UPDATE":
-		if v := strings.TrimSpace(strings.ToLower(value)); v == BaseUpdateAlways || v == BaseUpdateConflicts {
+		if v := strings.TrimSpace(strings.ToLower(value)); v == baseUpdateAlways || v == BaseUpdateConflicts {
 			c.BaseUpdate = v
 		}
 	case "FIX_SUGGESTIONS":
@@ -439,15 +421,15 @@ func (c *Config) set(key, value string) {
 		// exists. The only flag anyone used through it was --dry-run, so that
 		// one keeps working; the rest is preserved for the user to see and
 		// migrate rather than silently ignored.
-		c.ReviewArgs = value
+		c.reviewArgs = value
 		if strings.Contains(value, "--dry-run") {
 			c.Post = false
 		}
 	default:
-		if c.Unknown == nil {
-			c.Unknown = map[string]string{}
+		if c.unknown == nil {
+			c.unknown = map[string]string{}
 		}
-		c.Unknown[key] = value
+		c.unknown[key] = value
 	}
 }
 
@@ -507,9 +489,9 @@ func num(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
-// Render produces the config file text: the current values with the comments
+// render produces the config file text: the current values with the comments
 // that explain them, plus any assignment quorum did not recognise.
-func (c Config) Render() string {
+func (c Config) render() string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
@@ -590,34 +572,29 @@ func (c Config) Render() string {
 	w("NOTIFY=%s\n", bit(c.Notify))
 	w("NOTIFY_READY_TO_MERGE=%s\t# clickable notification per clean PR not auto-merged\n", bit(c.NotifyReadyToMerge))
 
-	if c.ReviewArgs != "" {
+	if c.reviewArgs != "" {
 		w("\n# Retired: pr-codex-review is built in now, so this is no longer passed\n")
 		w("# anywhere. Use REVIEW_MODEL, REVIEW_EFFORT, REVIEWERS and POST instead.\n")
-		w("# REVIEW_ARGS=%q\n", c.ReviewArgs)
+		w("# REVIEW_ARGS=%q\n", c.reviewArgs)
 	}
 
-	if len(c.Unknown) > 0 {
-		keys := make([]string, 0, len(c.Unknown))
-		for k := range c.Unknown {
+	if len(c.unknown) > 0 {
+		keys := make([]string, 0, len(c.unknown))
+		for k := range c.unknown {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		w("\n# Kept as written; quorum does not use these.\n")
 		for _, k := range keys {
-			w("%s=%q\n", k, c.Unknown[k])
+			w("%s=%q\n", k, c.unknown[k])
 		}
 	}
 	return b.String()
 }
 
-// Save writes the config atomically, creating the directory if needed.
 func (c Config) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(c.Render()), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, []byte(c.render()))
 }

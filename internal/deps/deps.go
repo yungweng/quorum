@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/yungweng/quorum/internal/cachefs"
+	"github.com/yungweng/quorum/internal/prkey"
 )
 
 // lockFiles are the manifests that mark a directory as a JavaScript project.
@@ -39,7 +40,6 @@ var lockFiles = []string{
 	"bun.lockb",
 }
 
-// pruneDirs are never descended into while looking for lock files.
 var pruneDirs = []string{"node_modules", ".git", "vendor"}
 
 // maxDepth bounds the search below the worktree root. Three levels covers the
@@ -58,23 +58,22 @@ const staleLock = time.Hour
 // Cache is the shared dependency cache for one repository and worktree.
 type Cache struct {
 	Root     string // the deps cache root, one level above the per-repo dirs
-	Repo     string // repository name with the slash replaced, e.g. "owner-repo"
+	Repo     string // owner/repo
 	Worktree string
 }
 
-// Project is one directory inside the worktree that owns a lock file, together
+// project is one directory inside the worktree that owns a lock file, together
 // with the hash of that lock file.
-type Project struct {
+type project struct {
 	Rel  string // relative to the worktree, "." for the root
-	Hash string
+	hash string
 }
 
-// Projects lists every directory in the worktree that owns a lock file.
-// A directory holding both a pnpm and an npm lock file is reported once; the
-// first lock file found wins, matching the order of lockFiles.
-func (c Cache) Projects() ([]Project, error) {
+// A directory holding both a pnpm and an npm lock file is reported once,
+// hashed by whichever lock file WalkDir reaches first (lexical order).
+func (c Cache) projects() ([]project, error) {
 	seen := map[string]bool{}
-	var out []Project
+	var out []project
 
 	err := filepath.WalkDir(c.Worktree, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -105,17 +104,42 @@ func (c Cache) Projects() ([]Project, error) {
 		if err != nil {
 			return nil //nolint:nilerr // an unreadable lock file just means no sharing
 		}
-		out = append(out, Project{Rel: relTo(c.Worktree, dir), Hash: hash})
+		out = append(out, project{Rel: relTo(c.Worktree, dir), hash: hash})
 		return nil
 	})
 	return out, err
 }
 
-// Link symlinks every cached tree that matches a project's current lock file
+// Link is link with its outcome reported: failed gets a lookup error, info a
+// "deps:     reused" line per tree. It returns the links it created.
+func (c Cache) Link(failed func(error), info func(string)) []string {
+	links, reused, err := c.link()
+	return report("reused", links, reused, err, failed, info)
+}
+
+// Capture is capture with its outcome reported: failed gets a publishing
+// error, info a "deps:     cached" line per tree. It returns the links it
+// created.
+func (c Cache) Capture(failed func(error), info func(string)) []string {
+	links, cached, err := c.capture()
+	return report("cached", links, cached, err, failed, info)
+}
+
+func report(verb string, links []string, projects []project, err error, failed func(error), info func(string)) []string {
+	if err != nil {
+		failed(err)
+	}
+	for _, p := range projects {
+		info("deps:     " + verb + " " + p.String())
+	}
+	return links
+}
+
+// link symlinks every cached tree that matches a project's current lock file
 // into the worktree, and returns the links it created plus the projects it
 // reused. A project whose node_modules already exists is left alone.
-func (c Cache) Link() (links []string, reused []Project, err error) {
-	projects, err := c.Projects()
+func (c Cache) link() (links []string, reused []project, err error) {
+	projects, err := c.projects()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -141,14 +165,14 @@ func (c Cache) Link() (links []string, reused []Project, err error) {
 	return links, reused, nil
 }
 
-// Capture publishes dependency trees that the environment hook just installed,
+// capture publishes dependency trees that the environment hook just installed,
 // and links the worktree at the published copy. It returns the links it created
 // and the projects it newly cached.
 //
 // A project whose node_modules is already a symlink is pointing at the shared
 // tree and has nothing to contribute.
-func (c Cache) Capture() (links []string, cached []Project, err error) {
-	projects, err := c.Projects()
+func (c Cache) capture() (links []string, cached []project, err error) {
+	projects, err := c.projects()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -221,12 +245,10 @@ type Tree struct {
 
 // Trees lists every tree in the cache, least recently used first.
 //
-// Use is read from the .complete marker, which Link touches on every reuse.
-// The shell version stat'ed the directory instead, which does not work: writing
-// a file inside a directory leaves the directory's own mtime untouched, so a
-// tree that had been reused daily since it was created still looked untouched
-// and was deleted on schedule. Verified on macOS; the marker's mtime is the
-// value that actually tracks use.
+// Use is read from the .complete marker, which Link touches on every reuse,
+// not from the directory: writing a file inside a directory leaves the
+// directory's own mtime untouched, so a tree reused daily since it was created
+// would still look untouched and be deleted on schedule. Verified on macOS.
 //
 // A tree with no marker is a publish that never finished. It sorts first,
 // because it is dead weight whatever the caller is deleting for.
@@ -253,7 +275,6 @@ func (c Cache) GC(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
 	removed := 0
 	for _, t := range c.Trees() {
-		// Ordered by use, so the first tree still in date ends the sweep.
 		if !t.Used.Before(cutoff) {
 			break
 		}
@@ -267,12 +288,10 @@ func (c Cache) GC(maxAge time.Duration) int {
 // dir is where a project's tree lives in the cache: <root>/<repo>/<path>/<hash>.
 // The hash in the leaf is what makes a changed lock file miss the cache
 // instead of reusing a tree that no longer matches it.
-func (c Cache) dir(p Project) string {
-	return filepath.Join(c.Root, c.Repo, slug(p.Rel), p.Hash)
+func (c Cache) dir(p project) string {
+	return filepath.Join(c.Root, prkey.RepoSlug(c.Repo), slug(p.Rel), p.hash)
 }
 
-// slug turns a project path into one path element.
-//
 // The root project needs its own name rather than ".": path joining collapses
 // a "." component away, which would put the root project's tree one level
 // higher than every other project's and break any layer that reasons about the
@@ -284,15 +303,14 @@ func slug(rel string) string {
 	return strings.ReplaceAll(rel, "/", "_")
 }
 
-func (c Cache) projectDir(p Project) string {
+func (c Cache) projectDir(p project) string {
 	if p.Rel == "." {
 		return c.Worktree
 	}
 	return filepath.Join(c.Worktree, p.Rel)
 }
 
-// hashFile returns the first 12 hex characters of a file's SHA-256. Twelve is
-// what the shell version used: 48 bits, against a handful of lock files per
+// Twelve hex characters are 48 bits, ample against a handful of lock files per
 // repository.
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
@@ -346,4 +364,4 @@ func touch(path string) {
 }
 
 // String renders a project the way the run header prints it.
-func (p Project) String() string { return fmt.Sprintf("%s (%s)", p.Rel, p.Hash) }
+func (p project) String() string { return fmt.Sprintf("%s (%s)", p.Rel, p.hash) }

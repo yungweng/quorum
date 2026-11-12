@@ -8,15 +8,17 @@ package state
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/yungweng/quorum/internal/atomicfile"
+	"github.com/yungweng/quorum/internal/prkey"
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // Status values a record can carry.
@@ -95,8 +97,9 @@ type Record struct {
 
 	Fails  Num    `json:"fails,omitempty"`
 	RunLog string `json:"runlog,omitempty"`
-	// RunDir is pr-codex-review's run directory. status reads its events.log to
-	// show reviewer progress while a review is in flight.
+	// RunDir is the run directory of the current or last run. The dashboard
+	// reads the events log under it to show reviewer progress while a review
+	// is in flight.
 	RunDir string `json:"run_dir,omitempty"`
 	// ResumableRun reports that RunDir holds completed reviewer output worth
 	// reusing: the last attempt failed at aggregation, verification or a
@@ -116,43 +119,21 @@ type Entry struct {
 	Record
 }
 
-// Repo returns the owner/repo half of the key.
-func (e Entry) Repo() string {
-	if i := strings.LastIndex(e.Key, "#"); i > 0 {
-		return e.Key[:i]
-	}
-	return e.Key
-}
+func (e Entry) Repo() string { return prkey.Repo(e.Key) }
 
 // Number returns the pull request number, or 0 for a malformed key.
-func (e Entry) Number() int {
-	if i := strings.LastIndex(e.Key, "#"); i > 0 {
-		n, _ := strconv.Atoi(e.Key[i+1:])
-		return n
-	}
-	return 0
-}
+func (e Entry) Number() int { return prkey.Number(e.Key) }
 
 // Name returns just the repository name, which is what fits on a status line.
-func (e Entry) Name() string {
-	repo := e.Repo()
-	if i := strings.LastIndex(repo, "/"); i >= 0 {
-		return repo[i+1:]
-	}
-	return repo
-}
+func (e Entry) Name() string { return prkey.Name(e.Key) }
 
-// URL is the pull request page.
-func (e Entry) URL() string {
-	return fmt.Sprintf("https://github.com/%s/pull/%d", e.Repo(), e.Number())
-}
+func (e Entry) URL() string { return prkey.URL(e.Repo(), e.Number()) }
 
 // Time parses At, returning the zero time when it is missing or malformed.
 func (e Entry) Time() time.Time {
 	return parseTime(e.At)
 }
 
-// Started parses StartedAt the same way.
 func (e Entry) Started() time.Time {
 	return parseTime(e.StartedAt)
 }
@@ -171,7 +152,6 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
-// Now formats a timestamp the way records store it.
 func Now() string { return time.Now().Format(time.RFC3339) }
 
 // Mark records a change of state and stamps the time it happened. Every
@@ -255,23 +235,10 @@ func write(path string, f File) error {
 		}
 		f.PRs = trimmed
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicfile.WriteJSON(path, f)
 }
 
 // lock takes an exclusive advisory lock for the state file and returns the
@@ -284,19 +251,5 @@ func lock(statePath string) (func(), error) {
 	if fi, err := os.Stat(lockPath); err == nil && fi.IsDir() {
 		os.RemoveAll(lockPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, errors.New("could not lock " + lockPath + ": " + err.Error())
-	}
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+	return proc.LockFile(lockPath)
 }

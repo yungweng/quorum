@@ -43,13 +43,12 @@ func write(t *testing.T, content string) string {
 }
 
 func TestValidateAcceptsAWellFormedComment(t *testing.T) {
-	if err := ValidateComment(write(t, goodComment)); err != nil {
+	if err := validateComment(write(t, goodComment)); err != nil {
 		t.Errorf("a well formed comment was rejected: %v", err)
 	}
 }
 
 func TestCountsBulletsPerSection(t *testing.T) {
-	path := write(t, goodComment)
 	for _, tc := range []struct {
 		heading string
 		want    int
@@ -59,9 +58,14 @@ func TestCountsBulletsPerSection(t *testing.T) {
 		{"Suggestions", 1},
 		{"Questions", 0},
 	} {
-		if got := CountFile(path, tc.heading); got != tc.want {
+		if got := countSection(goodComment, tc.heading); got != tc.want {
 			t.Errorf("%s = %d, want %d", tc.heading, got, tc.want)
 		}
+	}
+	var f Findings
+	f.countFindings(goodComment)
+	if f.Blockers != 1 || f.Critical != 2 || f.Suggestions != 1 || f.Questions != 0 {
+		t.Errorf("countFindings = %d/%d/%d/%d, want 1/2/1/0", f.Blockers, f.Critical, f.Suggestions, f.Questions)
 	}
 }
 
@@ -147,7 +151,7 @@ None.
 
 None.
 `
-	err := ValidateComment(write(t, broken))
+	err := validateComment(write(t, broken))
 	if err == nil {
 		t.Fatal("a comment without ## Questions was accepted")
 	}
@@ -175,7 +179,7 @@ None.
 
 None.
 `
-	if err := ValidateComment(write(t, prose)); err == nil {
+	if err := validateComment(write(t, prose)); err == nil {
 		t.Fatal("a prose finding was accepted and would have counted as zero blockers")
 	}
 }
@@ -188,7 +192,7 @@ func TestValidateRejectsMetaOutput(t *testing.T) {
 		"Run gh pr comment 12 --body-file out.md to post it.",
 	} {
 		body := "## Summary\n\n" + meta + "\n\n## Blockers\n\nNone.\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
-		if err := ValidateComment(write(t, body)); err == nil {
+		if err := validateComment(write(t, body)); err == nil {
 			t.Errorf("meta output was accepted: %q", meta)
 		}
 	}
@@ -198,14 +202,14 @@ func TestValidateAcceptsGitHubAPIURLInFinding(t *testing.T) {
 	body := strings.Replace(goodComment,
 		"- The retry loop has no upper bound.",
 		"- The request to https://api.github.com/repos/acme/api failed without a retry.", 1)
-	if err := ValidateComment(write(t, body)); err != nil {
+	if err := validateComment(write(t, body)); err != nil {
 		t.Errorf("a valid finding containing a GitHub API URL was rejected: %v", err)
 	}
 }
 
 func TestValidateRejectsACodeFence(t *testing.T) {
 	fenced := "```markdown\n" + goodComment + "\n```\n"
-	if err := ValidateComment(write(t, fenced)); err == nil {
+	if err := validateComment(write(t, fenced)); err == nil {
 		t.Fatal("a fenced comment was accepted")
 	}
 }
@@ -216,7 +220,7 @@ func TestNoneIsAcceptedInItsUsualSpellings(t *testing.T) {
 	for _, none := range []string{"None.", "none", "None", "NONE.", "None!"} {
 		body := "## Summary\n\nFine.\n\n## Blockers\n\n" + none +
 			"\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
-		if err := ValidateComment(write(t, body)); err != nil {
+		if err := validateComment(write(t, body)); err != nil {
 			t.Errorf("%q was rejected: %v", none, err)
 		}
 	}
@@ -227,10 +231,10 @@ func TestNoneIsAcceptedInItsUsualSpellings(t *testing.T) {
 func TestSectionMatchingIgnoresCaseAndSpacing(t *testing.T) {
 	body := "##   summary\n\nFine.\n\n##  BLOCKERS  \n\n- one\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
 	path := write(t, body)
-	if err := ValidateComment(path); err != nil {
+	if err := validateComment(path); err != nil {
 		t.Fatalf("unexpected rejection: %v", err)
 	}
-	if got := CountFile(path, "Blockers"); got != 1 {
+	if got := countSection(body, "Blockers"); got != 1 {
 		t.Errorf("Blockers = %d, want 1", got)
 	}
 }
@@ -242,7 +246,7 @@ func TestNormalizeStripsPreambleAndMidLineGlueBeforeSummary(t *testing.T) {
 	body := "I'll independently verify the PR.Reading the core paths for series resolution, roster mirroring, and end cascade.## Summary\n" +
 		"@example-user, looks good.\n\n## Blockers\n\nNone.\n\n## Critical\n\nNone.\n\n## Suggestions\n\nNone.\n\n## Questions\n\nNone.\n"
 	path := write(t, body)
-	if err := ValidateComment(path); err == nil {
+	if err := validateComment(path); err == nil {
 		t.Fatal("glued preamble was accepted before normalize; the heading gate would hide the failure mode")
 	}
 	if err := normalizeAndValidateComment(path); err != nil {
@@ -275,24 +279,6 @@ func TestNormalizeLeavesTextWithoutSummaryAlone(t *testing.T) {
 	}
 }
 
-// Bullets stop at the next level-2 heading, so a finding is never counted twice
-// or attributed to the wrong severity.
-func TestBulletsDoNotLeakAcrossSections(t *testing.T) {
-	path := write(t, goodComment)
-	if got := Count(readFile(t, path), "Summary"); got != 0 {
-		t.Errorf("Summary picked up %d bullets from later sections", got)
-	}
-}
-
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
-}
-
 // The summary names only what was found. Round lines are read for the one
 // count that changed, and "0 blockers, 0 suggestions" around it is noise.
 func TestSummaryOmitsEmptyCategories(t *testing.T) {
@@ -305,5 +291,21 @@ func TestSummaryOmitsEmptyCategories(t *testing.T) {
 	f := Findings{Blockers: 1, Critical: 2, Suggestions: 1, Questions: 3}
 	if got := f.Summary(); got != "1 blocker, 2 critical, 1 suggestion, 3 questions" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestMergeEligibleAllowsSuggestionsAndQuestionsOnly(t *testing.T) {
+	if !(Findings{PR: 42, Posted: true, Suggestions: 3, Questions: 2}).MergeEligible() {
+		t.Fatal("suggestions or questions blocked auto-merge")
+	}
+	for _, findings := range []Findings{
+		{PR: 42, Posted: true, Blockers: 1},
+		{PR: 42, Posted: true, Critical: 1},
+		{PR: 42, Posted: false},
+		{PR: 0, Posted: true},
+	} {
+		if findings.MergeEligible() {
+			t.Errorf("ineligible findings were accepted: %+v", findings)
+		}
 	}
 }

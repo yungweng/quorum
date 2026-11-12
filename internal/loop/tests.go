@@ -28,8 +28,7 @@ const RepoTestCmdPath = ".quorum/testcmd"
 // babysit weaken or hijack its own gate - the same reasoning as the .envrc
 // stop. A command the change edits therefore only applies once it is merged.
 func resolveRepoTestCmd(ctx context.Context, gitc git.G, repoRoot, base string) (string, error) {
-	if err := gitc.Fetch(ctx, repoRoot, "origin",
-		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", base, base)); err != nil {
+	if err := gitc.FetchBranch(ctx, repoRoot, base); err != nil {
 		return "", err
 	}
 	content, ok, err := gitc.ShowFile(ctx, repoRoot, "origin/"+base, RepoTestCmdPath)
@@ -81,21 +80,15 @@ func (r *run) ensureTestsGreen() error {
 			return shaErr
 		}
 		fixNumber := r.testFixTotal + 1
-		tag := fmt.Sprintf("test-fix-%d", fixNumber)
 		r.enter(PhaseFix)
-		if err := r.codexCall(tag, testFixPrompt(r.o.TestCmd, tailLines(logPath, testLogTailLines))); err != nil {
-			return err
-		}
-		if err := r.questionGate(tag); err != nil {
-			return err
-		}
-		if err := r.ensureCommitted(tag); err != nil {
+		step, err := r.fixStep(fmt.Sprintf("test-fix-%d", fixNumber), testFixPrompt(r.o.TestCmd, tailLines(logPath, testLogTailLines)))
+		if err != nil {
 			return err
 		}
 		r.testFixTotal = fixNumber
 		label := fmt.Sprintf("Test fix %d", fixNumber)
 		r.recordRound(label, preSHA)
-		r.queueFixComment(tag, label, preSHA)
+		r.queueFixComment(step, label, preSHA)
 	}
 }
 
@@ -120,7 +113,6 @@ func (r *run) runTestCmd(logPath string) error {
 	})
 }
 
-// tailLines returns the last n lines of a log file for a fix prompt.
 func tailLines(path string, n int) string {
 	data, err := os.ReadFile(path)
 	if err != nil {

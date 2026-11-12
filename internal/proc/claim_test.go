@@ -113,3 +113,23 @@ func TestLockDirCreatesTheDirectory(t *testing.T) {
 		t.Errorf("lock directory was not created: %v", err)
 	}
 }
+
+func TestTryLockFileReportsAHeldLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "poll.lock")
+	unlock, err := LockFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held, err := TryLockFile(path); err != nil || held {
+		t.Fatalf("second lock: held = %v, err = %v; want not held and no error", held, err)
+	}
+	unlock()
+	release, held, err := TryLockFile(path)
+	if err != nil || !held {
+		t.Fatalf("lock after release: held = %v, err = %v", held, err)
+	}
+	release()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the lock file did not stay on disk: %v", err)
+	}
+}

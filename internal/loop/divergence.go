@@ -12,18 +12,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/atomicfile"
 	"github.com/yungweng/quorum/internal/review"
 )
 
 const (
-	DivergenceTraceFile  = "divergence-trace.json"
-	DivergenceResultFile = "divergence.json"
-	DivergenceReportFile = "divergence-report.md"
+	divergenceTraceFile  = "divergence-trace.json"
+	divergenceResultFile = "divergence.json"
+	divergenceReportFile = "divergence-report.md"
 
-	DivergenceCumulative = "cumulative"
+	divergenceCumulative = "cumulative"
 	DivergenceDiverged   = "diverged"
-	DivergenceUncertain  = "uncertain"
+	divergenceUncertain  = "uncertain"
 
 	maxDivergenceTraceBytes   = 8 * 1024 * 1024
 	maxDivergenceResultBytes  = 1024 * 1024
@@ -32,10 +32,10 @@ const (
 
 var mentionTargetRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99}))?$`)
 
-// DivergenceTrace is the bounded history supplied to the read-only analysis.
-// It contains the final messages and commit identities, never the large Codex
+// divergenceTrace is the bounded history supplied to the read-only analysis.
+// It contains the final messages and commit identities, never the large engine
 // logs. The analyzer can inspect an exact diff from the recorded SHAs.
-type DivergenceTrace struct {
+type divergenceTrace struct {
 	Schema      int                    `json:"schema"`
 	PR          int                    `json:"pr,omitempty"`
 	Title       string                 `json:"title,omitempty"`
@@ -43,11 +43,11 @@ type DivergenceTrace struct {
 	BaseBranch  string                 `json:"base_branch,omitempty"`
 	InitialHead string                 `json:"initial_head"`
 	FinalHead   string                 `json:"final_head"`
-	Rounds      []DivergenceRoundTrace `json:"rounds"`
-	CIFixes     []CIFixTrace           `json:"ci_fixes,omitempty"`
+	Rounds      []divergenceRoundTrace `json:"rounds"`
+	CIFixes     []ciFixTrace           `json:"ci_fixes,omitempty"`
 }
 
-type DivergenceRoundTrace struct {
+type divergenceRoundTrace struct {
 	Round            int       `json:"round"`
 	ReviewedSHA      string    `json:"reviewed_sha"`
 	ReviewComment    string    `json:"review_comment"`
@@ -56,19 +56,19 @@ type DivergenceRoundTrace struct {
 	Critical         int       `json:"critical"`
 	Suggestions      int       `json:"suggestions"`
 	Questions        int       `json:"questions"`
-	Fix              *FixTrace `json:"fix,omitempty"`
+	Fix              *fixTrace `json:"fix,omitempty"`
 }
 
-type FixTrace struct {
+type fixTrace struct {
 	BeforeSHA string `json:"before_sha"`
 	AfterSHA  string `json:"after_sha"`
 	Commits   string `json:"commits,omitempty"`
 	Response  string `json:"response,omitempty"`
 }
 
-type CIFixTrace struct {
+type ciFixTrace struct {
 	AfterRound int `json:"after_round"`
-	FixTrace
+	fixTrace
 }
 
 // DivergenceReport is both the machine-readable result and the source for the
@@ -132,7 +132,7 @@ Use an empty conflicts array unless the verdict is "diverged". Do not mention to
 }
 
 func (r *run) startDivergenceTrace() {
-	r.divergenceTrace = DivergenceTrace{
+	r.divergenceTrace = divergenceTrace{
 		Schema: 1, PR: r.pr.Number, Title: r.pr.Title, Description: r.pr.Body,
 		BaseBranch: r.pr.BaseRefName, InitialHead: r.headSHA, FinalHead: r.headSHA,
 	}
@@ -140,7 +140,7 @@ func (r *run) startDivergenceTrace() {
 }
 
 func (r *run) traceReview(round int, findings review.Findings, comment string) {
-	r.divergenceTrace.Rounds = append(r.divergenceTrace.Rounds, DivergenceRoundTrace{
+	r.divergenceTrace.Rounds = append(r.divergenceTrace.Rounds, divergenceRoundTrace{
 		Round: round, ReviewedSHA: findings.HeadSHA, ReviewComment: comment,
 		ReviewCommentURL: findingsCommentURL(findings),
 		Blockers:         findings.Blockers, Critical: findings.Critical,
@@ -149,40 +149,40 @@ func (r *run) traceReview(round int, findings review.Findings, comment string) {
 	r.writeDivergenceTrace()
 }
 
-func (r *run) traceFix(round int, beforeSHA, afterSHA, tag string) {
+// traceFix records a round's fix. first is the fix step's own final message;
+// the latest message is added when a later gate or commit step wrote one.
+func (r *run) traceFix(round int, beforeSHA, afterSHA, first string) {
 	if round < 1 || round > len(r.divergenceTrace.Rounds) {
 		return
 	}
-	fix := r.newFixTrace(beforeSHA, afterSHA, tag)
+	fix := r.newFixTrace(beforeSHA, afterSHA, first)
 	r.divergenceTrace.Rounds[round-1].Fix = &fix
 	r.divergenceTrace.FinalHead = afterSHA
 	r.writeDivergenceTrace()
 }
 
-func (r *run) traceCIFix(beforeSHA, afterSHA, tag string) {
+// traceCIFix records a repair outside the review rounds; first is the repair
+// step's own final message, empty when no session made it.
+func (r *run) traceCIFix(beforeSHA, afterSHA, first string) {
 	r.divergenceTrace.CIFixes = append(r.divergenceTrace.CIFixes,
-		CIFixTrace{AfterRound: len(r.divergenceTrace.Rounds),
-			FixTrace: r.newFixTrace(beforeSHA, afterSHA, tag)})
+		ciFixTrace{AfterRound: len(r.divergenceTrace.Rounds),
+			fixTrace: r.newFixTrace(beforeSHA, afterSHA, first)})
 	r.divergenceTrace.FinalHead = afterSHA
 	r.writeDivergenceTrace()
 }
 
-func (r *run) newFixTrace(beforeSHA, afterSHA, tag string) FixTrace {
-	return FixTrace{
+func (r *run) newFixTrace(beforeSHA, afterSHA, first string) fixTrace {
+	return fixTrace{
 		BeforeSHA: beforeSHA,
 		AfterSHA:  afterSHA,
 		Commits:   r.p.Git.LogOneline(r.ctx, r.worktree, beforeSHA+".."+afterSHA),
-		Response:  r.divergenceFixResponse(tag),
+		Response:  r.divergenceFixResponse(first),
 	}
 }
 
-func (r *run) divergenceFixResponse(tag string) string {
+func (r *run) divergenceFixResponse(first string) string {
 	latest := strings.TrimSpace(r.lastMsg)
-	b, err := os.ReadFile(filepath.Join(r.msgDir, tag+".md"))
-	if err != nil {
-		return latest
-	}
-	original := strings.TrimSpace(string(b))
+	original := strings.TrimSpace(first)
 	if original == "" || original == latest {
 		return latest
 	}
@@ -196,24 +196,7 @@ func (r *run) writeDivergenceTrace() {
 	if !r.o.DivergenceScan || r.root == "" {
 		return
 	}
-	_ = writeJSONAtomic(filepath.Join(r.root, DivergenceTraceFile), r.divergenceTrace)
-}
-
-func writeJSONAtomic(path string, value any) error {
-	b, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	_ = atomicfile.WriteJSON(filepath.Join(r.root, divergenceTraceFile), r.divergenceTrace)
 }
 
 func (r *run) analyzeDivergence() (*DivergenceReport, error) {
@@ -232,14 +215,11 @@ func (r *run) analyzeDivergence() (*DivergenceReport, error) {
 	}
 	defer logFile.Close()
 
-	m := r.reviewModel
-	opts, err := engine.NewReviewer(m.Engine, engine.ReviewerOptions{
-		Bin: r.o.engineBin(m.Engine), Model: m.Name, Effort: m.Effort,
-	})
+	analyst, err := r.readOnlyReviewer()
 	if err != nil {
 		return nil, err
 	}
-	if err := opts.Aggregate(r.ctx, r.env, r.o.DivergenceTimeout,
+	if err := analyst.Prompt(r.ctx, r.env, r.o.DivergenceTimeout,
 		divergencePrompt(), rawPath, bytes.NewReader(trace), logFile); err != nil {
 		return nil, fmt.Errorf("analysis failed, see %s: %w", logPath, err)
 	}
@@ -271,7 +251,7 @@ func (r *run) analyzeDivergence() (*DivergenceReport, error) {
 }
 
 func (r *run) runDivergenceScan(res *Result) error {
-	if err := writeJSONAtomic(filepath.Join(r.root, DivergenceTraceFile), r.divergenceTrace); err != nil {
+	if err := atomicfile.WriteJSON(filepath.Join(r.root, divergenceTraceFile), r.divergenceTrace); err != nil {
 		return fmt.Errorf("writing divergence trace: %w", err)
 	}
 	r.rep.Step("Divergence analysis")
@@ -279,46 +259,32 @@ func (r *run) runDivergenceScan(res *Result) error {
 	r.rep.StepStart("Divergence analysis", r.reviewModel)
 	started := time.Now()
 
-	type scanResult struct {
+	var out struct {
 		report *DivergenceReport
 		err    error
 	}
-	done := make(chan scanResult, 1)
-	go func() {
-		report, err := r.analyzeDivergence()
-		done <- scanResult{report: report, err: err}
-	}()
-
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	var out scanResult
-	for {
-		select {
-		case out = <-done:
-			r.rep.StepEnd("Divergence analysis", r.reviewModel, time.Since(started), out.err == nil)
-			goto finished
-		case <-ticker.C:
-			r.rep.StepTick("Divergence analysis", r.reviewModel, time.Since(started))
-		case <-r.ctx.Done():
-			out = <-done
-			return out.err
-		}
+	err := r.awaitStep("Divergence analysis", r.reviewModel, started, func() error {
+		out.report, out.err = r.analyzeDivergence()
+		return out.err
+	})
+	if r.ctx.Err() != nil {
+		return err
 	}
+	r.rep.StepEnd("Divergence analysis", r.reviewModel, time.Since(started), err == nil)
 
-finished:
 	if out.err != nil {
 		return out.err
 	}
-	if err := writeJSONAtomic(filepath.Join(r.root, DivergenceResultFile), out.report); err != nil {
+	if err := atomicfile.WriteJSON(filepath.Join(r.root, divergenceResultFile), out.report); err != nil {
 		return err
 	}
 
 	var mentions []string
-	if out.report.Verdict == DivergenceDiverged || out.report.Verdict == DivergenceUncertain {
+	if out.report.Verdict == DivergenceDiverged || out.report.Verdict == divergenceUncertain {
 		mentions = divergenceMentions(r.pr.Author.Login, r.o.DivergenceEscalateTo)
 	}
 	body := renderDivergenceReport(*out.report, len(r.divergenceTrace.Rounds), mentions)
-	reportPath := filepath.Join(r.root, DivergenceReportFile)
+	reportPath := filepath.Join(r.root, divergenceReportFile)
 	if err := os.WriteFile(reportPath, []byte(body), 0o644); err != nil {
 		return err
 	}
@@ -349,11 +315,11 @@ finished:
 	return nil
 }
 
-func validateDivergenceReport(report DivergenceReport, trace DivergenceTrace) error {
+func validateDivergenceReport(report DivergenceReport, trace divergenceTrace) error {
 	if report.Schema != 1 {
 		return fmt.Errorf("divergence schema = %d, want 1", report.Schema)
 	}
-	if !slices.Contains([]string{DivergenceCumulative, DivergenceDiverged, DivergenceUncertain}, report.Verdict) {
+	if !slices.Contains([]string{divergenceCumulative, DivergenceDiverged, divergenceUncertain}, report.Verdict) {
 		return fmt.Errorf("invalid divergence verdict %q", report.Verdict)
 	}
 	if strings.TrimSpace(report.Summary) == "" || strings.TrimSpace(report.Recommendation) == "" {
@@ -377,12 +343,12 @@ func validateDivergenceReport(report DivergenceReport, trace DivergenceTrace) er
 	return nil
 }
 
-func divergenceEvidenceIndex(trace DivergenceTrace) map[int]map[string]bool {
+func divergenceEvidenceIndex(trace divergenceTrace) map[int]map[string]bool {
 	valid := map[int]map[string]bool{0: {}}
 	for _, round := range trace.Rounds {
 		valid[round.Round] = map[string]bool{round.ReviewedSHA: true}
 	}
-	addFix := func(round int, fix FixTrace) {
+	addFix := func(round int, fix fixTrace) {
 		shas, ok := valid[round]
 		if !ok {
 			return
@@ -401,7 +367,7 @@ func divergenceEvidenceIndex(trace DivergenceTrace) map[int]map[string]bool {
 		}
 	}
 	for _, fix := range trace.CIFixes {
-		addFix(fix.AfterRound, fix.FixTrace)
+		addFix(fix.AfterRound, fix.fixTrace)
 	}
 	return valid
 }

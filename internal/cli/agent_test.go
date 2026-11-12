@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -93,19 +94,20 @@ func TestWriteAgentPlistCreatesFile(t *testing.T) {
 	}
 }
 
-func TestAgentPATHIsStableAndOrdered(t *testing.T) {
-	p1 := agentPATH()
-	p2 := agentPATH()
-	if p1 != p2 {
-		t.Fatal("agentPATH is not stable across calls")
+// A local build in ~/.local/bin has to win over the Homebrew installation, so
+// the agent runs the binary the maintainer just built.
+func TestAgentPATHPutsUserBinariesBeforeHomebrew(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	parts := strings.Split(agentPATH(), ":")
+	local := slices.Index(parts, filepath.Join(home, ".local", "bin"))
+	brew := slices.Index(parts, "/opt/homebrew/bin")
+	if local < 0 || brew < 0 || local > brew {
+		t.Fatalf("agentPATH = %q, want ~/.local/bin before /opt/homebrew/bin", agentPATH())
 	}
-	if !strings.Contains(p1, "/opt/homebrew/bin") || !strings.Contains(p1, "/.local/bin") {
-		t.Fatalf("agentPATH missing expected dirs: %s", p1)
-	}
-	// No empty segments from a missing home (still has absolute system dirs).
-	for _, part := range strings.Split(p1, ":") {
+	for _, part := range parts {
 		if part == "" {
-			t.Fatalf("empty PATH segment in %q", p1)
+			t.Fatalf("empty PATH segment in %q", agentPATH())
 		}
 	}
 }

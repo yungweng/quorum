@@ -1,35 +1,32 @@
 package loop
 
 import (
-	"context"
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/review"
 )
 
 // Header is what a pipeline run announces about itself before it starts.
 type Header struct {
-	Repo         string
-	Number       int
-	Title        string
-	URL          string
-	Branch       string
-	Base         string
-	BranchOnly   bool
-	Draft        bool
-	Local        bool
-	Engine       string
-	Model        string
-	Effort       string
-	ReviewEngine string
-	ReviewModel  string
-	ReviewEffort string
-	Bypass       bool
-	Interactive  bool
-	Offline      bool
-	TestCmd      string
+	Repo       string
+	Number     int
+	Title      string
+	URL        string
+	Branch     string
+	Base       string
+	BranchOnly bool
+	Draft      bool
+	Local      bool
+	// Fix is the fix model as configured. Review carries the resolved review
+	// model and effort beside the configured review engine.
+	Fix         spec.Model
+	Review      spec.Model
+	Bypass      bool
+	Interactive bool
+	Offline     bool
+	TestCmd     string
 	// TestCmdNote names where a repo-provided test command came from, e.g.
 	// ".quorum/testcmd @ main". Empty for a flag or user-local command.
 	TestCmdNote    string
@@ -38,7 +35,6 @@ type Header struct {
 	DivergenceScan bool
 	FixTimeout     time.Duration
 	RunDir         string
-	Worktree       string
 	HeadSHA        string
 }
 
@@ -46,7 +42,7 @@ type Header struct {
 //
 // The split between StepStart/StepTick/StepEnd exists because a fix round can
 // run for an hour with nothing to show: the terminal gets a spinner with the
-// step name and elapsed time, and the full Codex output goes to the run
+// step name and elapsed time, and the full session output goes to the run
 // directory's logs.
 //
 // Every step names the model it runs on. A run has two of them, and which one a
@@ -55,9 +51,9 @@ type Header struct {
 type Reporter interface {
 	Header(Header)
 	Step(title string)
-	StepStart(label string, m engine.Model)
-	StepTick(label string, m engine.Model, elapsed time.Duration)
-	StepEnd(label string, m engine.Model, elapsed time.Duration, ok bool)
+	StepStart(label string, m spec.Model)
+	StepTick(label string, m spec.Model, elapsed time.Duration)
+	StepEnd(label string, m spec.Model, elapsed time.Duration, ok bool)
 	// Activity reports blocking work that does not run on a model. The first
 	// call carries elapsed zero; later calls update the same transient line.
 	Activity(label string, elapsed time.Duration)
@@ -83,47 +79,46 @@ type Reporter interface {
 	Notify(title, body string)
 }
 
-// NopReporter discards everything.
-type NopReporter struct{}
+type nopReporter struct{}
 
-func (NopReporter) Header(Header)                                     {}
-func (NopReporter) Step(string)                                       {}
-func (NopReporter) StepStart(string, engine.Model)                    {}
-func (NopReporter) StepTick(string, engine.Model, time.Duration)      {}
-func (NopReporter) StepEnd(string, engine.Model, time.Duration, bool) {}
-func (NopReporter) Activity(string, time.Duration)                    {}
-func (NopReporter) ActivityDone()                                     {}
-func (NopReporter) RoundResult(int, review.Findings, bool)            {}
-func (NopReporter) CIWait(int, time.Duration, string)                 {}
-func (NopReporter) CIGreen(time.Duration)                             {}
-func (NopReporter) CIRed(int, int)                                    {}
-func (NopReporter) Info(string)                                       {}
-func (NopReporter) Warn(string)                                       {}
-func (NopReporter) Questions(string)                                  {}
-func (NopReporter) Dispute(string)                                    {}
-func (NopReporter) EnvrcChanged(string)                               {}
-func (NopReporter) Prompt(string)                                     {}
-func (NopReporter) Notify(string, string)                             {}
-
-const progressInterval = time.Second
+func (nopReporter) Header(Header)                                   {}
+func (nopReporter) Step(string)                                     {}
+func (nopReporter) StepStart(string, spec.Model)                    {}
+func (nopReporter) StepTick(string, spec.Model, time.Duration)      {}
+func (nopReporter) StepEnd(string, spec.Model, time.Duration, bool) {}
+func (nopReporter) Activity(string, time.Duration)                  {}
+func (nopReporter) ActivityDone()                                   {}
+func (nopReporter) RoundResult(int, review.Findings, bool)          {}
+func (nopReporter) CIWait(int, time.Duration, string)               {}
+func (nopReporter) CIGreen(time.Duration)                           {}
+func (nopReporter) CIRed(int, int)                                  {}
+func (nopReporter) Info(string)                                     {}
+func (nopReporter) Warn(string)                                     {}
+func (nopReporter) Questions(string)                                {}
+func (nopReporter) Dispute(string)                                  {}
+func (nopReporter) EnvrcChanged(string)                             {}
+func (nopReporter) Prompt(string)                                   {}
+func (nopReporter) Notify(string, string)                           {}
 
 func (r *run) waitActivity(label string, work func() error) error {
 	defer r.rep.ActivityDone()
-	return await(r.ctx, progressInterval, func(elapsed time.Duration) {
+	return r.await(func(elapsed time.Duration) {
 		r.rep.Activity(label, elapsed)
 	}, work)
 }
 
-// await keeps progress moving while work blocks. Every production caller
-// passes work that observes ctx; after cancellation await joins it so a timed
-// out subprocess cannot keep touching the worktree after the pipeline returns.
-func await(ctx context.Context, interval time.Duration, tick func(time.Duration), work func() error) error {
+// await keeps progress moving while work blocks: tick runs at once with zero
+// elapsed time, then on every progress tick until work returns. Every
+// production caller passes work that observes the run's context; after
+// cancellation await joins it so a timed out subprocess cannot keep touching
+// the worktree after the pipeline returns.
+func (r *run) await(tick func(time.Duration), work func() error) error {
 	started := time.Now()
 	tick(0)
 	done := make(chan error, 1)
 	go func() { done <- work() }()
 
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(r.timing.progressTick())
 	defer ticker.Stop()
 	for {
 		select {
@@ -131,10 +126,20 @@ func await(ctx context.Context, interval time.Duration, tick func(time.Duration)
 			return err
 		case <-ticker.C:
 			tick(time.Since(started))
-		case <-ctx.Done():
+		case <-r.ctx.Done():
 			return <-done
 		}
 	}
+}
+
+// awaitStep is await for a reported step: label's status line ticks with the
+// time since started.
+func (r *run) awaitStep(label string, m spec.Model, started time.Time, work func() error) error {
+	return r.await(func(elapsed time.Duration) {
+		if elapsed > 0 {
+			r.rep.StepTick(label, m, time.Since(started))
+		}
+	}, work)
 }
 
 func splitLines(s string) []string {

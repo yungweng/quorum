@@ -2,10 +2,10 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/yungweng/quorum/internal/atomicfile"
 	"github.com/yungweng/quorum/internal/gh"
 )
 
@@ -34,7 +34,7 @@ func readEndStateCache(path string) map[string]string {
 		return states
 	}
 	for key, state := range file.States {
-		if validEndState(state) {
+		if gh.ValidPRState(state) {
 			states[key] = state
 		}
 	}
@@ -50,35 +50,12 @@ func writeEndStateCache(path string, states map[string]string) error {
 	}
 	clean := make(map[string]string, len(states))
 	for key, state := range states {
-		if validEndState(state) {
+		if gh.ValidPRState(state) {
 			clean[key] = state
 		}
 	}
-	b, err := json.MarshalIndent(endStateCacheFile{Schema: endStateCacheSchema, States: clean}, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-func validEndState(state string) bool {
-	switch state {
-	case gh.StateOpen, gh.StateAutoMerge, gh.StateClosed, gh.StateMerged, gh.StateUnavailable:
-		return true
-	default:
-		return false
-	}
+	return atomicfile.WriteJSON(path, endStateCacheFile{Schema: endStateCacheSchema, States: clean})
 }

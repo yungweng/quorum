@@ -64,7 +64,7 @@ func TestTruncateCutsOnColumnBoundaries(t *testing.T) {
 		{"short", 20, "short"},
 		{"exactly ten", 11, "exactly ten"},
 		{"truncate me here", 8, "truncat…"},
-		{"Jahrgangsstufenwechsel", 10, "Jahrgangs…"},
+		{"Donaudampfschifffahrt", 10, "Donaudamp…"},
 		{"anything", 0, ""},
 		{"anything", 1, "…"},
 		{"trailing space cut ", 15, "trailing space…"},
@@ -73,7 +73,7 @@ func TestTruncateCutsOnColumnBoundaries(t *testing.T) {
 		{"日本語タイトル", 6, "日本…"},
 		// A double width rune must never be cut in half.
 		{"日本語", 4, "日…"},
-		{"Zeiterfassungs-Export für später", 12, "Zeiterfassu…"},
+		{"Arbeitszeit-Export für später", 12, "Arbeitszeit…"},
 	}
 	for _, c := range cases {
 		got := Truncate(c.in, c.n)

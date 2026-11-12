@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/target"
@@ -34,7 +34,7 @@ This stale text must not be posted.`
 			t.Errorf("comment is missing %q:\n%s", want, got)
 		}
 	}
-	for _, unwanted := range []string{MarkerComment, "stale text", "abc123"} {
+	for _, unwanted := range []string{markerComment, "stale text", "abc123"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("comment contains %q:\n%s", unwanted, got)
 		}
@@ -136,14 +136,14 @@ func TestDisabledPostingSkipsPipelineComments(t *testing.T) {
 	}
 	r := &run{
 		p: &Pipeline{GH: gh.New(bin), Git: git.New(bin)},
-		o: Options{RepoRoot: dir, Post: false}, ctx: context.Background(), rep: NopReporter{},
+		o: Options{RepoRoot: dir, Post: false}, ctx: context.Background(), rep: nopReporter{},
 		pr: gh.FullPR{Number: 42}, worktree: dir,
 	}
 
 	if _, posted := r.postPRComment("fix-log comment", "safe body", ""); posted {
 		t.Fatal("disabled posting reported a pipeline comment as posted")
 	}
-	if err := r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha"); err != nil {
+	if err := r.postFixComment(fixOutcome{tag: "ci-fix-1"}, "CI fix 1", "", "", "before-sha"); err != nil {
 		t.Fatal(err)
 	}
 	if _, posted, err := r.postDisputeComment(1, "",
@@ -170,7 +170,7 @@ func TestDisputeCommentBodyLinksTheReviewAndDropsTheMarker(t *testing.T) {
 			t.Errorf("rebuttal is missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, MarkerDisputed) {
+	if strings.Contains(got, markerDisputed) {
 		t.Errorf("rebuttal leaked the internal marker:\n%s", got)
 	}
 	if got := disputeCommentBody(1, "https://example.invalid/review", "No dispute marker."); got != "" {
@@ -217,7 +217,7 @@ func TestFixCommentDoesNotClaimANoopWasFixed(t *testing.T) {
 		worktree: t.TempDir(),
 	}
 
-	if err := r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha"); err != nil {
+	if err := r.postFixComment(fixOutcome{tag: "ci-fix-1"}, "CI fix 1", "", "", "before-sha"); err != nil {
 		t.Fatal(err)
 	}
 	if len(rep.warnings) != 0 {
@@ -272,11 +272,11 @@ func TestFixCommentRejectsHeadDrift(t *testing.T) {
 	}
 	r := &run{
 		p: &Pipeline{GH: gh.New(ghBin), Git: git.New(gitBin)},
-		o: Options{RepoRoot: dir, Post: true}, ctx: context.Background(), rep: NopReporter{},
+		o: Options{RepoRoot: dir, Post: true}, ctx: context.Background(), rep: nopReporter{},
 		pr: gh.FullPR{Number: 42}, worktree: dir, headSHA: "pushed-head",
 	}
 
-	err := r.postFixComment("ci-fix-1", "CI fix 1", "", "", "before-sha")
+	err := r.postFixComment(fixOutcome{tag: "ci-fix-1"}, "CI fix 1", "", "", "before-sha")
 	if err == nil || !strings.Contains(err.Error(), "refusing to post the fix log") {
 		t.Fatalf("err = %v", err)
 	}
@@ -316,7 +316,7 @@ func TestDisputeCommentRejectsHeadDrift(t *testing.T) {
 	}
 	r := &run{
 		p: &Pipeline{GH: gh.New(bin)}, o: Options{RepoRoot: dir, Post: true},
-		ctx: context.Background(), rep: NopReporter{}, pr: gh.FullPR{Number: 42},
+		ctx: context.Background(), rep: nopReporter{}, pr: gh.FullPR{Number: 42},
 	}
 
 	_, posted, err := r.postDisputeComment(1, "",
@@ -333,7 +333,7 @@ func TestDisputeCommentRejectsHeadDrift(t *testing.T) {
 }
 
 type warningReporter struct {
-	NopReporter
+	nopReporter
 	warnings []string
 	// steps records "<label> on <tag>" per finished step, which is what a
 	// terminal line says and the only way to catch a step reporting the wrong
@@ -345,6 +345,48 @@ func (r *warningReporter) Warn(text string) {
 	r.warnings = append(r.warnings, text)
 }
 
-func (r *warningReporter) StepEnd(label string, m engine.Model, _ time.Duration, _ bool) {
+func (r *warningReporter) StepEnd(label string, m spec.Model, _ time.Duration, _ bool) {
 	r.steps = append(r.steps, label+" on "+m.Tag())
+}
+
+// A push fix runs between a round and its fix-log comment and replaces the
+// session's latest message. The comment still describes the round: it takes
+// the round's own PR COMMENT block, never the push fix's.
+func TestFixCommentUsesTheRoundsOwnMessageAfterAPushFix(t *testing.T) {
+	dir := t.TempDir()
+	posted := filepath.Join(dir, "posted")
+	gitBin := filepath.Join(dir, "git")
+	if err := os.WriteFile(gitBin, []byte("#!/bin/sh\nprintf '%s' 'abc123 Bound retries'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ghBin := filepath.Join(dir, "gh")
+	ghScript := "#!/bin/sh\n" +
+		"if test \"$1\" = pr && test \"$2\" = view; then printf pushed-head; exit 0; fi\n" +
+		"if test \"$1\" = pr && test \"$2\" = comment; then cat > '" + posted + "'; fi\n"
+	if err := os.WriteFile(ghBin, []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	round := "Round done.\n\nPR COMMENT:\nThe retry loop is bounded now."
+	r := &run{
+		p: &Pipeline{GH: gh.New(ghBin), Git: git.New(gitBin)},
+		o: Options{RepoRoot: dir, Post: true}, ctx: context.Background(), rep: nopReporter{},
+		pr: gh.FullPR{Number: 42}, worktree: dir, headSHA: "pushed-head",
+		lastMsg: "Push fix done.\n\nPR COMMENT:\nThe lint finding before the push is fixed.",
+	}
+	step := fixOutcome{tag: "fix-round-1", first: round, last: round}
+	if err := r.postFixComment(step, "Review fix round 1", "", "", "before-sha"); err != nil {
+		t.Fatal(err)
+	}
+	r.o.Offline = true
+	r.queueFixComment(step, "Review fix round 1", "before-sha")
+
+	body, err := os.ReadFile(posted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]string{"posted": string(body), "queued": strings.Join(r.pendingFixComments, "\n")} {
+		if !strings.Contains(got, "The retry loop is bounded now.") || strings.Contains(got, "lint finding") {
+			t.Errorf("%s fix log = %q, want the round's own PR COMMENT", name, got)
+		}
+	}
 }

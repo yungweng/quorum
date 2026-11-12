@@ -92,7 +92,7 @@ func (f *baseUpdateRepo) run(reviewer Reviewer, maxIter int) *run {
 		p:        &Pipeline{Git: git.New("git"), Review: reviewer},
 		o:        Options{ResolveConflicts: true, RepoRoot: f.clone, MaxIter: maxIter},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		target:   target.Target{BranchOnly: true},
 		pr:       gh.FullPR{BaseRefName: "main"},
 		branch:   "feature",
@@ -142,7 +142,7 @@ func TestConflictCheckIsOffWhenDisabled(t *testing.T) {
 		p:   &Pipeline{Git: git.New(bin)},
 		o:   Options{ResolveConflicts: false},
 		ctx: context.Background(),
-		rep: NopReporter{},
+		rep: nopReporter{},
 	}
 	if _, err := r.ensureBaseCurrent(); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ esac`)
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{ResolveConflicts: true, RepoRoot: t.TempDir()},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		pr:       gh.FullPR{BaseRefName: "main"},
 		branch:   "feature",
 		worktree: worktree,
@@ -188,7 +188,7 @@ esac`)
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{ResolveConflicts: true, RepoRoot: t.TempDir()},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		pr:       gh.FullPR{BaseRefName: "main"},
 		worktree: t.TempDir(),
 	}
@@ -270,7 +270,7 @@ esac`)
 		p:        &Pipeline{Git: git.New(bin)},
 		o:        Options{ResolveConflicts: true, BaseUpdateOnConflict: true, RepoRoot: t.TempDir()},
 		ctx:      context.Background(),
-		rep:      NopReporter{},
+		rep:      nopReporter{},
 		pr:       gh.FullPR{BaseRefName: "main"},
 		branch:   "feature",
 		worktree: worktree,
@@ -395,7 +395,7 @@ printf 'nothing to do\n' > "$out"`)
 		p:   &Pipeline{Git: git.New(gitBin)},
 		o:   Options{ResolveConflicts: true, RepoRoot: t.TempDir(), FixTimeout: time.Minute},
 		ctx: context.Background(),
-		rep: NopReporter{},
+		rep: nopReporter{},
 		pr:  gh.FullPR{Number: 42, BaseRefName: "main"},
 		// A preset session id keeps codexCall on the resume path, so the test
 		// does not depend on Codex's session files.

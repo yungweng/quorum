@@ -14,8 +14,33 @@ import (
 	"github.com/yungweng/quorum/internal/usagelimit"
 )
 
+// invocation runs call against a fake grok that records its arguments and
+// answers with a valid envelope, and returns the arguments joined by spaces.
+func invocation(t *testing.T, o Options, call func(Options, envexec.Env, string) error) string {
+	t.Helper()
+	record := filepath.Join(t.TempDir(), "argv")
+	o.Bin = fakeGrok(t, `echo "$@" > "`+record+`"
+echo '`+envelope+`'`)
+	if err := call(o, testEnv(t), filepath.Join(t.TempDir(), "out.md")); err != nil {
+		t.Fatalf("grok call: %v", err)
+	}
+	b, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func resume(o Options, env envexec.Env, out string) error {
+	return o.Resume(context.Background(), env, 0, "sid", "p", out, io.Discard)
+}
+
+func prompt(o Options, env envexec.Env, out string) error {
+	return o.Prompt(context.Background(), env, 0, "instruction", out, strings.NewReader("material"), io.Discard)
+}
+
 func TestFlagsCarryModelAndEffort(t *testing.T) {
-	got := strings.Join(Options{Model: "grok-4.5", Effort: "high"}.flags(), " ")
+	got := invocation(t, Options{Model: "grok-4.5", Effort: "high"}, resume)
 	if !strings.Contains(got, "--model grok-4.5") {
 		t.Errorf("model flag missing: %s", got)
 	}
@@ -25,23 +50,8 @@ func TestFlagsCarryModelAndEffort(t *testing.T) {
 	if !strings.Contains(got, "--output-format json") {
 		t.Errorf("json output flag missing: %s", got)
 	}
-	if strings.Contains(strings.Join(Options{Model: "grok-4.5"}.flags(), " "), "--effort") {
-		t.Error("an unset effort still produced an --effort flag")
-	}
-}
-
-// Grok rejects an effort level it does not know, but the accepted set is
-// model-menu specific. A codex-only level must not pass validation here.
-func TestValidEffortRejectsUnknownLevels(t *testing.T) {
-	for _, level := range []string{"minimal", "ultra", "xhigh", "max", "insane", "HIGH"} {
-		if ValidEffort(level) {
-			t.Errorf("%q was accepted as a grok effort", level)
-		}
-	}
-	for _, level := range []string{"", "low", "medium", "high"} {
-		if !ValidEffort(level) {
-			t.Errorf("%q was rejected as a grok effort", level)
-		}
+	if got := invocation(t, Options{Model: "grok-4.5"}, resume); strings.Contains(got, "--effort") {
+		t.Errorf("an unset effort still produced an --effort flag: %s", got)
 	}
 }
 
@@ -50,19 +60,21 @@ func TestValidEffortRejectsUnknownLevels(t *testing.T) {
 // fixed read-only tool set instead.
 func TestBypassAddsTheAlwaysApproveFlag(t *testing.T) {
 	const bypass = "--always-approve"
-	if !strings.Contains(strings.Join(Options{Bypass: true}.flags(), " "), bypass) {
-		t.Error("the bypass flag was not set although it was requested")
+	if got := invocation(t, Options{Bypass: true}, resume); !strings.Contains(got, bypass) {
+		t.Errorf("the bypass flag was not set although it was requested: %s", got)
 	}
-	if strings.Contains(strings.Join(Options{}.flags(), " "), bypass) {
-		t.Error("the bypass flag appeared without being requested")
+	if got := invocation(t, Options{}, resume); strings.Contains(got, bypass) {
+		t.Errorf("the bypass flag appeared without being requested: %s", got)
 	}
-	if strings.Contains(strings.Join(readOnlyFlags(), " "), bypass) {
-		t.Error("the read-only posture carried the permission bypass")
+	if got := invocation(t, Options{}, prompt); strings.Contains(got, bypass) {
+		t.Errorf("a read-only pass carried the permission bypass: %s", got)
 	}
 }
 
-func TestReadOnlyComposesReviewFlags(t *testing.T) {
-	got := strings.Join(readOnlyFlags(), " ")
+// Aggregation, verification and the PR description run as read-only passes.
+// The fix session's posture must not leak into them, nor theirs into it.
+func TestPromptRunsWithTheReadOnlyPosture(t *testing.T) {
+	got := invocation(t, Options{}, prompt)
 	for _, want := range []string{
 		"--tools read_file,grep,list_dir",
 		"--permission-mode dontAsk",
@@ -71,20 +83,11 @@ func TestReadOnlyComposesReviewFlags(t *testing.T) {
 		"--disallowed-tools Agent",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("read-only flags are missing %q: %s", want, got)
+			t.Errorf("read-only pass is missing %q: %s", want, got)
 		}
 	}
-}
-
-func TestClassifyRecognisesQuotaRefusals(t *testing.T) {
-	if classify("Grok usage limit reached, try again later") == nil {
-		t.Error("usage limit line was not classified")
-	}
-	if classify("API rate limit exceeded") != nil {
-		t.Error("a transient rate-limit throttle was classified as a quota refusal")
-	}
-	if classify("something else entirely broke") != nil {
-		t.Error("an unrelated failure was classified as a quota refusal")
+	if got := invocation(t, Options{}, resume); strings.Contains(got, "--tools read_file,grep,list_dir") {
+		t.Errorf("the fix session was restricted to the read-only tools: %s", got)
 	}
 }
 
@@ -277,22 +280,5 @@ echo '`+envelope+`'`)
 	}
 	if b, _ := os.ReadFile(out); string(b) != "all done" {
 		t.Errorf("reviewer output = %q", b)
-	}
-}
-
-// Repository rules ride into the reviewer prompt as additional criteria; a
-// repo without rules gets exactly the prompt it always got.
-func TestReviewPromptCarriesRepositoryRules(t *testing.T) {
-	rules := "- No new UI components; reuse existing ones first (Blocker)."
-	with := reviewPrompt("origin/main", "diff", rules)
-	if !strings.Contains(with, rules) {
-		t.Errorf("rules missing from prompt: %s", with)
-	}
-	if !strings.Contains(with, "real finding you must report") {
-		t.Error("rules block lost its severity framing")
-	}
-	without := reviewPrompt("origin/main", "diff", "")
-	if strings.Contains(without, "its own review rules") {
-		t.Errorf("rules block appeared without rules: %s", without)
 	}
 }

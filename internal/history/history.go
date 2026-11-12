@@ -18,12 +18,16 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/yungweng/quorum/internal/atomicfile"
+	"github.com/yungweng/quorum/internal/prkey"
+	"github.com/yungweng/quorum/internal/proc"
 )
 
 // Kind is what was run.
@@ -80,30 +84,22 @@ func BranchKey(repo, branch string) string {
 	return repo + "#branch:" + branch
 }
 
-// Name is the "owner/repo" part of the key, and Number the pull request.
-func (r Run) Name() string {
-	repo, _, _ := strings.Cut(r.Key, "#")
-	if _, name, ok := strings.Cut(repo, "/"); ok {
-		return name
+// Key identifies a run: the pull request, or the branch when number is zero.
+func Key(repo string, number int, branch string) string {
+	if number == 0 {
+		return BranchKey(repo, branch)
 	}
-	return repo
+	return prkey.Format(repo, number)
 }
 
-func (r Run) Number() int {
-	_, number, ok := strings.Cut(r.Key, "#")
-	if !ok {
-		return 0
-	}
-	n := 0
-	if _, err := fmt.Sscanf(number, "%d", &n); err != nil {
-		return 0
-	}
-	return n
-}
+// Name is the repository name from the key, and Number the pull request.
+func (r Run) Name() string { return prkey.Name(r.Key) }
+
+func (r Run) Number() int { return prkey.Number(r.Key) }
 
 // URL is the pull request or branch this run was about.
 func (r Run) URL() string {
-	repo, number, ok := strings.Cut(r.Key, "#")
+	repo, _, ok := strings.Cut(r.Key, "#")
 	if !ok {
 		return ""
 	}
@@ -114,11 +110,9 @@ func (r Run) URL() string {
 		}
 		return "https://github.com/" + repo + "/tree/" + strings.Join(parts, "/")
 	}
-	return "https://github.com/" + repo + "/pull/" + number
+	return prkey.URL(repo, r.Number())
 }
 
-// maxEntries is how many entries the log keeps.
-//
 // The dashboard shows at most a few dozen, but a longer tail costs almost
 // nothing and means raising the configured count does not start from an empty
 // screen. At roughly two hundred bytes an entry this is well under a hundred
@@ -139,7 +133,11 @@ func Append(path string, run Run) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	unlock, err := lock(path)
+	// Writers are serialised. Several runs can finish at the same moment, and
+	// an append is a read, a trim and a rewrite of the whole file, so two of
+	// them interleaving would drop entries. Readers take no lock: a write lands
+	// through a rename, so they only ever see a complete file.
+	unlock, err := proc.LockFile(path + ".lock")
 	if err != nil {
 		return err
 	}
@@ -153,19 +151,12 @@ func Append(path string, run Run) error {
 	return writeFile(path, runs)
 }
 
-// Read returns the newest limit runs, newest first. A limit of zero or less
-// returns everything.
-func Read(path string, limit int) []Run {
+// Read returns every run, newest first.
+func Read(path string) []Run {
 	runs := readFile(path)
 	// Stored oldest first, because appending is what happens most often.
-	out := make([]Run, 0, len(runs))
-	for i := len(runs) - 1; i >= 0; i-- {
-		out = append(out, runs[i])
-		if limit > 0 && len(out) == limit {
-			break
-		}
-	}
-	return out
+	slices.Reverse(runs)
+	return runs
 }
 
 // readFile returns the log oldest first. A line that will not parse is
@@ -210,13 +201,5 @@ func writeFile(path string, runs []Run) error {
 		b.Write(line)
 		b.WriteByte('\n')
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicfile.Write(path, []byte(b.String()))
 }

@@ -1,0 +1,7 @@
+The pipeline started merging base branch main into PR #42, but Git stopped with conflicts.
+
+Continue the active merge; do not abort or restart it. Resolve every conflict so that the intent of both sides survives; do not blindly take one side. Where base and branch changed the same behavior, prefer the base's version of unrelated changes and keep this branch's version of what the branch is about. After resolving, run the checks affected by the conflicting files, complete the merge with a clean commit message such as "Merge main into feature/crumb-tray". Do not push.
+
+End your final message with a line that is exactly:
+PR COMMENT:
+followed by a short log comment for the PR: which files conflicted and how the conflicts were resolved. Write it in the language of the PR description, plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.

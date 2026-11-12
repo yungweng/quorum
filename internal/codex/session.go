@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// SessionsDir is where the Codex CLI records its rollout files, one per
+// sessionsDir is where the Codex CLI records its rollout files, one per
 // session, bucketed by local date.
-func SessionsDir() string {
+func sessionsDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = os.Getenv("HOME")
@@ -25,9 +25,6 @@ func SessionsDir() string {
 //
 //	{"timestamp":"…","type":"session_meta","payload":{"session_id":"019f…",
 //	 "cwd":"/path/to/worktree","originator":"codex_exec",…}}
-//
-// The shell version dug the id out of the file name with a UUID regex; taking
-// it from the payload is the same value without the parse.
 type rolloutMeta struct {
 	Type    string `json:"type"`
 	Payload struct {
@@ -36,7 +33,7 @@ type rolloutMeta struct {
 	} `json:"payload"`
 }
 
-// FindSession returns the id of the Codex session whose working directory is
+// findSession returns the id of the Codex session whose working directory is
 // worktree. Every run gets its own worktree path, and that uniqueness is the
 // entire safety argument: concurrent Codex sessions started elsewhere on the
 // machine cannot match, so resuming can never hijack one of them. Keep it that
@@ -44,9 +41,9 @@ type rolloutMeta struct {
 //
 // Today's and yesterday's buckets are both searched, because a run that starts
 // before midnight resumes after it.
-func FindSession(worktree string) (string, error) {
+func findSession(worktree string) (string, error) {
 	now := time.Now()
-	root := SessionsDir()
+	root := sessionsDir()
 	dirs := []string{
 		filepath.Join(root, now.Format("2006/01/02")),
 		filepath.Join(root, now.AddDate(0, 0, -1).Format("2006/01/02")),

@@ -2,11 +2,9 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
@@ -15,8 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yungweng/quorum/internal/agentstate"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/history"
+	"github.com/yungweng/quorum/internal/proc"
 	"github.com/yungweng/quorum/internal/runner"
 	"github.com/yungweng/quorum/internal/state"
 	"github.com/yungweng/quorum/internal/ui"
@@ -50,7 +50,7 @@ func (a *app) cmdPoll(args []string) int {
 
 	// Only the poll itself is serialised. Reviews run detached and are tracked
 	// by their markers, so a long review never blocks the next poll.
-	unlock, held, err := tryLock(filepath.Join(a.p.StateDir, "poll.lock"))
+	unlock, held, err := proc.TryLockFile(a.p.PollLock())
 	if err != nil {
 		return a.die("%v", err)
 	}
@@ -114,7 +114,7 @@ func (a *app) cmdPoll(args []string) int {
 		a.log.Printf("search failed: %v", err)
 		return 1
 	}
-	a.touchHeartbeat(len(prs))
+	agentstate.WriteHeartbeat(a.p.LastPollFile(), len(prs))
 
 	if len(prs) == 0 {
 		a.log.Printf("no open review requests")
@@ -144,20 +144,20 @@ func (a *app) cmdPoll(args []string) int {
 	// An exhausted usage limit dooms every new run until the provider resets
 	// it. The records stay untouched apart from the visible queue status, so
 	// the first poll after the pause picks the same requests up again.
-	if until, paused := runner.ReadPause(a.p.StateDir); paused {
+	if until, paused := agentstate.ReadPause(a.p.StateDir); paused {
 		a.log.Printf("usage limit: paused until %s, not starting new reviews", until.Format(time.RFC3339))
 		a.markQueued(ready, state.Deferred, "usage limit, retrying after "+until.Format(time.RFC3339))
 		return 0
 	}
 
-	slots := a.cfg.MaxConcurrent - len(runner.Live(a.p.RunningDir))
+	slots := a.cfg.MaxConcurrent - len(agentstate.Live(a.p.RunningDir))
 	if slots <= 0 {
 		a.log.Printf("at capacity: %d of %d review slot(s) in use, %d waiting",
 			a.cfg.MaxConcurrent-slots, a.cfg.MaxConcurrent, len(ready))
 		a.markQueued(ready, state.Pending, "waiting for a free slot")
 		return 0
 	}
-	if load, ok := runner.LoadAvg1(); ok && a.cfg.LoadLimit > 0 && load > a.cfg.LoadLimit {
+	if load, ok := agentstate.LoadAvg1(); ok && a.cfg.LoadLimit > 0 && load > a.cfg.LoadLimit {
 		a.log.Printf("holding back: load %.1f is above the limit of %.1f", load, a.cfg.LoadLimit)
 		a.markQueued(ready, state.Deferred, "system busy")
 		return 0
@@ -258,8 +258,9 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 	// so an unchanged updatedAt means the answer from last time still holds.
 	reqAt := c.rec.SeenReqAt
 	if c.rec.TimelineAt != pr.UpdatedAt {
+		owner, _, _ := strings.Cut(repo, "/")
 		var err error
-		reqAt, err = client.LatestReviewRequest(ctx, repo, pr.Number, login, gh.TeamSlugsFor(ownerOf(repo), teams))
+		reqAt, err = client.LatestReviewRequest(ctx, repo, pr.Number, login, gh.TeamSlugsFor(owner, teams))
 		if err != nil {
 			// A failed lookup is not a decision. Say so plainly and try again
 			// on the next poll instead of recording a skip that never happened.
@@ -304,9 +305,9 @@ func (a *app) classify(ctx context.Context, client *gh.Client, pr gh.PR, login s
 }
 
 // start launches one review as a detached process that outlives this poll.
-func (a *app) start(t tools, c candidate) bool {
+func (a *app) start(t runner.Tools, c candidate) bool {
 	repo := c.pr.Repository.NameWithOwner
-	marker, got, err := runner.Acquire(a.p.RunningDir, c.key)
+	marker, got, err := agentstate.Acquire(a.p.RunningDir, c.key)
 	if err != nil {
 		a.log.Printf("%s: could not claim the review: %v", c.key, err)
 		return false
@@ -324,7 +325,7 @@ func (a *app) start(t tools, c candidate) bool {
 		a.log.Printf("%s: could not read the PR, will retry: %v", c.key, err)
 		return false
 	}
-	if details.State != "OPEN" {
+	if details.State != gh.StateOpen {
 		marker.Release()
 		a.record(c.key, func(rec *state.Record) {
 			rec.Mark(state.Skipped, "no longer open")
@@ -347,7 +348,7 @@ func (a *app) start(t tools, c candidate) bool {
 		marker.Release()
 		return false
 	}
-	cmd := exec.Command(self, "_review", c.key, repo, itoa(c.pr.Number),
+	cmd := exec.Command(self, "_review", c.key, repo, strconv.Itoa(c.pr.Number),
 		details.HeadRefOid, c.pr.Title, c.pr.Author.Login, c.reqAt, marker.Path)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	devnull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -388,7 +389,7 @@ func (a *app) cmdReviewOne(args []string) int {
 	key, repo, number, sha, title, author, reqAt, markerPath :=
 		args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]
 
-	marker := &runner.Marker{Key: key, Path: markerPath, PID: os.Getpid()}
+	marker := &agentstate.Marker{Key: key, Path: markerPath, PID: os.Getpid()}
 	defer marker.Release()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -401,15 +402,12 @@ func (a *app) cmdReviewOne(args []string) int {
 	if err := a.p.EnsureDirs(); err != nil {
 		return a.die("%v", err)
 	}
-	r := &runner.Runner{
-		Cfg: a.cfg, P: a.p, Log: a.log,
-		GitBin: t.Git, GHBin: t.GH, CodexBin: t.Codex, ClaudeBin: t.Claude, GrokBin: t.Grok, DirenvBin: t.Direnv,
-		GH: a.newGH(t.GH), Git: a.newGit(t.Git),
-	}
+	r := a.newRunner(t, a.newGH(t.GH))
 	// A finished run is the only thing that grows the cache, so the next
 	// collector has to measure instead of trusting a size from before it.
 	defer a.forgetCacheSize()
-	if err := r.Review(ctx, key, repo, atoi(number), sha, title, author, reqAt); err != nil {
+	n, _ := strconv.Atoi(number)
+	if err := r.Review(ctx, key, repo, n, sha, title, author, reqAt); err != nil {
 		return 1
 	}
 	return 0
@@ -438,10 +436,7 @@ func (a *app) forgetStalePending(prs []gh.PR) {
 	if err != nil {
 		return
 	}
-	live := map[string]bool{}
-	for _, m := range runner.Live(a.p.RunningDir) {
-		live[m.Key] = true
-	}
+	live := agentstate.LiveKeys(a.p.RunningDir)
 	for key, rec := range file.PRs {
 		queued := rec.Status == state.Pending || rec.Status == state.Deferred || rec.Status == state.Running
 		if !queued || open[key] || live[key] {
@@ -453,32 +448,16 @@ func (a *app) forgetStalePending(prs []gh.PR) {
 	}
 }
 
-// record updates the state file, and adds the change to the history log when
-// it is one the log wants. Every decision the poll reaches goes through here,
-// which is what keeps the two stores from drifting apart.
+// record is how every decision the poll reaches gets into the state file and
+// the history log.
 func (a *app) record(key string, fn func(*state.Record)) {
-	var before, after state.Record
-	capture := func(rec *state.Record) {
-		before = *rec
-		fn(rec)
-		after = *rec
+	stateErr, historyErr := history.Record(a.p.StateFile, a.p.HistoryFile, key, history.SourceAgent, fn)
+	if stateErr != nil {
+		a.log.Printf("could not update state for %s: %v", key, stateErr)
 	}
-	if err := state.Mutate(a.p.StateFile, key, capture); err != nil {
-		a.log.Printf("could not update state for %s: %v", key, err)
-		return
+	if historyErr != nil {
+		a.log.Printf("could not add %s to the history log: %v", key, historyErr)
 	}
-	if run, ok := history.FromState(key, before, after, history.SourceAgent); ok {
-		if err := history.Append(a.p.HistoryFile, run); err != nil {
-			a.log.Printf("could not add %s to the history log: %v", key, err)
-		}
-	}
-}
-
-// touchHeartbeat records that a poll completed, which is what status uses to
-// tell "the agent is loaded" from "the agent is actually working".
-func (a *app) touchHeartbeat(open int) {
-	path := filepath.Join(a.p.StateDir, "last-poll")
-	os.WriteFile(path, []byte(time.Now().Format(time.RFC3339)+" "+itoa(open)+"\n"), 0o644)
 }
 
 // clearOrphans turns interrupted reviews into failures so the next poll can
@@ -487,60 +466,29 @@ func (a *app) touchHeartbeat(open int) {
 // It lives here rather than in doctor.go because every poll starts with it:
 // it is recovery the agent does for itself, not a diagnostic somebody asks for.
 func (a *app) clearOrphans() int {
-	file, err := state.Read(a.p.StateFile)
-	if err != nil {
-		return 0
-	}
-	live := map[string]bool{}
-	for _, m := range runner.Live(a.p.RunningDir) {
-		live[m.Key] = true
-	}
-	n := 0
-	for key, rec := range file.PRs {
-		if rec.Status != state.Running || live[key] {
-			continue
-		}
+	orphans := a.orphans()
+	for _, key := range orphans {
 		a.record(key, func(r *state.Record) {
 			r.Mark(state.Failed, "the review process stopped before it finished")
 			r.Fails++
 		})
-		n++
 	}
-	return n
+	return len(orphans)
 }
 
-// ownerOf is the owner half of "owner/repo".
-func ownerOf(repo string) string {
-	owner, _, _ := strings.Cut(repo, "/")
-	return owner
-}
-
-func itoa(n int) string { return strconv.Itoa(n) }
-
-func atoi(s string) int {
-	n, _ := strconv.Atoi(s)
-	return n
-}
-
-// tryLock takes the poll lock without waiting. held is false when another poll
-// already has it.
-func tryLock(path string) (release func(), held bool, err error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, false, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+// orphans are the reviews the state file records as running although no live
+// marker holds them: their process ended without recording an outcome.
+func (a *app) orphans() []string {
+	file, err := state.Read(a.p.StateFile)
 	if err != nil {
-		return nil, false, err
+		return nil
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, false, nil
+	live := agentstate.LiveKeys(a.p.RunningDir)
+	var keys []string
+	for key, rec := range file.PRs {
+		if rec.Status == state.Running && !live[key] {
+			keys = append(keys, key)
 		}
-		return nil, false, err
 	}
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, true, nil
+	return keys
 }

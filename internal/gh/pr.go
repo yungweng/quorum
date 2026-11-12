@@ -6,15 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/yungweng/quorum/internal/firstline"
 )
 
 // FullPR is the pull request metadata the review core and the fix pipeline
-// need. The daemon's lighter Details type stays as it is; this is the superset
-// a run works from.
+// need.
 type FullPR struct {
 	Number            int    `json:"number"`
 	Title             string `json:"title"`
@@ -44,7 +44,7 @@ func (c *Client) ViewPR(ctx context.Context, dir string, number int) (FullPR, er
 	}
 	args = append(args, "--json", fullPRFields)
 
-	out, err := c.runIn(ctx, dir, args...)
+	out, err := c.run(ctx, dir, args...)
 	if err != nil {
 		return FullPR{}, err
 	}
@@ -62,7 +62,7 @@ func (c *Client) ViewPR(ctx context.Context, dir string, number int) (FullPR, er
 func (c *Client) CurrentBranchPR(ctx context.Context, dir string) (FullPR, bool, error) {
 	pr, err := c.ViewPR(ctx, dir, 0)
 	if err == nil {
-		if pr.State != "OPEN" {
+		if pr.State != StateOpen {
 			return FullPR{}, false, nil
 		}
 		return pr, true, nil
@@ -73,9 +73,8 @@ func (c *Client) CurrentBranchPR(ctx context.Context, dir string) (FullPR, bool,
 	return FullPR{}, false, err
 }
 
-// DefaultBranch returns the repository's default branch for the checkout.
 func (c *Client) DefaultBranch(ctx context.Context, dir string) (string, error) {
-	out, err := c.runIn(ctx, dir, "repo", "view", "--json", "defaultBranchRef",
+	out, err := c.run(ctx, dir, "repo", "view", "--json", "defaultBranchRef",
 		"-q", ".defaultBranchRef.name")
 	if err != nil {
 		return "", err
@@ -87,9 +86,8 @@ func (c *Client) DefaultBranch(ctx context.Context, dir string) (string, error) 
 	return branch, nil
 }
 
-// CurrentRepo returns "owner/repo" for the checkout in dir.
 func (c *Client) CurrentRepo(ctx context.Context, dir string) (string, error) {
-	out, err := c.runIn(ctx, dir, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	out, err := c.run(ctx, dir, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
 	if err != nil {
 		return "", err
 	}
@@ -103,25 +101,18 @@ func (c *Client) CurrentRepo(ctx context.Context, dir string) (string, error) {
 // HeadSHA asks GitHub what it currently considers the PR head. Used after a
 // push to confirm the new head landed before any check result is trusted.
 func (c *Client) HeadSHA(ctx context.Context, dir string, number int) (string, error) {
-	out, err := c.runIn(ctx, dir, "pr", "view", fmt.Sprint(number), "--json", "headRefOid", "-q", ".headRefOid")
+	out, err := c.run(ctx, dir, "pr", "view", fmt.Sprint(number), "--json", "headRefOid", "-q", ".headRefOid")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// Comment posts a comment from a file and returns its URL.
-func (c *Client) Comment(ctx context.Context, dir string, number int, bodyFile string) (string, error) {
-	out, err := c.runIn(ctx, dir, "pr", "comment", fmt.Sprint(number), "--body-file", bodyFile)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// CommentBody posts a comment from a string and returns its URL.
-func (c *Client) CommentBody(ctx context.Context, dir string, number int, body string) (string, error) {
-	out, err := c.runIn(ctx, dir, "pr", "comment", fmt.Sprint(number), "--body", body)
+// Comment posts a comment and returns its URL. The body goes in on stdin, so
+// gh posts it byte for byte, whatever its size.
+func (c *Client) Comment(ctx context.Context, dir string, number int, body string) (string, error) {
+	out, err := c.exec(ctx, invocation{dir: dir, stdin: []byte(body), noTimeoutRetry: true},
+		"pr", "comment", fmt.Sprint(number), "--body-file", "-")
 	if err != nil {
 		return "", err
 	}
@@ -133,7 +124,8 @@ func (c *Client) CommentBody(ctx context.Context, dir string, number int, body s
 // immediately before calling; retrying is safe because re-sending the same
 // body is idempotent.
 func (c *Client) EditPRBody(ctx context.Context, dir string, number int, bodyFile string) error {
-	_, err := c.runIn(ctx, dir, "pr", "edit", fmt.Sprint(number), "--body-file", bodyFile)
+	_, err := c.exec(ctx, invocation{dir: dir, noTimeoutRetry: true},
+		"pr", "edit", fmt.Sprint(number), "--body-file", bodyFile)
 	return err
 }
 
@@ -154,20 +146,16 @@ type PRReview struct {
 // Reviews lists every submitted review. The endpoint is paginated because a
 // long-running pull request may have more reviews than one page.
 func (c *Client) Reviews(ctx context.Context, repo string, number int) ([]PRReview, error) {
-	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number), "--paginate")
+	out, err := c.run(ctx, "", "api", fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number), "--paginate")
 	if err != nil {
 		return nil, err
 	}
 	var reviews []PRReview
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var page []PRReview
-		if err := dec.Decode(&page); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("gh api pull request reviews: %w", err)
-		}
+	if err := decodePages(out, func(page []PRReview) bool {
 		reviews = append(reviews, page...)
+		return true
+	}); err != nil {
+		return nil, fmt.Errorf("gh api pull request reviews: %w", err)
 	}
 	return reviews, nil
 }
@@ -176,11 +164,11 @@ func (c *Client) Reviews(ctx context.Context, repo string, number int) ([]PRRevi
 // be current when GitHub receives the request.
 func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, body string) (PRReview, error) {
 	// A timed-out POST may have reached GitHub. Do not retry it blindly and
-	// create duplicate reviews; a later AutoMerge run lists reviews first and
+	// create duplicate reviews; a later automerge.Run lists reviews first and
 	// can tell whether this one landed.
 	once := *c
 	once.Attempts = 1
-	out, err := once.run(ctx, "api", "--method", "POST",
+	out, err := once.run(ctx, "", "api", "--method", "POST",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, number),
 		"-f", "event=APPROVE", "-f", "commit_id="+sha, "-f", "body="+body)
 	if err != nil {
@@ -199,7 +187,7 @@ func (c *Client) ApproveHead(ctx context.Context, repo string, number int, sha, 
 // DismissReview revokes one exact submitted review. Callers only use IDs
 // returned by ApproveHead, so this cannot dismiss a pre-existing user review.
 func (c *Client) DismissReview(ctx context.Context, repo string, number int, reviewID int64, message string) error {
-	_, err := c.run(ctx, "api", "--method", "PUT",
+	_, err := c.run(ctx, "", "api", "--method", "PUT",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews/%d/dismissals", repo, number, reviewID),
 		"-f", "message="+message)
 	return err
@@ -222,7 +210,7 @@ func (c *Client) MergeHead(ctx context.Context, repo string, number int, sha str
 	default:
 		return fmt.Errorf("unsupported merge method %q", method)
 	}
-	out, err := c.run(ctx, "api", "--method", "PUT",
+	out, err := c.run(ctx, "", "api", "--method", "PUT",
 		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
 		"-f", "merge_method="+string(method), "-f", "sha="+sha)
 	if err != nil {
@@ -265,7 +253,7 @@ func (c *Client) EnqueueHead(ctx context.Context, repo string, number int, pullR
 	once.Attempts = 1
 	// -f rather than -F: -F coerces anything that parses as a number, and a
 	// head sha of only digits would then be sent as an Int and rejected.
-	out, err := once.run(ctx, "api", "graphql", "-f", "query="+mutation,
+	out, err := once.run(ctx, "", "api", "graphql", "-f", "query="+mutation,
 		"-f", "pullRequestId="+pullRequestID, "-f", "expectedHeadOid="+sha)
 	if err != nil {
 		return QueueEntry{}, err
@@ -354,7 +342,7 @@ func (c *Client) watchChecks(ctx context.Context, dir string, number int, requir
 		return ChecksFail, text, nil
 	}
 	if looksTransient(text) {
-		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstLine(text))
+		return ChecksPending, text, fmt.Errorf("%w: gh pr checks: %s", ErrTransient, firstline.Trimmed(text))
 	}
 	return ChecksFail, text, nil
 }
@@ -370,7 +358,7 @@ func reportsFailedCheck(output string) bool {
 	return false
 }
 
-// FailingCheck is one red check, as handed to the Codex fix session.
+// FailingCheck is one red check, as handed to the fix session.
 type FailingCheck struct {
 	Name        string `json:"name"`
 	Bucket      string `json:"bucket"`
@@ -381,8 +369,13 @@ type FailingCheck struct {
 
 // FailingChecks lists the checks that failed or were cancelled.
 func (c *Client) FailingChecks(ctx context.Context, dir string, number int) ([]FailingCheck, error) {
-	out, err := c.runIn(ctx, dir, "pr", "checks", fmt.Sprint(number),
+	out, err := c.run(ctx, dir, "pr", "checks", fmt.Sprint(number),
 		"--json", "name,bucket,workflow,link,description")
+	// A transient failure that outlasted its retries proves nothing about the
+	// output it left behind.
+	if errors.Is(err, ErrTransient) {
+		return nil, err
+	}
 	// gh exits nonzero when checks are red, which is precisely the case this is
 	// called in, so the output matters more than the status.
 	if len(bytes.TrimSpace(out)) == 0 {
@@ -402,47 +395,4 @@ func (c *Client) FailingChecks(ctx context.Context, dir string, number int) ([]F
 		}
 	}
 	return failed, nil
-}
-
-// runIn is run with an explicit working directory, so gh resolves the
-// repository from the checkout rather than from wherever quorum was started.
-func (c *Client) runIn(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	attempts := max(c.Attempts, 1)
-
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		runCtx, cancel := context.WithTimeout(ctx, c.Timeout)
-		cmd := exec.CommandContext(runCtx, c.Bin, args...)
-		cmd.Dir = dir
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		cancel()
-
-		if err == nil {
-			return stdout.Bytes(), nil
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		if ctx.Err() != nil {
-			return stdout.Bytes(), fmt.Errorf("gh %s: %w", args[0], ctx.Err())
-		}
-		lastErr = fmt.Errorf("gh %s: %s", strings.Join(args, " "), firstLine(msg))
-		if !looksTransient(msg) {
-			return stdout.Bytes(), lastErr
-		}
-		if attempt < attempts {
-			wait := time.Duration(attempt) * c.Backoff
-			c.logf("gh %s failed (%s), retrying in %s", args[0], firstLine(msg), wait)
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-	}
-	return nil, fmt.Errorf("%w: %v", ErrTransient, lastErr)
 }

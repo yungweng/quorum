@@ -5,33 +5,38 @@ import (
 	"testing"
 
 	"github.com/yungweng/quorum/internal/config"
+	"github.com/yungweng/quorum/internal/engine/spec"
 )
 
-func TestEngineBinaryResolvesClaudeOrErrors(t *testing.T) {
-	tls := tools{Codex: "/bin/codex", Claude: "/bin/claude", Grok: "/bin/grok"}
-	got, err := engineBinary(config.EngineClaude, tls, "--engine")
-	if err != nil || got != "/bin/claude" {
-		t.Fatalf("claude = (%q, %v)", got, err)
-	}
-	got, err = engineBinary("", tls, "--engine")
-	if err != nil || got != "/bin/codex" {
-		t.Fatalf("empty engine = (%q, %v), want the codex binary", got, err)
-	}
-	_, err = engineBinary(config.EngineClaude, tools{Codex: "/bin/codex"}, "--engine/REVIEW_ENGINE")
-	if err == nil || !strings.Contains(err.Error(), "--engine/REVIEW_ENGINE") {
-		t.Fatalf("missing claude binary: err = %v, want a hint naming the flag", err)
+func TestEngineBinaryAcceptsAFoundEngine(t *testing.T) {
+	bins := spec.Bins{spec.Codex: "/bin/codex", spec.Claude: "/bin/claude", spec.Grok: "/bin/grok"}
+	for _, eng := range []string{"", spec.Codex, spec.Claude, spec.Grok} {
+		if err := engineBinary(eng, bins, "--engine"); err != nil {
+			t.Errorf("%q: err = %v", eng, err)
+		}
 	}
 }
 
-func TestEngineBinaryResolvesGrokOrErrors(t *testing.T) {
-	tls := tools{Codex: "/bin/codex", Grok: "/bin/grok"}
-	got, err := engineBinary(config.EngineGrok, tls, "--engine")
-	if err != nil || got != "/bin/grok" {
-		t.Fatalf("grok = (%q, %v)", got, err)
+func TestEngineBinaryErrorsNameTheFlag(t *testing.T) {
+	codexOnly := spec.Bins{spec.Codex: "/bin/codex"}
+	err := engineBinary(spec.Claude, codexOnly, "--engine/REVIEW_ENGINE")
+	if err == nil || !strings.Contains(err.Error(), "--engine/REVIEW_ENGINE") {
+		t.Fatalf("missing claude binary: err = %v, want a hint naming the flag", err)
 	}
-	_, err = engineBinary(config.EngineGrok, tools{Codex: "/bin/codex"}, "--engine/FIX_ENGINE")
+	err = engineBinary(spec.Grok, codexOnly, "--engine/FIX_ENGINE")
 	if err == nil || !strings.Contains(err.Error(), "--engine/FIX_ENGINE") {
 		t.Fatalf("missing grok binary: err = %v, want a hint naming the flag", err)
+	}
+}
+
+func TestEngineBinaryNamesWhatToInstall(t *testing.T) {
+	for eng, want := range map[string]string{
+		spec.Claude: "engine claude is selected (--engine) but no claude binary was found on PATH; install Claude Code or switch back to codex",
+		spec.Grok:   "engine grok is selected (--engine) but no grok binary was found on PATH; install the Grok CLI or switch back to codex",
+	} {
+		if err := engineBinary(eng, spec.Bins{spec.Codex: "/bin/codex"}, "--engine"); err == nil || err.Error() != want {
+			t.Errorf("%s: err = %v, want %q", eng, err, want)
+		}
 	}
 }
 
@@ -54,7 +59,7 @@ func TestEngineSwitchResetsModelAndEffort(t *testing.T) {
 		}
 	}
 	claude.apply(&cfg)
-	if cfg.ReviewEngine != config.EngineClaude {
+	if cfg.ReviewEngine != spec.Claude {
 		t.Fatalf("engine = %q", cfg.ReviewEngine)
 	}
 	if cfg.ReviewModel != "" || cfg.ReviewEffort != "" {

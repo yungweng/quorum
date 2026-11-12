@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/proc"
 )
 
@@ -58,20 +58,13 @@ func (r *run) finishPRDescription(res *Result) error {
 		logFile.Close()
 		return err
 	}
-	m := r.reviewModel
-	safe, err := engine.NewReviewer(m.Engine, engine.ReviewerOptions{
-		Bin: r.o.engineBin(m.Engine), Model: m.Name, Effort: m.Effort,
-	})
+	safe, err := r.readOnlyReviewer()
 	if err != nil {
 		logFile.Close()
 		return err
 	}
-	err = await(r.ctx, progressInterval, func(elapsed time.Duration) {
-		if elapsed > 0 {
-			r.rep.StepTick(label, r.reviewModel, elapsed)
-		}
-	}, func() error {
-		return safe.DescribePR(r.ctx, r.env, finalDescriptionTimeout,
+	err = r.awaitStep(label, r.reviewModel, time.Now(), func() error {
+		return safe.Prompt(r.ctx, r.env, finalDescriptionTimeout,
 			finalDescriptionPrompt(r.pr.Number, r.pr.Title, r.pr.BaseRefName),
 			bodyPath, strings.NewReader(input), logFile)
 	})
@@ -110,7 +103,7 @@ func (r *run) checkPRDescriptionTarget(expectedHead string) error {
 	if err != nil {
 		return fmt.Errorf("checking PR before generating its final description: %w", err)
 	}
-	if latest.State != "OPEN" {
+	if latest.State != gh.StateOpen {
 		return fmt.Errorf("PR #%d became %s before its final description could be generated", r.pr.Number, latest.State)
 	}
 	if latest.HeadRefOid != expectedHead {

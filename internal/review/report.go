@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"time"
+
+	"github.com/yungweng/quorum/internal/engine/spec"
 )
 
 // RunHeader is what a run announces about itself before it starts.
@@ -22,9 +24,7 @@ type RunHeader struct {
 	Runs        int
 	Concurrency int
 	Timeout     time.Duration
-	Engine      string
-	Model       string
-	Effort      string
+	Model       spec.Model
 	RunDir      string
 }
 
@@ -52,8 +52,8 @@ type Reporter interface {
 	Done(Result)
 }
 
-// NopReporter discards everything. It is what the daemon uses: its progress
-// comes from the state file, which the dashboard reads.
+// NopReporter discards everything. The agent and babysit use it: their
+// progress reaches the dashboard through events.log and progress.json.
 type NopReporter struct{}
 
 func (NopReporter) Header(RunHeader)                                   {}

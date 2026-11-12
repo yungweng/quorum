@@ -9,11 +9,12 @@ import (
 	"strings"
 
 	"github.com/yungweng/quorum/internal/deps"
+	"github.com/yungweng/quorum/internal/git"
 )
 
 // maxPushFixes bounds how often a rejected push is handed to a fix session:
 // once for what the repository's verification reported, once for whatever that
-// repair itself broke. After that the run stops the way it always did.
+// repair itself broke. After that the run stops.
 const maxPushFixes = 2
 
 // pushLogTailLines bounds how much of the push output goes into a fix prompt.
@@ -24,11 +25,12 @@ const pushLogTailLines = 120
 // was. It carries the command output, which is what a fix session needs: for a
 // repository with pre-push verification that output is the whole complaint.
 type pushRejection struct {
-	branch  string
-	sha     string
-	out     string
-	hookOut string
-	local   bool
+	branch string
+	sha    string
+	out    string
+	// local means the pre-push verification refused before any transport;
+	// out is then the hook's own output.
+	local bool
 }
 
 func (e *pushRejection) Error() string {
@@ -48,8 +50,8 @@ func transientPrePushFailure(out string) bool {
 // repository's own verification refusing the commits, which is the one push
 // failure a fix session can repair.
 func fixablePushRejection(rejected *pushRejection) bool {
-	return rejected != nil && strings.TrimSpace(rejected.hookOut) != "" && rejected.local &&
-		!transientPrePushFailure(rejected.hookOut)
+	return rejected != nil && strings.TrimSpace(rejected.out) != "" && rejected.local &&
+		!transientPrePushFailure(rejected.out)
 }
 
 // hookConfigFiles are the files a fix session must not change to get a push
@@ -76,11 +78,7 @@ var hookConfigFiles = map[string]bool{
 // hookConfigDirs are the hook directories with the same rule.
 var hookConfigDirs = []string{".husky/", ".githooks/", ".hooks/"}
 
-// touchesHookConfig reports whether one changed path is hook configuration.
 func touchesHookConfig(path string) bool {
-	if path == RepoTestCmdPath {
-		return true
-	}
 	if hookConfigFiles[path] {
 		return true
 	}
@@ -103,18 +101,13 @@ func touchesHookConfig(path string) bool {
 // thing that decides whether the branch really arrived.
 func (r *run) pushBranchWithFixes() error {
 	cache := deps.Cache{
-		Root: r.o.DepsDir, Repo: strings.ReplaceAll(r.o.Repo, "/", "-"), Worktree: r.worktree,
+		Root: r.o.DepsDir, Repo: r.o.Repo, Worktree: r.worktree,
 	}
 	var dependencyLinks []string
 	if cache.Root != "" && cache.Repo != "" {
-		links, reused, err := cache.Link()
-		if err != nil {
+		dependencyLinks = cache.Link(func(err error) {
 			r.rep.Warn(fmt.Sprintf("dependency cache lookup failed before push: %v", err))
-		}
-		dependencyLinks = append(dependencyLinks, links...)
-		for _, project := range reused {
-			r.rep.Info("deps:     reused " + project.String())
-		}
+		}, r.rep.Info)
 	}
 	defer func() { deps.Unlink(dependencyLinks) }()
 
@@ -144,7 +137,7 @@ func (r *run) pushBranchWithFixes() error {
 			return r.ctx.Err()
 		}
 
-		logPath := filepath.Join(r.logDir, "push-last.log")
+		logPath := filepath.Join(r.logDir, pushLogFile)
 		r.rep.Warn(fmt.Sprintf("push rejected before it reached the remote; push fix %d/%d, see %s",
 			attempt, maxPushFixes, logPath))
 		number := r.pushFixTotal + 1
@@ -162,21 +155,12 @@ func (r *run) pushBranchWithFixes() error {
 		if err != nil {
 			return err
 		}
-		tag := fmt.Sprintf("push-fix-%d", number)
 		r.enter(PhaseFix)
-		if err := r.codexCall(tag, pushFixPrompt(r.branch, tailLines(logPath, pushLogTailLines))); err != nil {
-			return err
-		}
-		if err := r.questionGate(tag); err != nil {
-			return err
-		}
-		if err := r.ensureCommitted(tag); err != nil {
-			return err
-		}
-		afterSHA, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+		step, err := r.fixStep(fmt.Sprintf("push-fix-%d", number), pushFixPrompt(r.branch, tailLines(logPath, pushLogTailLines)))
 		if err != nil {
 			return err
 		}
+		afterSHA := step.head
 		if afterSHA == preSHA {
 			if err := r.requireHookUnchanged(hookStamp); err != nil {
 				return err
@@ -208,7 +192,7 @@ func (r *run) pushBranchWithFixes() error {
 		fixed = true
 		label := fmt.Sprintf("Push fix %d", number)
 		r.recordRound(label, preSHA)
-		r.queueFixComment(tag, label, preSHA)
+		r.queueFixComment(step, label, preSHA)
 
 		// The repair is code no gate has seen yet.
 		if err := r.ensureTestsGreen(); err != nil {
@@ -230,20 +214,15 @@ func (r *run) capturePushDependencies(cache deps.Cache, links *[]string) {
 	if cache.Root == "" || cache.Repo == "" {
 		return
 	}
-	captured, cached, err := cache.Capture()
-	if err != nil {
+	*links = append(*links, cache.Capture(func(err error) {
 		r.rep.Warn(fmt.Sprintf("publishing dependency trees after push repair failed: %v", err))
-	}
-	*links = append(*links, captured...)
-	for _, project := range cached {
-		r.rep.Info("deps:     cached " + project.String())
-	}
+	}, r.rep.Info)...)
 }
 
 func (r *run) remoteHead() (string, error) {
 	if r.target.BranchOnly {
 		sha, err := r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
-		if err != nil && strings.Contains(err.Error(), "could not resolve refs/heads/") {
+		if errors.Is(err, git.ErrRefNotFound) {
 			return "0000000000000000000000000000000000000000", nil
 		}
 		return sha, err

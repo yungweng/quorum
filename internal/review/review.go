@@ -1,11 +1,9 @@
-// Package review runs several independent Codex reviewers against one pull
-// request, merges their findings into a single comment, and posts it.
+// Package review runs several independent reviewer passes against one pull
+// request or branch, merges their findings into a single comment, verifies
+// it, and posts it.
 //
 // This is the core the other two halves of quorum are built on: the fix
-// pipeline loops over it, and the daemon triggers it. Both used to shell out to
-// the pr-codex-review script and then guess what it had done, one by grepping
-// its stdout for a "Run dir" line, the other by diffing directory listings of
-// the run cache. Result is now simply the return value.
+// pipeline loops over it, and the daemon triggers it.
 package review
 
 import (
@@ -23,14 +21,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/deps"
 	"github.com/yungweng/quorum/internal/engine"
+	"github.com/yungweng/quorum/internal/engine/spec"
 	"github.com/yungweng/quorum/internal/envexec"
 	"github.com/yungweng/quorum/internal/gh"
 	"github.com/yungweng/quorum/internal/git"
 	"github.com/yungweng/quorum/internal/proc"
-	"github.com/yungweng/quorum/internal/runname"
+	"github.com/yungweng/quorum/internal/rundir"
 	"github.com/yungweng/quorum/internal/runtmp"
 	"github.com/yungweng/quorum/internal/target"
 	"github.com/yungweng/quorum/internal/usagelimit"
@@ -39,8 +37,6 @@ import (
 // Failures a caller has to tell apart. The shell version signalled these as
 // exit codes 2, 3 and 4, which the CLI still maps back onto.
 var (
-	// ErrEnvrcChanged means the target touches an .envrc and no override was given.
-	ErrEnvrcChanged = errors.New("target changes an .envrc file")
 	// ErrHeadDrifted means the target received a new commit while the reviewers
 	// were running, so their findings describe code that is no longer current.
 	ErrHeadDrifted = errors.New("target head changed during review")
@@ -73,28 +69,56 @@ type RunDirError struct {
 func (e *RunDirError) Error() string { return e.Err.Error() }
 func (e *RunDirError) Unwrap() error { return e.Err }
 
-// Defaults for a run. The model and effort defaults belong to the Codex
-// engine; Claude and Grok each have their own model default and are left on
-// the CLI's own effort unless one is configured.
+// RunDirOf returns the run directory a failure happened in, or "" when err
+// does not carry one.
+func RunDirOf(err error) string {
+	var rd *RunDirError
+	if errors.As(err, &rd) {
+		return rd.RunDir
+	}
+	return ""
+}
+
+// ResumeFallbackEligible reports whether a resume attempt failed for a
+// resume-specific reason - the directory turned out unusable or held too
+// little reviewer output - rather than the pull request itself being the
+// problem. Aggregation or verification failing again on genuinely reused
+// reviewer output is not eligible: a fresh run would spend a whole reviewer
+// fan-out to hit the same wall.
+func ResumeFallbackEligible(err error) bool {
+	return errors.Is(err, ErrResumeUnusable) || errors.Is(err, ErrTooFewReviewers)
+}
+
+// ResumableRunDir returns the run directory an aggregation or verification
+// failure happened in. Its reviewers completed, so a retry can resume their
+// output instead of paying for a fresh fan-out. ok is false for any other
+// failure, and for one that does not carry its run directory.
+func ResumableRunDir(err error) (dir string, ok bool) {
+	if !errors.Is(err, ErrAggregatorInvalid) && !errors.Is(err, ErrVerifierInvalid) {
+		return "", false
+	}
+	dir = RunDirOf(err)
+	return dir, dir != ""
+}
+
+// Defaults for a run. The model and effort defaults live in the engine table
+// (spec.ReviewDefaults).
 const (
-	DefaultRuns          = 6
-	DefaultModel         = "gpt-5.6-luna"
-	DefaultEffort        = "max"
-	ClaudeDefaultModel   = "sonnet"
-	GrokDefaultModel     = "grok-4.5"
-	DefaultReviewTimeout = 45 * time.Minute
+	defaultRuns          = 6
+	defaultReviewTimeout = 45 * time.Minute
 	// prewarmTimeout bounds the single environment entry that installs
 	// dependencies before the reviewers start.
 	prewarmTimeout = 20 * time.Minute
-	// MaxRuns is a guard against a typo costing a fortune in Codex passes.
-	MaxRuns = 12
-	// runRetention and depsRetention are how long run directories and shared
-	// dependency trees survive without being used.
-	runRetention  = 7 * 24 * time.Hour
+	// maxRuns is a guard against a typo costing a fortune in reviewer passes.
+	maxRuns = 12
+	// depsRetention is how long a shared dependency tree survives without
+	// being used.
 	depsRetention = 14 * 24 * time.Hour
+	// outputSubdir is the part of a run directory that outlives its worktree:
+	// reviewer outputs, logs, the comment and findings.json.
+	outputSubdir = "output"
 )
 
-// Options configure one review run.
 type Options struct {
 	Repo    string // owner/repo
 	Number  int
@@ -132,60 +156,15 @@ type Options struct {
 	ResumeRun        string // reuse a run directory and only aggregate/post
 
 	// Paths
-	RunsDir        string   // where run directories are created
-	SharedRunsDirs []string // other run roots sharing the dependency cache
-	DepsDir        string   // shared dependency cache root
-	CodexBin       string
-	ClaudeBin      string
-	GrokBin        string
-	DirenvBin      string
+	RunsDir   string   // where run directories are created
+	RunRoots  []string // every run root sharing the dependency cache, RunsDir included
+	DepsDir   string   // shared dependency cache root
+	Bins      spec.Bins
+	DirenvBin string
 }
 
-// engineBin picks the resolved binary for the selected engine.
-func (o Options) engineBin() string {
-	switch o.Engine {
-	case engine.Claude:
-		return o.ClaudeBin
-	case engine.Grok:
-		return o.GrokBin
-	default:
-		return o.CodexBin
-	}
-}
-
-// ReviewEngineDefaults resolves engine, model and effort for any review-style
-// pass (reviewer, aggregator, verifier, description, divergence analysis):
-// an empty engine means Codex, and an engine's opinionated defaults apply
-// only when that engine is the resolved one, so a Claude or Grok run is never
-// handed a GPT model name.
-func ReviewEngineDefaults(eng, model, effort string) (string, string, string) {
-	if eng == "" {
-		eng = engine.Codex
-	}
-	switch eng {
-	case engine.Codex:
-		if model == "" {
-			model = DefaultModel
-		}
-		if effort == "" {
-			effort = DefaultEffort
-		}
-	case engine.Claude:
-		if model == "" {
-			model = ClaudeDefaultModel
-		}
-	case engine.Grok:
-		if model == "" {
-			model = GrokDefaultModel
-		}
-	}
-	return eng, model, effort
-}
-
-// Result is what a finished run produced.
 type Result struct {
 	RunDir                  string
-	OutputDir               string
 	CommentFile             string
 	CommentBody             string
 	VerificationChangesFile string
@@ -193,20 +172,27 @@ type Result struct {
 	Posted                  bool
 	Findings                Findings
 	Duration                time.Duration
-	// BaseDriftNote is set when the base branch moved during the review. The
-	// head staying put is what makes the findings still valid, so this is a
-	// note on the comment rather than a failure.
-	BaseDriftNote string
 }
 
-// Runner performs review runs.
 type Runner struct {
 	GH  *gh.Client
 	Git git.G
 	Rep Reporter
 }
 
-// Run reviews one pull request from start to finish.
+// RunWithFallback runs o. When o resumes a run directory and that fails for
+// a resume-specific reason (ResumeFallbackEligible), it hands the failure to
+// fallback and runs once more with a fresh reviewer fan-out.
+func (r *Runner) RunWithFallback(ctx context.Context, o Options, fallback func(err error)) (*Result, error) {
+	res, err := r.Run(ctx, o)
+	if err != nil && o.ResumeRun != "" && ResumeFallbackEligible(err) {
+		fallback(err)
+		o.ResumeRun = ""
+		res, err = r.Run(ctx, o)
+	}
+	return res, err
+}
+
 func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	started := time.Now()
 	o = o.withDefaults()
@@ -245,20 +231,15 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		o.Post = false
 	}
 
-	// Cache collection takes this same lock from its liveness check through
-	// dependency eviction. Create and claim the run while holding it so
-	// collection must happen wholly before this startup or see this run as live.
-	unlockCache, err := proc.LockDir(filepath.Dir(o.DepsDir))
+	// A fresh run has not linked a dependency tree yet, so the age sweep may
+	// evict trees if no older run is using them. A resumed worktree may retain
+	// links left by a hard interruption; preserve their targets until recovery
+	// has finished.
+	removed := 0
+	releaseClaim, err := rundir.Start(o.DepsDir, run.root, []string{outputSubdir}, func() {
+		removed = r.gc(ctx, o, run.root)
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(run.output, 0o755); err != nil {
-		unlockCache()
-		return nil, err
-	}
-	releaseClaim, err := proc.Claim(run.root)
-	if err != nil {
-		unlockCache()
 		return nil, err
 	}
 	defer releaseClaim()
@@ -266,7 +247,6 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	// unlike the worktree, nothing in it is needed to resume.
 	tmpDir, removeTmp, err := runtmp.New()
 	if err != nil {
-		unlockCache()
 		return nil, fmt.Errorf("create private TMPDIR: %w", err)
 	}
 	defer removeTmp()
@@ -275,13 +255,6 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 			return nil, fmt.Errorf("write run target metadata: %w", err)
 		}
 	}
-
-	// A fresh run has not linked a dependency tree yet, so the age sweep may
-	// evict trees if no older run is using them. A resumed worktree may retain
-	// links left by a hard interruption; preserve their targets until recovery
-	// has finished.
-	removed := r.gc(ctx, o, run.root)
-	unlockCache()
 	if removed > 0 {
 		rep.Info(fmt.Sprintf("gc: removed %d old cache dir(s)", removed))
 	}
@@ -294,36 +267,27 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 		Branch: pr.HeadRefName, BranchOnly: tgt.BranchOnly,
 		BaseRef: baseRef, BaseSHA: pr.BaseRefOid, HeadSHA: pr.HeadRefOid,
 		Draft: pr.IsDraft, Runs: o.Runs, Concurrency: o.Concurrency,
-		Timeout: o.ReviewTimeout, Engine: o.Engine, Model: o.Model, Effort: o.Effort, RunDir: run.root,
+		Timeout: o.ReviewTimeout, Model: spec.Model{Engine: o.Engine, Name: o.Model, Effort: o.Effort}, RunDir: run.root,
 	})
 
-	// checkout prepares the worktree and tells us what was actually reviewed.
 	reviewedBase, reviewedHead, err := r.checkout(ctx, o, run, tgt, baseBranch, baseRef)
 	if err != nil {
 		return nil, err
 	}
-	hooksPath, err := r.Git.IsolateHooks(ctx, run.worktree)
+	env, err := rundir.Isolate(ctx, r.Git, run.worktree, tmpDir, o.UseDirenv, o.DirenvBin)
 	if err != nil {
-		return nil, fmt.Errorf("isolate worktree hooks: %w", err)
-	}
-	configPath, err := r.Git.IsolateConfig(ctx, run.worktree)
-	if err != nil {
-		return nil, fmt.Errorf("isolate worktree config: %w", err)
-	}
-
-	env := envexec.Env{
-		Worktree: run.worktree, Direnv: o.UseDirenv, DirenvBin: o.DirenvBin,
-		GitConfig: configPath, GitHooksPath: hooksPath, TmpDir: tmpDir,
+		return nil, err
 	}
 	if o.UseDirenv {
-		if err := r.allowDirenv(ctx, o, run, baseRef, env, rep); err != nil {
+		// direnv allow runs unless the PR itself changed an .envrc. That
+		// refusal is the point: allowing means executing whatever the PR
+		// author put in that file, on this machine, before any human read it.
+		if _, err := rundir.AllowEnvrc(ctx, r.Git, env, baseRef, o.AllowEnvrcChange, nil, rep.Info); err != nil {
 			return nil, err
 		}
 	}
 
-	eng, err := engine.NewReviewer(o.Engine, engine.ReviewerOptions{
-		Bin: o.engineBin(), Model: o.Model, Effort: o.Effort,
-	})
+	eng, err := engine.NewReviewer(spec.Model{Engine: o.Engine, Name: o.Model, Effort: o.Effort}, o.Bins)
 	if err != nil {
 		return nil, err
 	}
@@ -405,25 +369,21 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 	}
 
 	res := &Result{
-		RunDir: run.root, OutputDir: run.output, CommentFile: run.comment,
+		RunDir: run.root, CommentFile: run.comment,
 		CommentBody:             string(commentBody),
 		VerificationChangesFile: run.changes,
-		BaseDriftNote:           driftNote,
 	}
 	res.Findings = Findings{
 		Schema: 1, PR: pr.Number, HeadSHA: reviewedHead, BaseSHA: reviewedBase,
 		ReviewersSucceeded: len(indices), ReviewersRequested: requested,
-		Blockers:    CountFile(run.comment, "Blockers"),
-		Critical:    CountFile(run.comment, "Critical"),
-		Suggestions: CountFile(run.comment, "Suggestions"),
-		Questions:   CountFile(run.comment, "Questions"),
 		CommentFile: run.comment,
 	}
+	res.Findings.countFindings(res.CommentBody)
 
 	rep.Comment(run.comment)
 
 	if o.Post {
-		url, err := r.postVerifiedComment(ctx, o, tgt, baseBranch, reviewedBase, reviewedHead, run.comment)
+		url, err := r.postVerifiedComment(ctx, o, tgt, baseBranch, reviewedBase, reviewedHead, res.CommentBody)
 		if err != nil {
 			return nil, fmt.Errorf("posting the comment: %w", err)
 		}
@@ -454,14 +414,13 @@ func (r *Runner) Run(ctx context.Context, o Options) (*Result, error) {
 // postVerifiedComment rechecks the remote head after verification, which can
 // take as long as another review pass. Findings for an older head must never be
 // posted on the current pull request.
-func (r *Runner) postVerifiedComment(ctx context.Context, o Options, tgt target.Target, baseBranch, reviewedBase, reviewedHead, comment string) (string, error) {
+func (r *Runner) postVerifiedComment(ctx context.Context, o Options, tgt target.Target, baseBranch, reviewedBase, reviewedHead, body string) (string, error) {
 	if _, err := r.checkDrift(ctx, o, tgt, baseBranch, reviewedBase, reviewedHead); err != nil {
 		return "", err
 	}
-	return r.GH.Comment(ctx, o.RepoRoot, tgt.PR.Number, comment)
+	return r.GH.Comment(ctx, o.RepoRoot, tgt.PR.Number, body)
 }
 
-// runPaths are the files one run works with.
 type runPaths struct {
 	root      string
 	output    string
@@ -477,13 +436,7 @@ type runPaths struct {
 func (o Options) runDir(number int, branch string) (runPaths, error) {
 	root := o.ResumeRun
 	if root == "" {
-		stamp := time.Now().Format("20060102-150405")
-		name := fmt.Sprintf("pr-%d", number)
-		if number == 0 {
-			name = "branch-" + runname.BranchPart(branch)
-		}
-		root = filepath.Join(o.RunsDir, fmt.Sprintf("%s-%s-%s",
-			strings.ReplaceAll(o.Repo, "/", "-"), name, stamp))
+		root = rundir.New(o.RunsDir, o.Repo, number, branch)
 	} else {
 		root = strings.TrimSuffix(root, "/")
 		abs, err := filepath.Abs(root)
@@ -492,11 +445,11 @@ func (o Options) runDir(number int, branch string) (runPaths, error) {
 		}
 		root = abs
 	}
-	out := filepath.Join(root, "output")
+	out := filepath.Join(root, outputSubdir)
 	return runPaths{
 		root:      root,
 		output:    out,
-		worktree:  filepath.Join(root, "worktree"),
+		worktree:  rundir.Worktree(root),
 		target:    filepath.Join(root, "target.json"),
 		comment:   filepath.Join(out, "final-pr-comment.md"),
 		candidate: filepath.Join(out, "aggregated-pr-comment.md"),
@@ -528,8 +481,7 @@ func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, tgt targ
 		return base, head, nil
 	}
 
-	if err := r.Git.Fetch(ctx, o.RepoRoot, "origin",
-		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)); err != nil {
+	if err := r.Git.FetchBranch(ctx, o.RepoRoot, baseBranch); err != nil {
 		return "", "", err
 	}
 	base, err := r.Git.RevParse(ctx, o.RepoRoot, baseRef)
@@ -573,44 +525,18 @@ func (r *Runner) checkout(ctx context.Context, o Options, run runPaths, tgt targ
 	return base, head, nil
 }
 
-// allowDirenv runs `direnv allow` in the worktree, unless the PR itself changed
-// an .envrc. That refusal is the point: allowing means executing whatever the
-// PR author put in that file, on this machine, before any human read it.
-func (r *Runner) allowDirenv(ctx context.Context, o Options, run runPaths, baseRef string, env envexec.Env, rep Reporter) error {
-	if !hasEnvrc(run.worktree) {
-		return nil
-	}
-	changed, err := r.Git.ChangedFiles(ctx, run.worktree, baseRef+"...HEAD", ".envrc", ":(glob)**/.envrc")
-	if err != nil {
-		return fmt.Errorf("check changed .envrc files: %w", err)
-	}
-	if changed != "" && !o.AllowEnvrcChange {
-		return fmt.Errorf("%w:\n%s\nReview the .envrc change manually, then rerun with --allow-envrc-change if it is safe",
-			ErrEnvrcChanged, changed)
-	}
-	if err := env.Allow(ctx); err != nil {
-		return fmt.Errorf("direnv allow: %w", err)
-	}
-	rep.Info("direnv allowed")
-	return nil
-}
-
 // prepareDeps links in cached dependency trees, enters the environment once so
 // the project's install hook runs at most one time, and publishes whatever it
 // installed for the next run.
 func (r *Runner) prepareDeps(ctx context.Context, o Options, run runPaths, env envexec.Env, rep Reporter) []string {
 	cache := deps.Cache{
 		Root:     o.DepsDir,
-		Repo:     strings.ReplaceAll(o.Repo, "/", "-"),
+		Repo:     o.Repo,
 		Worktree: run.worktree,
 	}
-	links, reused, err := cache.Link()
-	if err != nil {
+	links := cache.Link(func(err error) {
 		rep.Warn(fmt.Sprintf("dependency cache lookup failed: %v", err))
-	}
-	for _, p := range reused {
-		rep.Info("deps:     reused " + p.String())
-	}
+	}, rep.Info)
 
 	if o.UseDirenv {
 		started := time.Now()
@@ -622,22 +548,17 @@ func (r *Runner) prepareDeps(ctx context.Context, o Options, run runPaths, env e
 			logFile.Close()
 		}
 		if err != nil {
-			// Not fatal: the reviewers set the environment up themselves,
-			// exactly as they did before this step existed. It just costs one
-			// install per reviewer instead of one per run.
+			// Not fatal: the reviewers set the environment up themselves.
+			// It just costs one install per reviewer instead of one per run.
 			rep.Warn(fmt.Sprintf("environment prewarm failed, see %s/prewarm.log", run.output))
 		} else {
 			rep.Info(fmt.Sprintf("prewarm:  environment ready in %s", fmtDuration(time.Since(started))))
 		}
 	}
 
-	captured, cached, err := cache.Capture()
-	if err != nil {
+	captured := cache.Capture(func(err error) {
 		rep.Warn(fmt.Sprintf("publishing dependency trees failed: %v", err))
-	}
-	for _, p := range cached {
-		rep.Info("deps:     cached " + p.String())
-	}
+	}, rep.Info)
 	return append(links, captured...)
 }
 
@@ -653,7 +574,7 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 	// worktree and its dependencies are still being prepared". Without it every
 	// run looks like it is starting up until the first reviewer returns, which
 	// on a cold dependency cache is several minutes in.
-	appendEvent(run.output, "start")
+	appendEvent(run.output, eventStart)
 	sem := make(chan struct{}, o.Concurrency)
 	var wg sync.WaitGroup
 
@@ -716,13 +637,13 @@ func (r *Runner) runReviewers(ctx context.Context, o Options, run runPaths, env 
 					limitErr = err
 					cancel()
 				}
-				appendEvent(run.output, fmt.Sprintf("fail %d %d %d",
+				appendEvent(run.output, fmt.Sprintf("%s %d %d %d", eventFail,
 					idx, proc.ExitCode(err), int(elapsed.Seconds())))
 				rep.ReviewerFailed(idx, proc.ExitCode(err), elapsed, logPath)
 				return
 			}
 			done++
-			appendEvent(run.output, fmt.Sprintf("ok %d %d %d", idx, int(elapsed.Seconds()), done))
+			appendEvent(run.output, fmt.Sprintf("%s %d %d %d", eventOK, idx, int(elapsed.Seconds()), done))
 			rep.ReviewerDone(idx, elapsed, done, o.Runs)
 		}()
 	}
@@ -864,7 +785,6 @@ func (r *Runner) cleanReviewerArtifacts(ctx context.Context, run runPaths, expec
 	return nil
 }
 
-// checkDrift compares what was reviewed against what the remote holds now.
 func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, baseBranch, reviewedBase, reviewedHead string) (string, error) {
 	latestBase, err := r.Git.LsRemote(ctx, o.RepoRoot, "origin", "refs/heads/"+baseBranch)
 	if err != nil {
@@ -903,13 +823,12 @@ func (r *Runner) checkDrift(ctx context.Context, o Options, tgt target.Target, b
 func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, prompt string, reviewers int, rep Reporter) error {
 	logPath := filepath.Join(run.output, "aggregator.log")
 	var lastErr error
-	appendEvent(run.output, "aggregate")
+	appendEvent(run.output, PhaseAggregate)
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		rep.Aggregating(reviewers, attempt)
-		// The verifier's retry has always named the rejection; the aggregator
-		// retried blind, which for a deterministic formatting slip just buys
-		// the same invalid output twice.
+		// The retry names the rejection: for a deterministic formatting slip a
+		// blind retry just buys the same invalid output twice.
 		attemptPrompt := prompt
 		if attempt > 1 && lastErr != nil {
 			attemptPrompt += fmt.Sprintf("\n\nYour previous output was rejected: %v. Correct that error and return the complete comment again.", lastErr)
@@ -924,9 +843,7 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 			logFile.Close()
 			return err
 		}
-		// The shell version ran the aggregator without any timeout at all, so a
-		// hung pass stalled the run indefinitely. It gets the reviewer timeout.
-		err = eng.Aggregate(ctx, env, o.ReviewTimeout, attemptPrompt, run.candidate, all, logFile)
+		err = eng.Prompt(ctx, env, o.ReviewTimeout, attemptPrompt, run.candidate, all, logFile)
 		all.Close()
 		logFile.Close()
 
@@ -955,7 +872,7 @@ func (r *Runner) aggregate(ctx context.Context, o Options, run runPaths, env env
 func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexec.Env, eng engine.Reviewer, prompt, expectedHead string, setup setupDrift, rep Reporter) error {
 	logPath := filepath.Join(run.output, "verifier.log")
 	var lastErr error
-	appendEvent(run.output, "verify")
+	appendEvent(run.output, PhaseVerify)
 	if err := r.worktreeUnchanged(ctx, run.worktree, expectedHead, setup); err != nil {
 		return fmt.Errorf("%w before execution: %v", ErrVerifierInvalid, err)
 	}
@@ -976,7 +893,7 @@ func (r *Runner) verify(ctx context.Context, o Options, run runPaths, env envexe
 			logFile.Close()
 			return err
 		}
-		err = eng.Verify(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
+		err = eng.Prompt(ctx, env, o.ReviewTimeout, attemptPrompt, run.comment, candidate, logFile)
 		candidate.Close()
 		logFile.Close()
 		if stateErr := r.worktreeUnchanged(ctx, run.worktree, expectedHead, setup); stateErr != nil {
@@ -1031,43 +948,11 @@ func (r *Runner) worktreeUnchanged(ctx context.Context, worktree, expectedHead s
 // gc drops run directories and shared dependency trees nothing has needed for a
 // while, and clears worktree registrations left behind by killed runs.
 func (r *Runner) gc(ctx context.Context, o Options, current string) int {
-	removed := 0
-	otherLive := false
-	entries, err := os.ReadDir(o.RunsDir)
-	if err == nil {
-		cutoff := time.Now().Add(-runRetention)
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			dir := filepath.Join(o.RunsDir, e.Name())
-			if proc.Claimed(dir) {
-				if dir != current {
-					otherLive = true
-				}
-				continue
-			}
-			info, err := e.Info()
-			if err != nil || !info.ModTime().Before(cutoff) {
-				continue
-			}
-			// Unregister before deleting, or git keeps a dangling worktree
-			// entry that later prunes have to clean up.
-			r.Git.WorktreeRemove(ctx, o.RepoRoot, filepath.Join(dir, "worktree"))
-			if cachefs.RemoveAll(dir) == nil {
-				removed++
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		// An unreadable run root may contain a live claim. Preserve shared
-		// trees rather than severing a dependency link we could not inspect.
-		otherLive = true
-	}
-	for _, root := range o.SharedRunsDirs {
-		if claimedRunIn(root) {
-			otherLive = true
-			break
-		}
+	removed, otherLive := rundir.Sweep(ctx, r.Git, o.RepoRoot, o.RunsDir, current)
+	if !otherLive {
+		otherLive = slices.ContainsFunc(o.RunRoots, func(root string) bool {
+			return filepath.Clean(root) != filepath.Clean(o.RunsDir) && rundir.AnyClaimed(root)
+		})
 	}
 	// A live run may have a node_modules symlink into any shared tree. A
 	// fresh current run is safe to exclude because startup holds the cache lock
@@ -1076,35 +961,19 @@ func (r *Runner) gc(ctx context.Context, o Options, current string) int {
 		cache := deps.Cache{Root: o.DepsDir}
 		removed += cache.GC(depsRetention)
 	}
-	r.Git.WorktreePrune(ctx, o.RepoRoot)
 	return removed
-}
-
-// claimedRunIn reports conservatively: an unreadable root may hide a live
-// claim, while a root that has never been created cannot.
-func claimedRunIn(root string) bool {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return !os.IsNotExist(err)
-	}
-	for _, e := range entries {
-		if e.IsDir() && proc.Claimed(filepath.Join(root, e.Name())) {
-			return true
-		}
-	}
-	return false
 }
 
 func (o Options) withDefaults() Options {
 	if o.Runs == 0 {
-		o.Runs = DefaultRuns
+		o.Runs = defaultRuns
 	}
 	if o.Concurrency == 0 {
 		o.Concurrency = o.Runs
 	}
-	o.Engine, o.Model, o.Effort = ReviewEngineDefaults(o.Engine, o.Model, o.Effort)
+	o.Engine, o.Model, o.Effort = spec.ReviewDefaults(o.Engine, o.Model, o.Effort)
 	if o.ReviewTimeout == 0 {
-		o.ReviewTimeout = DefaultReviewTimeout
+		o.ReviewTimeout = defaultReviewTimeout
 	}
 	return o
 }
@@ -1113,8 +982,8 @@ func (o Options) validate() error {
 	if o.Runs < 1 {
 		return fmt.Errorf("runs must be >= 1")
 	}
-	if o.Runs > MaxRuns {
-		return fmt.Errorf("runs must be <= %d", MaxRuns)
+	if o.Runs > maxRuns {
+		return fmt.Errorf("runs must be <= %d", maxRuns)
 	}
 	if o.Concurrency < 1 {
 		return fmt.Errorf("concurrency must be >= 1")
@@ -1122,11 +991,11 @@ func (o Options) validate() error {
 	if o.MinSuccessful < 0 {
 		return fmt.Errorf("min-successful must be >= 1")
 	}
-	if !engine.Valid(o.Engine) {
-		return fmt.Errorf("engine must be %s, %s or %s", engine.Codex, engine.Claude, engine.Grok)
+	if !spec.Valid(o.Engine) {
+		return fmt.Errorf("engine must be %s", spec.Choices())
 	}
-	if !engine.ValidEffort(o.Engine, o.Effort) {
-		return fmt.Errorf("effort must be one of: %s", strings.Join(engine.Efforts(o.Engine), ", "))
+	if !spec.ValidEffort(o.Engine, o.Effort) {
+		return fmt.Errorf("effort must be one of: %s", strings.Join(spec.Efforts(o.Engine), ", "))
 	}
 	if o.Repo == "" || o.RepoRoot == "" {
 		return fmt.Errorf("repo and repo root are required")
@@ -1158,7 +1027,6 @@ func requestedReviewers(runs, available int, resumed bool) int {
 	return runs
 }
 
-// reviewerOutputs lists the indices of reviewer passes that produced output.
 func reviewerOutputs(dir string) ([]int, error) {
 	matches, err := filepath.Glob(filepath.Join(dir, "reviewer-*.md"))
 	if err != nil {
@@ -1173,6 +1041,13 @@ func reviewerOutputs(dir string) ([]int, error) {
 	}
 	sort.Ints(out)
 	return out, nil
+}
+
+// HasReviewerOutput reports whether the run directory runDir holds the output
+// of at least one reviewer pass, which is what resuming it reuses.
+func HasReviewerOutput(runDir string) bool {
+	indices, err := reviewerOutputs(filepath.Join(runDir, outputSubdir))
+	return err == nil && len(indices) > 0
 }
 
 // collectReviewers concatenates the reviewer outputs into the aggregator input.
@@ -1190,43 +1065,6 @@ func collectReviewers(dir string, indices []int) error {
 	return os.WriteFile(filepath.Join(dir, "all-reviewers.md"), []byte(b.String()), 0o644)
 }
 
-func hasEnvrc(root string) bool {
-	found := false
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil //nolint:nilerr // an unreadable subtree is not an answer
-		}
-		if d.IsDir() && d.Name() == ".git" {
-			return filepath.SkipDir
-		}
-		if !d.IsDir() && d.Name() == ".envrc" {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return found
-}
-
 func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
-}
-
-// appendEvent records one reviewer outcome in the run's event log.
-//
-// The log is how a separate process watches a review in flight: the daemon's
-// dashboard counts these lines to show "4/6 reviewers done" for a run it did
-// not start and cannot call back into. Its existence is itself the signal that
-// the reviewers have started, which is why runReviewers writes a "start" line
-// before any of them can finish. Outcome lines are appended under the reviewer
-// mutex and the start line is written before the reviewers exist, so the
-// appends are already serialised.
-func appendEvent(outputDir, line string) {
-	f, err := os.OpenFile(filepath.Join(outputDir, "events.log"),
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintln(f, line)
 }

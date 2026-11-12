@@ -1,11 +1,9 @@
 package gh
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/url"
 	"slices"
 	"strings"
@@ -31,7 +29,7 @@ type CommitCheck struct {
 // Unlike `gh pr checks`, which answers for whatever GitHub currently takes to
 // be the PR head, this is bound to the sha it is asked about.
 func (c *Client) CommitChecks(ctx context.Context, repo, sha string) ([]CommitCheck, error) {
-	out, err := c.run(ctx, "api", "--paginate",
+	out, err := c.run(ctx, "", "api", "--paginate",
 		fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100&filter=latest", repo, sha))
 	if err != nil {
 		return nil, err
@@ -43,21 +41,18 @@ func (c *Client) CommitChecks(ctx context.Context, repo, sha string) ([]CommitCh
 		Conclusion string `json:"conclusion"`
 	}
 	newest := map[string]checkRun{}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var page struct {
-			CheckRuns []checkRun `json:"check_runs"`
-		}
-		if err := dec.Decode(&page); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("gh api check runs: %w", err)
-		}
+	type checkRunsPage struct {
+		CheckRuns []checkRun `json:"check_runs"`
+	}
+	if err := decodePages(out, func(page checkRunsPage) bool {
 		for _, run := range page.CheckRuns {
 			if prev, ok := newest[run.Name]; !ok || run.ID > prev.ID {
 				newest[run.Name] = run
 			}
 		}
+		return true
+	}); err != nil {
+		return nil, fmt.Errorf("gh api check runs: %w", err)
 	}
 	var checks []CommitCheck
 	for _, run := range newest {
@@ -65,7 +60,7 @@ func (c *Client) CommitChecks(ctx context.Context, repo, sha string) ([]CommitCh
 	}
 
 	// The combined status already holds only the newest status per context.
-	out, err = c.run(ctx, "api", fmt.Sprintf("repos/%s/commits/%s/status?per_page=100", repo, sha))
+	out, err = c.run(ctx, "", "api", fmt.Sprintf("repos/%s/commits/%s/status?per_page=100", repo, sha))
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +98,6 @@ type WorkflowRun struct {
 	URL        string `json:"html_url"`
 }
 
-// Bucket classifies the run the way a check is classified.
 func (w WorkflowRun) Bucket() string { return runBucket(w.Status, w.Conclusion) }
 
 // WorkflowRuns lists the Actions runs of one exact commit. A workflow that ran
@@ -115,7 +109,7 @@ func (w WorkflowRun) Bucket() string { return runBucket(w.Status, w.Conclusion) 
 // a workflow file GitHub could not parse: such a run reports no check at all,
 // so a check list alone cannot tell it from a run that never existed.
 func (c *Client) WorkflowRuns(ctx context.Context, repo, sha string) ([]WorkflowRun, error) {
-	out, err := c.run(ctx, "api", "--paginate",
+	out, err := c.run(ctx, "", "api", "--paginate",
 		fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", repo, url.QueryEscape(sha)))
 	if err != nil {
 		return nil, err
@@ -125,22 +119,19 @@ func (c *Client) WorkflowRuns(ctx context.Context, repo, sha string) ([]Workflow
 		event    string
 	}
 	newest := map[key]WorkflowRun{}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var page struct {
-			WorkflowRuns []WorkflowRun `json:"workflow_runs"`
-		}
-		if err := dec.Decode(&page); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("gh api workflow runs: %w", err)
-		}
+	type workflowRunsPage struct {
+		WorkflowRuns []WorkflowRun `json:"workflow_runs"`
+	}
+	if err := decodePages(out, func(page workflowRunsPage) bool {
 		for _, run := range page.WorkflowRuns {
 			k := key{run.WorkflowID, run.Event}
 			if prev, ok := newest[k]; !ok || run.ID > prev.ID {
 				newest[k] = run
 			}
 		}
+		return true
+	}); err != nil {
+		return nil, fmt.Errorf("gh api workflow runs: %w", err)
 	}
 	runs := make([]WorkflowRun, 0, len(newest))
 	for _, run := range newest {
@@ -159,31 +150,31 @@ func (c *Client) WorkflowRuns(ctx context.Context, repo, sha string) ([]Workflow
 // workflow file. A repository without one never gets an Actions run, so there
 // is nothing to wait for.
 func (c *Client) HasActiveWorkflows(ctx context.Context, repo string) (bool, error) {
-	out, err := c.run(ctx, "api", "--paginate", fmt.Sprintf("repos/%s/actions/workflows?per_page=100", repo))
+	out, err := c.run(ctx, "", "api", "--paginate", fmt.Sprintf("repos/%s/actions/workflows?per_page=100", repo))
 	if err != nil {
 		return false, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var page struct {
-			Workflows []struct {
-				Path  string `json:"path"`
-				State string `json:"state"`
-			} `json:"workflows"`
-		}
-		if err := dec.Decode(&page); err == io.EOF {
-			return false, nil
-		} else if err != nil {
-			return false, fmt.Errorf("gh api workflows: %w", err)
-		}
+	type workflowsPage struct {
+		Workflows []struct {
+			Path  string `json:"path"`
+			State string `json:"state"`
+		} `json:"workflows"`
+	}
+	active := false
+	if err := decodePages(out, func(page workflowsPage) bool {
 		for _, wf := range page.Workflows {
 			// Dynamic workflows (code scanning default setup, Dependabot) have
 			// no file and are not started by a pushed pull request head.
 			if wf.State == "active" && strings.HasPrefix(wf.Path, ".github/workflows/") {
-				return true, nil
+				active = true
+				return false
 			}
 		}
+		return true
+	}); err != nil {
+		return false, fmt.Errorf("gh api workflows: %w", err)
 	}
+	return active, nil
 }
 
 // RequiredChecks lists the status check contexts the base branch requires,
@@ -193,7 +184,7 @@ func (c *Client) HasActiveWorkflows(ctx context.Context, repo string) (bool, err
 // cannot show.
 func (c *Client) RequiredChecks(ctx context.Context, repo, branch string) ([]string, error) {
 	escaped := url.PathEscape(branch)
-	out, err := c.run(ctx, "api", fmt.Sprintf("repos/%s/branches/%s", repo, escaped))
+	out, err := c.run(ctx, "", "api", fmt.Sprintf("repos/%s/branches/%s", repo, escaped))
 	if err != nil {
 		return nil, err
 	}
@@ -228,25 +219,19 @@ func (c *Client) RequiredChecks(ctx context.Context, repo, branch string) ([]str
 		}
 	}
 
-	out, err = c.run(ctx, "api", "--paginate", fmt.Sprintf("repos/%s/rules/branches/%s?per_page=100", repo, escaped))
+	out, err = c.run(ctx, "", "api", "--paginate", fmt.Sprintf("repos/%s/rules/branches/%s?per_page=100", repo, escaped))
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var rules []struct {
-			Type       string `json:"type"`
-			Parameters struct {
-				RequiredStatusChecks []struct {
-					Context string `json:"context"`
-				} `json:"required_status_checks"`
-			} `json:"parameters"`
-		}
-		if err := dec.Decode(&rules); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("gh api branch rules: %w", err)
-		}
+	type rule struct {
+		Type       string `json:"type"`
+		Parameters struct {
+			RequiredStatusChecks []struct {
+				Context string `json:"context"`
+			} `json:"required_status_checks"`
+		} `json:"parameters"`
+	}
+	if err := decodePages(out, func(rules []rule) bool {
 		for _, rule := range rules {
 			if rule.Type != "required_status_checks" {
 				continue
@@ -255,6 +240,9 @@ func (c *Client) RequiredChecks(ctx context.Context, repo, branch string) ([]str
 				add(ch.Context)
 			}
 		}
+		return true
+	}); err != nil {
+		return nil, fmt.Errorf("gh api branch rules: %w", err)
 	}
 	slices.Sort(required)
 	return required, nil
