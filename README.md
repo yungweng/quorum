@@ -228,6 +228,14 @@ The wait for protected checks and mergeability defaults to two hours;
 set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these
 settings with `quorum config` or in the config file.
 
+To merge one babysit run without changing the config, pass the flag. The
+suggestion round would push commits the review never saw, so turn it off when
+the merge matters more:
+
+```bash
+quorum babysit 42 --auto-merge --no-fix-suggestions
+```
+
 **The fix sessions run with the engine sandbox and approvals bypassed**, which gives them full
 file and network access on your machine. `--sandboxed` opts out. Read
 [what that means](docs/reference.md#it-runs-unattended) before the first run.

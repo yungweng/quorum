@@ -141,6 +141,7 @@ generation.
 | `--local` | Ignore any open PR and work on the pushed branch only | off |
 | `--no-resolve-conflicts` | Do not update the branch from its base | base updates on |
 | `--no-fix-suggestions` | Skip the suggestion triage round after a clean review | round on |
+| `--auto-merge` | Approve and merge the reviewed head after a clean final review | off, or `AUTO_MERGE=1` |
 | `--sandboxed` | Use the engine's own sandbox and approval defaults | off |
 | `--interactive` | Ask at gates instead of deciding autonomously | off |
 | `--verbose` | Stream the full output instead of the status line | off |
@@ -420,7 +421,10 @@ agent's log name the line.
 ### Auto-merge
 
 `AUTO_MERGE` defaults to `0` and is one switch for every source: agent runs,
-`quorum review`, `quorum run` and `quorum babysit`. The retired per-source keys
+`quorum review`, `quorum run` and `quorum babysit`. `quorum babysit
+--auto-merge` turns it on for that one run; the author whitelist, the timeout
+and every skip below still apply, and the flag is refused with `--local` or
+`POST=0`, which post no review to merge. The retired per-source keys
 are still read for migration: `AUTO_MERGE_AGENT` carries its value over,
 `AUTO_MERGE_REVIEW` and `AUTO_MERGE_BABYSIT` are ignored, and all three are
 removed when the file is rewritten.

@@ -619,3 +619,36 @@ func TestCIWaitLineNamesTheReviewBesideIt(t *testing.T) {
 		t.Fatalf("plain CI wait lines = %q, want %q", out.String(), want)
 	}
 }
+
+func TestBabysitAutoMergeFlagTurnsTheSwitchOnForOneRun(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		argv    []string
+		cfg     config.Config
+		want    bool
+		wantErr string
+	}{
+		{name: "off without flag or config", argv: []string{"42"}, cfg: config.Config{Post: true}},
+		{name: "config alone", argv: []string{"42"}, cfg: config.Config{Post: true, AutoMerge: true}, want: true},
+		{name: "flag alone", argv: []string{"42", "--auto-merge"}, cfg: config.Config{Post: true}, want: true},
+		{name: "flag with local", argv: []string{"--auto-merge", "--local"}, cfg: config.Config{Post: true}, wantErr: "--local"},
+		{name: "flag without posting", argv: []string{"42", "--auto-merge"}, wantErr: "POST=0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := parseArgs(test.argv, babysitFlags)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := babysitAutoMerge(test.cfg, args)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("babysitAutoMerge = %v, %v; want %v", got, err, test.want)
+			}
+		})
+	}
+}
