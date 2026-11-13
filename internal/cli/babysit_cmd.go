@@ -34,10 +34,27 @@ var babysitFlags = flagSet{
 	"max-iter": takesValue, "max-ci-fixes": takesValue, "fix-timeout": takesValue,
 	"offline": noValue, "online": noValue, "test-cmd": takesValue,
 	"divergence-scan": noValue, "draft": noValue, "local": noValue,
-	"no-resolve-conflicts": noValue, "no-fix-suggestions": noValue,
+	"no-resolve-conflicts": noValue, "no-fix-suggestions": noValue, "auto-merge": noValue,
 	"sandboxed": noValue, "interactive": noValue, "verbose": noValue, "no-notify": noValue,
 	"no-direnv": noValue, "allow-envrc-change": noValue, "keep-worktree": noValue,
 	"h": noValue, "help": noValue,
+}
+
+// babysitAutoMerge says whether this run may merge. --auto-merge turns the
+// configured switch on for one run and never off. A run that posts no review
+// can never merge, so asking for both fails instead of ending in a silent
+// no-op.
+func babysitAutoMerge(cfg config.Config, args *args) (bool, error) {
+	if !args.boolean("auto-merge") {
+		return cfg.AutoMerge, nil
+	}
+	if args.boolean("local") {
+		return false, errors.New("--auto-merge needs a pull request; --local posts nothing to merge")
+	}
+	if !cfg.Post {
+		return false, errors.New("--auto-merge needs a posted review; POST=0 posts nothing to merge")
+	}
+	return true, nil
 }
 
 func (a *app) cmdBabysit(argv []string) int {
@@ -73,6 +90,10 @@ func (a *app) cmdBabysit(argv []string) int {
 	}
 	if args.boolean("offline") && args.boolean("online") {
 		return a.die("--offline and --online exclude each other")
+	}
+	autoMerge, err := babysitAutoMerge(a.cfg, args)
+	if err != nil {
+		return a.die("%v", err)
 	}
 
 	o := runner.LoopOptions(a.cfg, a.p, t, repo, repoRoot, number)
@@ -174,7 +195,7 @@ func (a *app) cmdBabysit(argv []string) int {
 	var mergeResult automerge.Result
 	var mergeErr error
 	if err == nil && res != nil {
-		merge, skip := automerge.Decide(a.cfg.AutoMerge, a.cfg.Post, res.LastFindings.MergeEligible(),
+		merge, skip := automerge.Decide(autoMerge, a.cfg.Post, res.LastFindings.MergeEligible(),
 			res.PR.IsDraft, res.SuggestionCommits)
 		if skip != "" {
 			rep.Info("auto-merge: skipped, " + skip)
@@ -342,6 +363,11 @@ another review. FIX_SUGGESTIONS=0 or --no-fix-suggestions turns that off. When
 that round pushes commits, auto-merge is skipped because the review never saw
 them.
 
+--auto-merge approves and merges the reviewed head after a clean final review,
+for this run only, as AUTO_MERGE=1 does for every run. AUTO_MERGE_AUTHORS and
+AUTO_MERGE_TIMEOUT still apply. Pair it with --no-fix-suggestions when the
+merge matters more than the leftover Suggestions.
+
 The fix sessions run with the engine's sandbox and approvals bypassed by
 default (codex: --dangerously-bypass-approvals-and-sandbox, claude:
 --dangerously-skip-permissions, grok: --always-approve): they must run tests,
@@ -371,6 +397,8 @@ Options:
                          post nothing to GitHub
   --no-resolve-conflicts Do not update the branch from its base
   --no-fix-suggestions   Skip the suggestion triage round after a clean review
+  --auto-merge           Approve and merge the reviewed head after a clean
+                         final review (standing default: AUTO_MERGE=1)
   --sandboxed            Use the engine's own sandbox/approval defaults
   --interactive          Ask at gates instead of deciding autonomously
   --verbose              Stream the full output instead of the status line
